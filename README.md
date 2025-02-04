@@ -1,4 +1,4 @@
-SpaceHASTEN version 0.1, Developed by Tuomo Kalliokoski, Orion Pharma <tuomo.kalliokoski at orionpharma.com>, 2024-09-10
+SpaceHASTEN version 0.2, Developed by Tuomo Kalliokoski, Orion Pharma <tuomo.kalliokoski at orionpharma.com>, 2025-02-03
 
 # Introduction
 
@@ -9,9 +9,9 @@ Only Linux is supported (tested on Ubuntu 22.04.4 and Rocky Linux 8.8).
 
 SpaceHASTEN requires following commercial software:
 
-* Schrödinger Suite (version 2023-4): phase/ligprep, glide, python API (run)[https://www.schrodinger.com/release-download/]
-* SpaceLight (version 1.3.0)[https://www.biosolveit.de/download/?product=spacelight]
-* FTrees (version 6.11.0)[https://www.biosolveit.de/download/?product=ftrees]
+* Schrödinger Suite (version 2024-4): phase/ligprep, glide, python API (run)[https://www.schrodinger.com/release-download/]
+* SpaceLight (version 1.5.0)[https://www.biosolveit.de/download/?product=spacelight]
+* FTrees (version 6.13.0)[https://www.biosolveit.de/download/?product=ftrees]
 
 Depending where you work, anaconda3 [may or may not be free for you][https://www.anaconda.com/pricing]:
 * miniconda3[https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh]
@@ -41,7 +41,7 @@ Download them from BiosolveIT:[https://www.biosolveit.de/chemical-spaces/]
 Enamine provides diverse sets of Enamine REAL compounds that are good sources of seed molecules for Enamine REALSpace searches.
 Download Enamine REAL lead-like subset:[https://enamine.net/compound-collections/real-compounds/real-database-subsets]
 
-For more information, please see the manuscript describing how the method works. [https://chemrxiv.org/engage/chemrxiv/article-details/66fa5756cec5d6c142a7aa01]
+For more information, please see the publication describing on how the method works. [https://doi.org/10.1021/acs.jcim.4c01790]
 
 # Installation and useage
 
@@ -51,3 +51,8 @@ If you still think that you have all pieces in place, follow these instructions:
 * Check out this repository to some temporary directory: `git clone https://github.com/TuomoKalliokoski/SpaceHASTEN`
 * Go to that directory and run the installer: `cd SpaceHASTEN ; python3 install_spacehasten.py`
 * Start verify script as suggested by the installer to see that everything is running smoothly.
+
+# Version history
+
+* 0.1: initial version
+* 0.2: updated the code for new versions of BioSolveIT tools (change in the output similarity-field).
