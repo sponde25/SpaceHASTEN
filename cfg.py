@@ -1,6 +1,6 @@
 # SpaceHASTEN: configuration
 #
-# Copyright (c) 2024 Orion Corporation
+# Copyright (c) 2024-2025 Orion Corporation
 # 
 # Redistribution and use in source and binary forms, with or without 
 # modification, are permitted provided that the following conditions are met:
@@ -37,12 +37,12 @@ class SpaceHASTENConfiguration:
     CONTROL_EXE = SPACEHASTEN_DIRECTORY+"/control.py"
     CHUNKPREDICT_EXE = SPACEHASTEN_DIRECTORY+"/chunkpredict.py"
     EXPORTPOSES_EXE = "$SCHRODINGER/run " + SPACEHASTEN_DIRECTORY + "/export_poses.py"
-    SPACEHASTEN_VERSION=0.1
+    SPACEHASTEN_VERSION=0.2
     MAX_CORES = 250
-    EXE_SPACELIGHT_DEFAULT = "/data/programs/BiosolveIT/spacelight-1.3.0-Linux-x64/spacelight"
-    EXE_FTREES_DEFAULT = "/data/programs/BiosolveIT/ftrees-6.11.0-Linux-x64/ftrees"
+    EXE_SPACELIGHT_DEFAULT = "/data/programs/BiosolveIT/spacelight-1.5.0-Linux-x64/spacelight"
+    EXE_FTREES_DEFAULT = "/data/programs/BiosolveIT/ftrees-6.13.0-Linux-x64/ftrees"
     SPACES_DIR_DEFAULT = "/data/programs/BiosolveIT/spaces"
-    SPACES_FILE_DEFAULT = "/data/programs/BiosolveIT/spaces/REALSpace_48bn_2024-02.space"
+    SPACES_FILE_DEFAULT = "/data/programs/BiosolveIT/spaces/REALSpace_70bn_2024-09.space"
     QUERIES_DEFAULT = 1000
     DOCKING_DEFAULT = 1000000
     DOCKING_CHUNK = 1000
@@ -70,10 +70,12 @@ class SpaceHASTENConfiguration:
     FIELD_SMILES_DEFAULT = "SMILES"
     FIELD_TITLE_DEFAULT = "title"
     FIELD_SCORE_DEFAULT = "r_i_docking_score"
+    FIELD_SIMILARITY_SPACELIGHT = "fingerprint-similarity"
+    FIELD_SIMILARITY_FTREES = "pharmacophore-similarity"
     SLURM_PARTITION = "jobs"
     SLURM_PREPARE_ANACONDA = "source /data/programs/oce/actoce"
     SLURM_ACTIVATE_CHEMPROP = "conda activate chemprop"
-    SLURM_GPU_PARAMETER = "-w lfies-docki"
+    SLURM_GPU_PARAMETER = "--gpus=1"
     SLURM_GPU_EXCLUSIVE = "1"
     SLURM_CPU_COUNT_SEARCH = "2"
     SLURM_CPU_COUNT_DOCK = "1"
