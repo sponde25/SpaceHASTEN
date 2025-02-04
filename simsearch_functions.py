@@ -1,6 +1,6 @@
 # SpaceHASTEN: functions to do the similarity searching
 #
-# Copyright (c) 2024 Orion Corporation
+# Copyright (c) 2024-2025 Orion Corporation
 # 
 # Redistribution and use in source and binary forms, with or without 
 # modification, are permitted provided that the following conditions are met:
@@ -74,10 +74,14 @@ def process_sim_results(cycle_dir,args):
         sims[sim_method] = {}
         print("Reading in "+sim_method+" results...")
         duplicates = 0
+        if sim_method == "spacelight":
+            sim_field = args.field_similarity_spacelight
+        elif sim_method == "ftrees":
+            sim_field = args.field_similarity_ftrees
         # group by title here
         for resfile in tqdm.tqdm(glob.glob(cycle_dir+"/"+sim_method+"result_"+args.name+"_*_1.csv"),mininterval=1):
             resdata = pd.read_csv(resfile)
-            for smiles,title,similarity in resdata[["#result-smiles","result-name","similarity"]].values.tolist():
+            for smiles,title,similarity in resdata[["#result-smiles","result-name",sim_field]].values.tolist():
                 if title not in sims[sim_method] or sims[sim_method][title] <= similarity:
                     sims[sim_method][title] = similarity
                 if title not in raw_mols:
