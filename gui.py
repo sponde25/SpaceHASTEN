@@ -1,6 +1,6 @@
 # SpaceHASTEN: graphical user interface (GUI)
 #
-# Copyright (c) 2024 Orion Corporation
+# Copyright (c) 2024-2025 Orion Corporation
 # 
 # Redistribution and use in source and binary forms, with or without 
 # modification, are permitted provided that the following conditions are met:
@@ -330,6 +330,8 @@ class SpaceHASTENGUI(tk.Tk):
             job_args.nnn = self.c.NNN_DEFAULT
             job_args.sim_spacelight = self.c.SIM_SPACELIGHT_DEFAULT
             job_args.sim_ftrees = self.c.SIM_FTREES_DEFAULT
+            job_args.field_similarity_spacelight = self.c.FIELD_SIMILARITY_SPACELIGHT
+            job_args.field_similarity_ftrees = self.c.FIELD_SIMILARITY_FTREES
             worker = threading.Thread(target=self.gui_thread_virtual_screening,args=(job_args,ask_cpu_count_simsearch,ask_cpu_count_docking,ask_n_queries,ask_n_docked))
             worker.start()
         else:
@@ -640,6 +642,8 @@ class SpaceHASTENGUI(tk.Tk):
         job_args.use_predicted = not docked_or_predicted
         job_args.top = ask_n_queries
         job_args.cpu = ask_cpu_count_simsearch
+        job_args.field_similarity_spacelight = self.c.FIELD_SIMILARITY_SPACELIGHT
+        job_args.field_similarity_ftrees = self.c.FIELD_SIMILARITY_FTREES
         
         worker = threading.Thread(target=self.gui_thread_similarity,args=(job_args,))
         worker.start()
