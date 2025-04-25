@@ -1,6 +1,6 @@
 # SpaceHASTEN: functions to import seeds
 #
-# Copyright (c) 2024 Orion Corporation
+# Copyright (c) 2024-2025 Orion Corporation
 # 
 # Redistribution and use in source and binary forms, with or without 
 # modification, are permitted provided that the following conditions are met:
@@ -55,8 +55,8 @@ def import_seeds(args):
     """
     args.q.put("Percent:0")
     os.system("date")
-    print("Importing seeds:")
     dbname = args.name+".dbsh"
+    print("Importing seeds to",dbname)
 
     print("1. Creating new database...")
     args.q.put("Percent:10")

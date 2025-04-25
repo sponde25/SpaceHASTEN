@@ -1,4 +1,4 @@
-SpaceHASTEN version 0.2, Developed by Tuomo Kalliokoski, Orion Pharma <tuomo.kalliokoski at orionpharma.com>, 2025-02-03
+SpaceHASTEN version 0.3, Developed by Tuomo Kalliokoski, Orion Pharma <tuomo.kalliokoski at orionpharma.com>, 2025-02-06
 
 # Introduction
 
@@ -56,3 +56,8 @@ If you still think that you have all pieces in place, follow these instructions:
 
 * 0.1: initial version
 * 0.2: updated the code for new versions of BioSolveIT tools (change in the output similarity-field).
+* 0.3: list of changes:
+    * can handle identical compound identifiers for different compounds.
+    * output now includes the unique SpaceHASTEN_ID, added to smilesid with "§" as separator.
+    * checks if started on NFS and warns the user. Insists that .dbsh if saved onto the starting directory.
+    * Added literature reference to main screen

@@ -1,6 +1,6 @@
 # SpaceHASTEN: functions used by various parts of the program
 #
-# Copyright (c) 2024 Orion Corporation
+# Copyright (c) 2024-2025 Orion Corporation
 # 
 # Redistribution and use in source and binary forms, with or without 
 # modification, are permitted provided that the following conditions are met:
@@ -37,6 +37,21 @@ import sqlite3
 import cfg
 
 import sys
+import subprocess
+
+def check_nfs(filename):
+    """ 
+    Check if filename is on NFS drive
+
+    :return True if the file is on NFS
+    """
+    cmd = "stat -f -c %T "+filename
+    process = subprocess.Popen(cmd,shell=True,text=True,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
+    result = process.stdout.readlines()
+    for resline in result:
+        if "nfs" in resline:
+            return True
+    return False
 
 def get_rdkit_properties(csv_filename):
     """

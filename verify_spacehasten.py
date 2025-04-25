@@ -185,10 +185,6 @@ def check_slurm(c):
     os.system("rm -fr "+c.SCRATCH_DEFAULT+"/"+os.getenv("USER")+"/verifydock_test_results_cpu1")
     os.system("mkdir -p "+c.SCRATCH_DEFAULT+"/"+os.getenv("USER")+"/verifydock_test_results_cpu1")
     os.system("tar xzf "+dock_dir+"/results-test.tar.gz -C "+c.SCRATCH_DEFAULT+"/"+os.getenv("USER")+"/verifydock_test_results_cpu1/")
-    if not os.path.exists(c.SCRATCH_DEFAULT+"/"+os.getenv("USER")+"/verifydock_test_results_cpu1/test.csv"):
-        print("Docking did not produce output file. Check that your computing nodes can see SpaceHASTEN installation nodes.)")
-        print("Also, check that you do not have licensing issues.")
-        exit()
     lines_in_output = len(open(c.SCRATCH_DEFAULT+"/"+os.getenv("USER")+"/verifydock_test_results_cpu1/test.csv").readlines())
     if lines_in_output < 2:
         print("Docking output is empty (test.csv).")
@@ -262,14 +258,10 @@ def check_pigz():
 
 print("This script checks that all bits and pieces required to run SpaceHASTEN are in place.")
 
-if os.path.exists(os.getenv("HOME")+"/SPACEHASTEN/VERIFY"):
-    print("ERROR: please remove previous verification directory $HOME/SPACEHASTEN/VERIFY before re-run!")
-    exit()
-
 c = cfg.SpaceHASTENConfiguration()
 print("SpaceHASTEN directory:",c.SPACEHASTEN_DIRECTORY)
 print("Creating $HOME/SPACEHASTEN/VERIFY directory that should be visible to all computing nodes as well...")
-os.system("mkdir -p $HOME/SPACEHASTEN/VERIFY")
+#os.system("mkdir -p $HOME/SPACEHASTEN/VERIFY")
 
 check_pigz()
 check_slurm(c)

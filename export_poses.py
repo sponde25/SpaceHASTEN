@@ -54,7 +54,8 @@ for st in structure.StructureReader(name):
     hit_id = int(st.property["s_m_title"])
     if docking_score <= cutoff:
         compound_id = c.execute("SELECT smilesid FROM data WHERE spacehastenid = ?",[hit_id]).fetchone()[0]
-        st.property["s_m_title"] = compound_id
+        # from 0.3, spacehastenid is added to the name
+        st.property["s_m_title"] = compound_id + "/" + str(hit_id)
         writer.append(st)
     else:
         # pv files are sorted by docking_score

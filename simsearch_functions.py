@@ -78,14 +78,15 @@ def process_sim_results(cycle_dir,args):
             sim_field = args.field_similarity_spacelight
         elif sim_method == "ftrees":
             sim_field = args.field_similarity_ftrees
-        # group by title here
+        # was until 0.2, group by title here
+        # from 0.3, groupby SMILES here instead of title as in some spaces titles are not unique
         for resfile in tqdm.tqdm(glob.glob(cycle_dir+"/"+sim_method+"result_"+args.name+"_*_1.csv"),mininterval=1):
             resdata = pd.read_csv(resfile)
             for smiles,title,similarity in resdata[["#result-smiles","result-name",sim_field]].values.tolist():
-                if title not in sims[sim_method] or sims[sim_method][title] <= similarity:
-                    sims[sim_method][title] = similarity
-                if title not in raw_mols:
-                    raw_mols[title] = smiles + "§" + title
+                if smiles not in sims[sim_method] or sims[sim_method][smiles] <= similarity:
+                    sims[sim_method][smiles] = similarity
+                if smiles not in raw_mols:
+                    raw_mols[smiles] = smiles + "§" + title
                 else:
                     duplicates += 1
         print(len(raw_mols),"before property control added from",sim_method)
@@ -110,13 +111,13 @@ def process_sim_results(cycle_dir,args):
 
     new_file = True
     chunk_size = 0
-    for title in tqdm.tqdm(raw_mols,mininterval=1):
+    for smiles in tqdm.tqdm(raw_mols,mininterval=1):
         if new_file:
             cpu_counter += 1
             csv_filename = cycle_dir + "/CONTROL/control_"+args.name+"_cpu"+str(cpu_counter)+".smi.gz"
             w = gzip.open(csv_filename,"wt")
             new_file = False
-        w.write(raw_mols[title]+"\n")
+        w.write(raw_mols[smiles]+"\n")
         chunk_size += 1
         if chunk_size >= smiles_per_cpu:
             chunk_size = 0
@@ -164,18 +165,28 @@ def process_sim_results(cycle_dir,args):
     for cpu in range(len(filtered_mol_runs_with_predictions)):
         rawmol_list,docking_score_list = filtered_mol_runs_with_predictions[cpu]
         for comp_index in range(len(rawmol_list)):
-            title = rawmol_list[comp_index].split("§")[2]
-            docking_scores[title] = float(docking_score_list[comp_index])
-            filtered_mols.append(rawmol_list[comp_index])
+            # upto 0.2, this was title (index 2)
+            # from 0.3, we use reghash (index 0) => check for collisions
+            reghash = rawmol_list[comp_index].split("§")[0]
+            docking_score = float(docking_score_list[comp_index])
+            if reghash not in docking_scores:
+                docking_scores[reghash] = docking_score
+                filtered_mols.append(rawmol_list[comp_index])
+            if docking_scores[reghash] > docking_score:
+                docking_scores[reghash] = docking_score
 
     filtered_sims = {}
     for sim_method in sim_methods:
         filtered_sims[sim_method] = {}
     for filtered_mol in filtered_mols:
-        title = filtered_mol.split("§")[2]
+        # upto 0.2, was title (index 2)
+        # from 0.3, we use reghash (index 0)
+        # note that sims is mapped via smiles (index 1) not reghash, so we use that here to switch to reghash
+        reghash = filtered_mol.split("§")[0]
+        smiles = filtered_mol.split("§")[1]
         for sim_method in sim_methods:
-            if title in sims[sim_method]:
-                filtered_sims[sim_method][title] = sims[sim_method][title]
+            if smiles in sims[sim_method]:
+                filtered_sims[sim_method][reghash] = sims[sim_method][smiles]
 
     return (filtered_mols,filtered_sims,docking_scores)
 
@@ -233,13 +244,14 @@ def simsearch(args,do_not_update_gui=False):
         print(sim_method,":",len(filtered_sims[sim_method]))
     only_in_spacelight = 0
     only_in_ftrees = 0
-    for smilesid in filtered_sims["spacelight"]:
-        if smilesid not in filtered_sims["ftrees"]:
+    # this was title before 0.3, now reghash is used
+    for reghash in filtered_sims["spacelight"]:
+        if reghash not in filtered_sims["ftrees"]:
             only_in_spacelight += 1
-    for smilesid in filtered_sims["ftrees"]:
-        if smilesid not in filtered_sims["spacelight"]:
+    for reghash in filtered_sims["ftrees"]:
+        if reghash not in filtered_sims["spacelight"]:
             only_in_ftrees += 1
-    print("Unique by IDs, SpaceLight",only_in_spacelight,", FTrees:",only_in_ftrees)
+    print("Only in SpaceLight",only_in_spacelight,", Only in FTrees:",only_in_ftrees)
 
     print("Making sure that new compounds have unique RegistrationHashes...")
     df_filtered_mols = pd.DataFrame(filtered_mols,columns=["rawmol"])
@@ -258,11 +270,12 @@ def simsearch(args,do_not_update_gui=False):
     for reghash,smiles,smilesid in new_filtered_mols:
         spacelight_similarity = None
         ftrees_similarity = None
-        if smilesid in filtered_sims["spacelight"]:
-            spacelight_similarity = filtered_sims["spacelight"][smilesid]
-        if smilesid in filtered_sims["ftrees"]:
-            ftrees_similarity = filtered_sims["ftrees"][smilesid]
-        to_db.append((reghash,smiles.strip(),smilesid,spacelight_similarity,ftrees_similarity,predicted_scores[smilesid],cycle_number))
+        # 0.2 used here smilesid, 0.3+ reghash
+        if reghash in filtered_sims["spacelight"]:
+            spacelight_similarity = filtered_sims["spacelight"][reghash]
+        if reghash in filtered_sims["ftrees"]:
+            ftrees_similarity = filtered_sims["ftrees"][reghash]
+        to_db.append((reghash,smiles.strip(),smilesid,spacelight_similarity,ftrees_similarity,predicted_scores[reghash],cycle_number))
     c.executemany("INSERT INTO data(reghash,smiles,smilesid,spacelight,ftrees,pred_score,simsearch_cycle) VALUES (?,?,?,?,?,?,?)",to_db)
     conn.commit()
     conn.close()

@@ -37,7 +37,7 @@ class SpaceHASTENConfiguration:
     CONTROL_EXE = SPACEHASTEN_DIRECTORY+"/control.py"
     CHUNKPREDICT_EXE = SPACEHASTEN_DIRECTORY+"/chunkpredict.py"
     EXPORTPOSES_EXE = "$SCHRODINGER/run " + SPACEHASTEN_DIRECTORY + "/export_poses.py"
-    SPACEHASTEN_VERSION=0.2
+    SPACEHASTEN_VERSION=0.3
     MAX_CORES = 250
     EXE_SPACELIGHT_DEFAULT = "/data/programs/BiosolveIT/spacelight-1.5.0-Linux-x64/spacelight"
     EXE_FTREES_DEFAULT = "/data/programs/BiosolveIT/ftrees-6.13.0-Linux-x64/ftrees"

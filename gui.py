@@ -78,6 +78,7 @@ class SpaceHASTENGUI(tk.Tk):
     # font definitions
     font_buttons = ("Arial",12)
     font_text = ("Arial",10)
+    font_text_italic = ("Arial",10,"italic")
 
     # color definitions
     color_background = "#fff"
@@ -87,12 +88,22 @@ class SpaceHASTENGUI(tk.Tk):
     color_button_active_fg = "#fff"
 
     def __init__(self,*args,**kwargs):
+
+        if functions.check_nfs("."):
+            print("WARNING: SpaceHASTEN started in NFS-directory and database tasks might be really slow.")
+            print("It is recommended to start SpaceHASTEN on a local directory instead.")
+            print("Are you sure you want continue (y/n)?")
+            check_nfs = input()
+            if check_nfs.lower() != "y":
+                exit()
+
         super().__init__(*args, **kwargs)
 
         self.c = cfg.SpaceHASTENConfiguration()
         self.q = queue.Queue()
 
         print("Running SpaceHASTEN at "+self.c.SPACEHASTEN_DIRECTORY)
+
 
         self.title("SpaceHASTEN "+str(self.c.SPACEHASTEN_VERSION))
         self.geometry("541x400")
@@ -167,6 +178,7 @@ class SpaceHASTENGUI(tk.Tk):
         tk.Label(self.frame_main,text="").grid(row=5)
         tk.Label(self.frame_main,text="Developed by Tuomo Kalliokoski, Orion Pharma",font=self.font_text).grid(row=6)
         tk.Label(self.frame_main,text="Powered by SpaceLight, FTrees, chemprop, Ligprep, Glide and RDKit",font=self.font_text).grid(row=7)
+        tk.Label(self.frame_main,text="J. Chem. Inf. Model. 2025, 65, 1, 125-132",font=self.font_text_italic).grid(row=8)
 
     def build_working_frame(self):
         self.frame_working = tk.Frame(self)
@@ -432,11 +444,16 @@ class SpaceHASTENGUI(tk.Tk):
             self.frame_main.grid()
             messagebox.showwarning(title="Note",message="New job cancelled")
             return
-        dbname = filedialog.asksaveasfilename(filetypes=[("SpaceHASTEN files","*.dbsh")],defaultextension=".dbsh",title="Save new job as...")
+        dbname = filedialog.asksaveasfilename(filetypes=[("SpaceHASTEN files","*.dbsh")],defaultextension=".dbsh",title="Save new job in the current working directory as...",initialdir=os.getcwd())
         if len(dbname)==0:
             messagebox.showwarning(title="Note",message="New job cancelled")
             self.frame_working.grid_forget()
             self.frame_main.grid()
+            return
+        if "/".join(dbname.split("/")[0:-1]) != os.getcwd():
+            self.frame_working.grid_forget()
+            self.frame_main.grid()
+            messagebox.showerror(title="Error!",message="You must create .dbsh in the same directory where you started SpceHASTEN!")
             return
         if os.path.exists(dbname):
             self.frame_working.grid_forget()
@@ -453,14 +470,10 @@ class SpaceHASTENGUI(tk.Tk):
                 self.frame_main.grid()
                 messagebox.showerror(title="Error!",message="Cannot write to "+dbname)
                 return
-        if os.path.exists(dbname):
-            self.frame_working.grid_forget()
-            self.frame_main.grid()
-            messagebox.showerror(title="Error!",message="Refusing to overwrite existing search!")
-            return
         job_args = SimpleNamespace()
         job_args.c = self.c
         job_args.name = dbname.split("/")[-1].split(".")[0]
+        job_args.dbname = dbname
         job_args.input = datafile
         job_args.seeds_scorefield = self.c.FIELD_SCORE_DEFAULT
         job_args.seeds_title = self.c.FIELD_TITLE_DEFAULT
