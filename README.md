@@ -1,4 +1,4 @@
-SpaceHASTEN version 0.3, Developed by Tuomo Kalliokoski, Orion Pharma <tuomo.kalliokoski at orionpharma.com>, 2025-02-06
+SpaceHASTEN version 0.4, Developed by Tuomo Kalliokoski, Orion Pharma <tuomo.kalliokoski at orionpharma.com>, 2025-05-16
 
 # Introduction
 
@@ -19,19 +19,18 @@ Depending where you work, anaconda3 [may or may not be free for you][https://www
 In addition, these free tools must be installed:
 
 * slurm workload manager (21.08.5 and 23.02.4 tested)[https://https://slurm.schedmd.com/documentation.html]
-* chemprop (version 1.7.1)[https://github.com/chemprop/chemprop/archive/refs/tags/v1.7.1.tar.gz]
+* chemprop (version 2.1.2)[https://github.com/chemprop/chemprop/archive/refs/tags/v2.1.2.tar.gz]
 
-Following commands in Sep 2024 can be used to install chemprop. This assumes that you have miniconda/anacond installed with mamba,
+Note that current version of SpaceHASTEN is using chemprop 2.x (older versions of the software used chemprop 1.x).
+Following commands in May 2025 can be used to install chemprop v2. This assumes that you have miniconda/anacond installed with mamba,
 modify the included conda_activation_example.sh`(the same script required when installing SpaceHASTEN as well):
 
 ```
 source conda_activation_example.sh
-tar xzf v1.7.1.tar.gz
-cd chemprop-1.7.1
-conda create -y -n chemprop python=3.8
-conda activate chemprop
-mamba install -y pytorch=2.3.1 torchvision torchaudio pytorch-cuda=11.8 -c pytorch -c nvidia
-mamba env update -f environment.yml
+tar xzf v2.1.2.tar.gz
+cd chemprop-2.1.2
+conda create -n chemprop-2.1.2 python=3.11 -y
+conda activate chemprop-2.1.2
 pip install -e .
 ```
 
@@ -61,3 +60,4 @@ If you still think that you have all pieces in place, follow these instructions:
     * output now includes the unique SpaceHASTEN_ID, added to smilesid with "§" as separator.
     * checks if started on NFS and warns the user. Insists that .dbsh if saved onto the starting directory.
     * Added literature reference to main screen
+* 0.4: chemprop 2.x used instead of chemprop 1.x.
