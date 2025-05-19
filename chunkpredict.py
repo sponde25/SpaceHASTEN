@@ -1,6 +1,6 @@
 # SpaceHASTEN: run chemprop prediction in chunks
 #
-# Copyright (c) 2024 Orion Corporation
+# Copyright (c) 2024-2025 Orion Corporation
 # 
 # Redistribution and use in source and binary forms, with or without 
 # modification, are permitted provided that the following conditions are met:
@@ -32,7 +32,7 @@ import pandas as pd
 
 def pred_chunk(filename,model):
     os.system("rm -f preds.csv")
-    os.system("OMP_NUM_THREADS=1 chemprop_predict --no_cache_mol --no_cuda --num_workers 0 --test_path "+filename+" --checkpoint_dir "+model+" --preds_path preds.csv >/dev/null 2>/dev/null")
+    os.system("OMP_NUM_THREADS=1 chemprop predict --num-workers 0 --accelerator cpu --devices 1 --test-path "+filename+" --model-path "+model+" --preds-path preds.csv >/dev/null 2>/dev/null")
     predictions = pd.read_csv("preds.csv")
     os.system("rm -f preds.csv")
     predictions.drop(columns=["smiles"],inplace=True)

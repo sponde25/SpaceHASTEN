@@ -1,6 +1,6 @@
 # SpaceHASTEN: slurm functions
 #
-# Copyright (c) 2024 Orion Corporation
+# Copyright (c) 2024-2025 Orion Corporation
 # 
 # Redistribution and use in source and binary forms, with or without 
 # modification, are permitted provided that the following conditions are met:
@@ -157,7 +157,7 @@ def write_train_slurm(control_dir,args):
     w.write("cd "+control_dir+"\n")
     w.write(args.c.SLURM_PREPARE_ANACONDA + "\n")
     w.write(args.c.SLURM_ACTIVATE_CHEMPROP + "\n")
-    w.write("chemprop_train --dataset_type regression --target_columns docking_score --data_path "+data_filename+" --save_dir model_"+args.name+"_ver"+str(model_version)+" --batch_size 250 --no_cache_mol\n")
+    w.write("chemprop train --devices 1 --num-workers 0 --task-type regression --target-columns docking_score --data-path "+data_filename+" --save-dir model_"+args.name+"_ver"+str(model_version)+" --batch-size 250 --no-cache --epochs 30\n")
     w.write("touch jobdone-"+jobname+"\n")
     w.close()
 

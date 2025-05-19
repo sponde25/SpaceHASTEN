@@ -1,6 +1,6 @@
 # SpaceHASTEN: installer
 #
-# Copyright (c) 2024 Orion Corporation
+# Copyright (c) 2024-2025 Orion Corporation
 # 
 # Redistribution and use in source and binary forms, with or without 
 # modification, are permitted provided that the following conditions are met:
@@ -71,13 +71,13 @@ if slurm_queue == "":
 slurm_prepare_anaconda = input("Please enter the SLURM anaconda3 activation command [default:source /data/programs/oce/actoce]: ")
 if slurm_prepare_anaconda == "":
     slurm_prepare_anaconda = "source /data/programs/oce/actoce"
-slurm_activate_chemprop = input("Please enter the SLURM anaconda3 chemprop activation command [default:conda activate chemprop]: ")
+slurm_activate_chemprop = input("Please enter the SLURM anaconda3 chemprop activation command [default:conda activate chemprop-2.1.2]: ")
 if slurm_activate_chemprop == "":
-    slurm_activate_chemprop = "conda activate chemprop"
+    slurm_activate_chemprop = "conda activate chemprop-2.1.2"
 print("NOTE: If you have a proper GPU partition configured, use -p gpu instead of hostlist (-w lfies-docki)")
-slurm_gpu_parameter = input("Please enter the SLURM GPU parameter [default:-w lfies-docki]: ")
+slurm_gpu_parameter = input("Please enter the SLURM GPU parameter [default:--gpus=1]: ")
 if slurm_gpu_parameter == "":
-    slurm_gpu_parameter = "-w lfies-docki"
+    slurm_gpu_parameter = "--gpus=1"
 slurm_gpu_exclusive = input("Please type 1 here if you want slurm GPU exlusive run, 0 otherwise [default:1]: ")
 if slurm_gpu_exclusive == "":
     slurm_gpu_exclusive = "1"

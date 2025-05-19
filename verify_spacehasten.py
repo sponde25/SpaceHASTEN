@@ -1,6 +1,6 @@
 # SpaceHASTEN: check environment sanity
 #
-# Copyright (c) 2024 Orion Corporation
+# Copyright (c) 2024-2025 Orion Corporation
 # 
 # Redistribution and use in source and binary forms, with or without 
 # modification, are permitted provided that the following conditions are met:
@@ -116,7 +116,7 @@ def write_train_slurm(c):
     w.write("cd $HOME/SPACEHASTEN/VERIFY\n")
     w.write(c.SLURM_PREPARE_ANACONDA + "\n")
     w.write(c.SLURM_ACTIVATE_CHEMPROP + "\n")
-    w.write("chemprop_train --dataset_type regression --target_columns docking_score --data_path example.csv --save_dir verifytrain_model --batch_size 250 --no_cache_mol\n")
+    w.write("chemprop train --task-type regression --target-columns docking_score --data-path example.csv --save-dir verifytrain_model --batch-size 250 --no-cache --epochs 30\n")
     w.write("touch jobdone-verifytrain\n")
     w.close()
 
@@ -261,7 +261,7 @@ print("This script checks that all bits and pieces required to run SpaceHASTEN a
 c = cfg.SpaceHASTENConfiguration()
 print("SpaceHASTEN directory:",c.SPACEHASTEN_DIRECTORY)
 print("Creating $HOME/SPACEHASTEN/VERIFY directory that should be visible to all computing nodes as well...")
-#os.system("mkdir -p $HOME/SPACEHASTEN/VERIFY")
+os.system("mkdir -p $HOME/SPACEHASTEN/VERIFY")
 
 check_pigz()
 check_slurm(c)

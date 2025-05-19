@@ -37,7 +37,7 @@ class SpaceHASTENConfiguration:
     CONTROL_EXE = SPACEHASTEN_DIRECTORY+"/control.py"
     CHUNKPREDICT_EXE = SPACEHASTEN_DIRECTORY+"/chunkpredict.py"
     EXPORTPOSES_EXE = "$SCHRODINGER/run " + SPACEHASTEN_DIRECTORY + "/export_poses.py"
-    SPACEHASTEN_VERSION=0.3
+    SPACEHASTEN_VERSION=0.4
     MAX_CORES = 250
     EXE_SPACELIGHT_DEFAULT = "/data/programs/BiosolveIT/spacelight-1.5.0-Linux-x64/spacelight"
     EXE_FTREES_DEFAULT = "/data/programs/BiosolveIT/ftrees-6.13.0-Linux-x64/ftrees"
@@ -159,10 +159,8 @@ class SpaceHASTENConfiguration:
                 print("Error: Unknown setting in spacehasten.ini:",setting)
                 sys.exit(1)
 
-        if shutil.which("chemprop_predict") is None:
-            sys.exit("Error: chemprop_predict not available, please active chemprop environment before SpaceHASTEN!")
-        if shutil.which("chemprop_train") is None:
-            sys.exit("Error: chemprop_train not available, please active chemprop environment before SpaceHASTEN!")
+        if shutil.which("chemprop") is None:
+            sys.exit("Error: chemprop version 2.x not available, please active chemprop 2 environment before SpaceHASTEN!")
         if shutil.which("bzcat") is None:
             sys.exit("Error: bzcat not available, please install bzip2 package!")
         if not os.path.exists(self.EXE_SPACELIGHT_DEFAULT):
