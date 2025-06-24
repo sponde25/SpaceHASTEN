@@ -39,6 +39,19 @@ import cfg
 import sys
 import subprocess
 
+def check_glide_gridgen_input(glideinfile):
+    """ 
+    Check against glide grid generation input instead of docking input
+
+    :return True if the file does look like grid generation file
+    """
+    warning_signs = ["GRID_CENTER", "INNERBOX", "OUTERBOX", "RECEP_FILE"]
+    for line in open(glideinfile):
+        for warning_sign in warning_signs:
+            if warning_sign in line:
+                return True
+    return False
+        
 def check_nfs(filename):
     """ 
     Check if filename is on NFS drive
@@ -132,15 +145,16 @@ def mol2hash(line):
 
     return RegistrationHash.GetMolLayers(mol)[RegistrationHash.HashLayer.TAUTOMER_HASH] + "§" + line
 
-def cxsmi2smi(cxsmiles):
+def cxsmi2smi(cxsmiles_with_id):
     """
-    Take a cxsmiles (no ID) and return smiles
+    Take a cxsmiles and id (sep §) and return smiles plus linefeed
 
-    :param cxsmiles: The cxsmiles to be parsed
-    :return: SMILES
+    :param cxsmiles_with_id: The cxsmiles and id (sep §) to be parsed
+    :return: SMILES with linefeed added
     """
-    
-    mol = Chem.MolFromSmiles(cxsmiles)
+
+    s = cxsmiles_with_id.split("§") 
+    mol = Chem.MolFromSmiles(s[0])
     if mol == None:
         return None
-    return Chem.MolToSmiles(mol)
+    return Chem.MolToSmiles(mol) + " " + s[1] + "\n"

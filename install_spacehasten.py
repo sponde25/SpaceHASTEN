@@ -28,6 +28,7 @@
 #
 import os
 import shutil
+from cfg import SpaceHASTENConfiguration
 
 def ask_for_file(default_exe,desc=None):
     if desc is None:
@@ -40,29 +41,36 @@ def ask_for_file(default_exe,desc=None):
         exit()
     return asked_exe
 
-def ask_for_dir(default_dir,desc):
+def ask_for_dir(default_dir,desc,exist=True):
     asked_dir = input("Please enter the path to "+desc+" executable [default:"+default_dir+"]: ")
     if asked_dir == "":
         asked_dir = default_dir
-    if not os.path.isdir(asked_dir):
+    if exist and not os.path.isdir(asked_dir):
         print("The specified path is not a directory.")
         exit()
     return asked_dir
 
-print("SpaceHASTEN installer\n")
+print()
+print(" ___                      _ _  ___  ___  ___  ___  _ _ ")
+print("/ __> ___  ___  ___  ___ | | || . |/ __>|_ _|| __>| \ |")
+print("\__ \| . \<_> |/ | '/ ._>|   ||   |\__ \ | | | _> |   |")
+print("<___/|  _/<___|\_|_.\___.|_|_||_|_|<___/ |_| |___>|_\_|")
+print("     |_|                                               ")
+print()
+print("SpaceHASTEN installer " + str(SpaceHASTENConfiguration.SPACEHASTEN_VERSION)+"\n")
 print("This script will install SpaceHASTEN on your system.")
 
-print("Please enter the installation path. NOTE: THIS MUST A NFS DIRECTORY VISIBLE TO ALL COMPUTING NODES.")
-path = input("Path: ")
+print("NOTE: THIS MUST BE A NFS DIRECTORY VISIBLE TO ALL COMPUTING NODES.")
+path = ask_for_dir("/data/programs/spacehasten-"+str(SpaceHASTENConfiguration.SPACEHASTEN_VERSION),"Installation directory",exist=False)
 if os.path.exists(path):
     print("The specified path already exists.")
     print("Installation aborted.")
     exit()
 os.makedirs(path)
-spacelight_exe = ask_for_file("/data/programs/BiosolveIT/spacelight-1.3.0-Linux-x64/spacelight")
-ftrees_exe = ask_for_file("/data/programs/BiosolveIT/ftrees-6.11.0-Linux-x64/ftrees")
+spacelight_exe = ask_for_file("/data/programs/BiosolveIT/spacelight-1.5.0-Linux-x64/spacelight")
+ftrees_exe = ask_for_file("/data/programs/BiosolveIT/ftrees-6.13.0-Linux-x64/ftrees")
 spaces_dir = ask_for_dir("/data/programs/BiosolveIT/spaces","BiosolveIT spaces directory")
-default_space = ask_for_file("/data/programs/BiosolveIT/spaces/REALSpace_48bn_2024-02.space","default space")
+default_space = ask_for_file("/data/programs/BiosolveIT/spaces/REALSpace_76bn_2025-03.space","default space")
 scratch_dir = ask_for_dir("/wrk","scratch directory")
 enaminereal_seeds = ask_for_file("/data/work/db/Enamine_Diverse_REAL_drug-like_48.2M_cxsmiles.cxsmiles.bz2","Enamine REAL seeds")
 slurm_queue = input("Please enter the SLURM partition name [default:jobs]: ")
@@ -74,7 +82,6 @@ if slurm_prepare_anaconda == "":
 slurm_activate_chemprop = input("Please enter the SLURM anaconda3 chemprop activation command [default:conda activate chemprop-2.1.2]: ")
 if slurm_activate_chemprop == "":
     slurm_activate_chemprop = "conda activate chemprop-2.1.2"
-print("NOTE: If you have a proper GPU partition configured, use -p gpu instead of hostlist (-w lfies-docki)")
 slurm_gpu_parameter = input("Please enter the SLURM GPU parameter [default:--gpus=1]: ")
 if slurm_gpu_parameter == "":
     slurm_gpu_parameter = "--gpus=1"
@@ -132,4 +139,5 @@ for file_to_copy in files_to_copy:
 print("SpaceHASTEN has been installed successfully.")
 print("Please verify that everything is OK by running '"+path+"/verify' before starting the actual virtual screening process.")
 print("The test should take around 15-30 minutes to run.")
+os.system("chmod +x "+path+"/verify "+path+"/spacehasten")
 

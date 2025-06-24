@@ -1,10 +1,10 @@
-SpaceHASTEN version 0.4, Developed by Tuomo Kalliokoski, Orion Pharma <tuomo.kalliokoski at orionpharma.com>, 2025-05-16
+SpaceHASTEN version 0.5, Developed by Tuomo Kalliokoski, Orion Pharma <tuomo.kalliokoski at orionpharma.com>, 2025-06-24
 
 # Introduction
 
 This is a tool that allows you screen BiosolveIT's .space-files using molecular docking tool Glide.
 You can get large number of good scoring compounds from those vast chemical spaces of billions of compounds just by docking few million structures.
-Hardware requirements: few hundred CPU cores, 1 reasonable GPU (2024) and few hundred gigabytes of disk space.
+Hardware requirements: few hundred CPU cores, one reasonable GPU (in year 2024) and few hundred gigabytes of disk space.
 Only Linux is supported (tested on Ubuntu 22.04.4 and Rocky Linux 8.8).
 
 SpaceHASTEN requires following commercial software:
@@ -22,8 +22,8 @@ In addition, these free tools must be installed:
 * chemprop (version 2.1.2)[https://github.com/chemprop/chemprop/archive/refs/tags/v2.1.2.tar.gz]
 
 Note that current version of SpaceHASTEN is using chemprop 2.x (older versions of the software used chemprop 1.x).
-Following commands in May 2025 can be used to install chemprop v2. This assumes that you have miniconda/anacond installed with mamba,
-modify the included conda_activation_example.sh`(the same script required when installing SpaceHASTEN as well):
+Following commands in May 2025 can be used to install chemprop v2. This assumes that you have miniconda/anaconda,
+modify the included conda_activation_example.sh`(the same script is required when installing SpaceHASTEN as well):
 
 ```
 source conda_activation_example.sh
@@ -40,7 +40,7 @@ Download them from BiosolveIT:[https://www.biosolveit.de/chemical-spaces/]
 Enamine provides diverse sets of Enamine REAL compounds that are good sources of seed molecules for Enamine REALSpace searches.
 Download Enamine REAL lead-like subset:[https://enamine.net/compound-collections/real-compounds/real-database-subsets]
 
-For more information, please see the publication describing on how the method works. [https://doi.org/10.1021/acs.jcim.4c01790]
+For more information, please see the publication in JCIM describing on how the method works. [https://doi.org/10.1021/acs.jcim.4c01790]
 
 # Installation and useage
 
@@ -61,3 +61,11 @@ If you still think that you have all pieces in place, follow these instructions:
     * checks if started on NFS and warns the user. Insists that .dbsh if saved onto the starting directory.
     * Added literature reference to main screen
 * 0.4: chemprop 2.x used instead of chemprop 1.x.
+* 0.5:
+    * Iteration number now added automatically when exporting poses (issue #5, gui.py)
+    * Default exporting poses directory is the current workind girectory (issue #11, gui.py)
+    * Proper checking for existing searches implemented to avoid messed up screens (issue #4, gui.py)
+    * Job names have been now limited to MAX_JOBNAME_LEN (15) characters to avoid issues with other tools (issue #13, gui.py and cfg.py)
+    * When picking Enamine seeds, original compound names are now kept instead of renaming them (issue #12, gui.py and functions.py)
+    * Glide .in file is now checked for the common mistake of picking grid generation .in file instead (issue #7, gui.py and functions.py)
+    * various smaller changes to installer and post-install verification tool (install_spacehasten.py and verify_spacehasten.py)

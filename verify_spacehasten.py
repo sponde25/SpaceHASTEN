@@ -97,7 +97,7 @@ def write_confgen_file(c):
     w.write("    USEROUTS   DATABASE,\n")
     w.close()
 
-def write_train_slurm(c):
+def write_train_slurm(c,verdir):
     """
     Write slurm script for training
 
@@ -108,12 +108,12 @@ def write_train_slurm(c):
     w = open("submit_"+jobname+".sh","wt")
     w.write("#!/bin/bash\n")
     w.write("#SBATCH -J "+jobname+"\n")
-    w.write("#SBATCH -o /dev/null\n")
-    w.write("#SBATCH -e /dev/null\n")
+    w.write("#SBATCH -o train.log\n")
+    w.write("#SBATCH -e train.err\n")
     w.write("#SBATCH "+c.SLURM_GPU_PARAMETER+"\n")
     if c.SLURM_GPU_EXCLUSIVE == "1":
         w.write("#SBATCH --exclusive\n")
-    w.write("cd $HOME/SPACEHASTEN/VERIFY\n")
+    w.write("cd "+verdir+"\n")
     w.write(c.SLURM_PREPARE_ANACONDA + "\n")
     w.write(c.SLURM_ACTIVATE_CHEMPROP + "\n")
     w.write("chemprop train --task-type regression --target-columns docking_score --data-path example.csv --save-dir verifytrain_model --batch-size 250 --no-cache --epochs 30\n")
@@ -151,9 +151,9 @@ def write_dock_slurm(c):
     w.write("touch jobdone-test-CPU1\n")
     w.close()
 
-def check_slurm(c):
+def check_slurm(c,verdir):
     curdir = os.getcwd()
-    dock_dir = os.getenv("HOME")+"/SPACEHASTEN/VERIFY"
+    dock_dir = verdir
     os.chdir(dock_dir)
     print("Looking for the sbatch:")
     sbatch_ok = os.system("which sbatch")
@@ -194,29 +194,27 @@ def check_slurm(c):
     print("Docking job finished successfully.")
     os.system("rm -fr "+c.SCRATCH_DEFAULT+"/"+os.getenv("USER")+"/verifydock_test_results_cpu1")
     
-def check_training(c):
+def check_training(c,verdir):
     curdir = os.getcwd()
-    train_dir = os.getenv("HOME")+"/SPACEHASTEN/VERIFY"
+    train_dir = verdir
     os.system("cp "+c.SPACEHASTEN_DIRECTORY+"/example.csv "+train_dir+"/")
     os.chdir(train_dir)
     os.system("rm -f jobdone-verifytrain")
     print("Testing chemprop training via slurm ...")
-    write_train_slurm(c)
+    write_train_slurm(c,verdir)
     os.system("sbatch submit_verifytrain.sh")
     os.chdir(curdir)
     jobs_left = 1 - len(glob.glob(train_dir+"/jobdone-verifytrain*"))
     while jobs_left>0:
         time.sleep(5)
         jobs_left = 1 - len(glob.glob(train_dir+"/jobdone-verifytrain*"))
-    if not os.path.exists(train_dir+"/verifytrain_model/test_scores.csv"):
+    if not os.path.exists(train_dir+"/verifytrain_model/model_0/best.pt"):
         print("Model not created.")
         exit()
-    model_specs = open(train_dir+"/verifytrain_model/test_scores.csv").readlines()[-1]
-    print("Model specs:",model_specs)
-    cuda = True
-    for line in open(train_dir+"/verifytrain_model/verbose.log"):
-        if "'cuda': False," in line:
-            cuda = False
+    cuda = False
+    for line in open(train_dir+"/train.err"):
+        if "GPU available: True" in line:
+            cuda = True
     if not cuda:
         print("**********************************************************")
         print("WARNING!!!!!! CUDA not available, training will be slower.")
@@ -230,23 +228,23 @@ def check_biosolveit(c):
     if not os.path.exists(c.SPACES_FILE_DEFAULT):
         print("This file is missing.")
         exit()
-    verdir = c.SCRATCH_DEFAULT+"/"+os.getenv("USER")+"/verify_biosolveit"
-    os.system("rm -fr "+verdir)
-    os.mkdir(verdir)
+    bioverdir = c.SCRATCH_DEFAULT+"/"+os.getenv("USER")+"/verify_biosolveit"
+    os.system("rm -fr "+bioverdir)
+    os.mkdir(bioverdir)
     
     print("Running locally 1 Spacelight....")
-    spacelight_ok = os.system(c.EXE_SPACELIGHT_DEFAULT + " -i " + c.SPACEHASTEN_DIRECTORY + "/example.smi -s "+c.SPACES_FILE_DEFAULT +" -o "+verdir+"/spacelightresult.csv --max-nof-results 100 --min-similarity-threshold 0.5 --thread-count 1")
-    if spacelight_ok != 0 or not os.path.exists(verdir+"/spacelightresult_1.csv"):
+    spacelight_ok = os.system(c.EXE_SPACELIGHT_DEFAULT + " -i " + c.SPACEHASTEN_DIRECTORY + "/example.smi -s "+c.SPACES_FILE_DEFAULT +" -o "+bioverdir+"/spacelightresult.csv --max-nof-results 100 --min-similarity-threshold 0.5 --thread-count 1")
+    if spacelight_ok != 0 or not os.path.exists(bioverdir+"/spacelightresult_1.csv"):
         print("Spacelight failed.")
         exit()
-    print("SpaceLight output:",len(open(verdir+"/spacelightresult_1.csv").readlines()))
+    print("SpaceLight output:",len(open(bioverdir+"/spacelightresult_1.csv").readlines()))
     print("Running locally 1 FTrees...")
-    ftrees_ok = os.system(c.EXE_FTREES_DEFAULT +  " -i " + c.SPACEHASTEN_DIRECTORY + "/example.smi -s "+c.SPACES_FILE_DEFAULT+" -o "+verdir+"/ftreesresult.csv --max-nof-results 100 --min-similarity-threshold 0.9 --thread-count 1")
-    if ftrees_ok != 0 or not os.path.exists(verdir+"/ftreesresult_1.csv"):
+    ftrees_ok = os.system(c.EXE_FTREES_DEFAULT +  " -i " + c.SPACEHASTEN_DIRECTORY + "/example.smi -s "+c.SPACES_FILE_DEFAULT+" -o "+bioverdir+"/ftreesresult.csv --max-nof-results 100 --min-similarity-threshold 0.9 --thread-count 1")
+    if ftrees_ok != 0 or not os.path.exists(bioverdir+"/ftreesresult_1.csv"):
         print("Ftrees failed.")
         exit()
-    print("FTrees output:",len(open(verdir+"/ftreesresult_1.csv").readlines()))
-    os.system("rm -fr "+verdir)
+    print("FTrees output:",len(open(bioverdir+"/ftreesresult_1.csv").readlines()))
+    os.system("rm -fr "+bioverdir)
     print("SpaceLight and FTrees tested succesfully.")
 
 def check_pigz():
@@ -256,16 +254,26 @@ def check_pigz():
         print("pigz not installed.")
         exit()
 
+print()
+print(" ___                      _ _  ___  ___  ___  ___  _ _ ")
+print("/ __> ___  ___  ___  ___ | | || . |/ __>|_ _|| __>| \ |")
+print("\__ \| . \<_> |/ | '/ ._>|   ||   |\__ \ | | | _> |   |")
+print("<___/|  _/<___|\_|_.\___.|_|_||_|_|<___/ |_| |___>|_\_|")
+print("     |_|                                               ")
+print()
+print("SpaceHASTEN " + str(cfg.SpaceHASTENConfiguration.SPACEHASTEN_VERSION)+"\n")
 print("This script checks that all bits and pieces required to run SpaceHASTEN are in place.")
 
 c = cfg.SpaceHASTENConfiguration()
 print("SpaceHASTEN directory:",c.SPACEHASTEN_DIRECTORY)
-print("Creating $HOME/SPACEHASTEN/VERIFY directory that should be visible to all computing nodes as well...")
-os.system("mkdir -p $HOME/SPACEHASTEN/VERIFY")
+verdir = "$HOME/SPACEHASTEN/VERIFY" + str(cfg.SpaceHASTENConfiguration.SPACEHASTEN_VERSION).replace(".","")
+print("Creating directory " + verdir + " that should be visible to all computing nodes as well...")
+os.system("rm -fr " + verdir)
+os.system("mkdir -p " + verdir)
 
 check_pigz()
-check_slurm(c)
-check_training(c)
+check_slurm(c,verdir.replace("$HOME",os.getenv("HOME")))
+check_training(c,verdir.replace("$HOME",os.getenv("HOME")))
 check_biosolveit(c)
 
 print("All checks passed. You are ready to run SpaceHASTEN ("+c.SPACEHASTEN_DIRECTORY+"/spacehasten)")

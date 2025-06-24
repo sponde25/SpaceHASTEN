@@ -275,7 +275,8 @@ class SpaceHASTENGUI(tk.Tk):
         leadlike.drop(columns=["Type"],inplace=True)
         print("Saving and picking seeds...")
         self.q.put("Percent:30")
-        cx_seeds = leadlike.sample(n=num_seeds)["smiles"].to_list()
+        leadlike["smiles_with_id"] = leadlike["smiles"] + "§" + leadlike["idnumber"]
+        cx_seeds = leadlike.sample(n=num_seeds)["smiles_with_id"].to_list()
         # this consumes a lot of RAM, so not a good idea to use lots of CPUs
         self.q.put("Percent:50")
         pool = mp.Pool(num_cores)
@@ -283,9 +284,7 @@ class SpaceHASTENGUI(tk.Tk):
         self.q.put("Percent:70")
         w = open(seedsname,"wt")
         seed_counter = 0
-        for seed in seeds:
-            seed_counter += 1
-            w.write(seed + " S" + str(seed_counter)+"\n")
+        for seed in seeds: w.write(seed)
         w.close()
         self.q.put("Percent:99.9")
         self.q.put("Done")
@@ -428,6 +427,12 @@ class SpaceHASTENGUI(tk.Tk):
             self.frame_main.grid()
             messagebox.showwarning(title="Note",message="New job cancelled")
             return
+        if functions.check_glide_gridgen_input(glideinfile):
+            self.frame_working.grid_forget()
+            self.frame_main.grid()
+            messagebox.showerror(title="Error!",message="Invalid glide .in file supplied: grid generation .in file instead of docking .in!")
+            return
+        
         glidegridfile = filedialog.askopenfilename(filetypes=[("Glide docking grid","*.zip")],title="Select glide grid file...")
         if len(glidegridfile)==0:
             self.frame_working.grid_forget()
@@ -455,21 +460,7 @@ class SpaceHASTENGUI(tk.Tk):
             self.frame_main.grid()
             messagebox.showerror(title="Error!",message="You must create .dbsh in the same directory where you started SpceHASTEN!")
             return
-        if os.path.exists(dbname):
-            self.frame_working.grid_forget()
-            self.frame_main.grid()
-            messagebox.showerror(title="Error!",message="Refusing to overwrite existing search!")
-            return
-        try:
-            testfile = open(dbname,"wt")
-            testfile.close()
-            os.system("rm -f "+dbname)
-        except:
-            if not os.access(dbname, os.W_OK):
-                self.frame_working.grid_forget()
-                self.frame_main.grid()
-                messagebox.showerror(title="Error!",message="Cannot write to "+dbname)
-                return
+
         job_args = SimpleNamespace()
         job_args.c = self.c
         job_args.name = dbname.split("/")[-1].split(".")[0]
@@ -482,6 +473,33 @@ class SpaceHASTENGUI(tk.Tk):
         job_args.dock_param = glideinfile
         job_args.q = self.q
         job_args.glidegridfile = glidegridfile
+
+        if len(job_args.name)>self.c.MAX_JOBNAME_LEN:
+            self.frame_working.grid_forget()
+            self.frame_main.grid()
+            messagebox.showerror(title="Error!",message="Too long name for a job given (max 15 characters)!")
+            return
+
+        dock_dirs = glob.glob(os.getenv("HOME") + "/SPACEHASTEN/DOCKING_" + job_args.name + "_iter*")
+        simsearch_dirs = glob.glob(os.getenv("HOME") + "/SPACEHASTEN/SIMSEARCH_" + job_args.name + "_cycle*")
+        train_dirs = glob.glob(os.getenv("HOME") + "/SPACEHASTEN/TRAIN_" + job_args.name + "_ver*")
+
+        if os.path.exists(dbname) or len(dock_dirs)>0 or len(simsearch_dirs)>0 or len(train_dirs)>0:
+            self.frame_working.grid_forget()
+            self.frame_main.grid()
+            messagebox.showerror(title="Error!",message="Refusing to overwrite existing search!")
+            return
+
+        try:
+            testfile = open(dbname,"wt")
+            testfile.close()
+            os.system("rm -f "+dbname)
+        except:
+            if not os.access(dbname, os.W_OK):
+                self.frame_working.grid_forget()
+                self.frame_main.grid()
+                messagebox.showerror(title="Error!",message="Cannot write to "+dbname)
+                return
           
         if csv_or_smiles == False:
             ask_cpu_count = simpledialog.askinteger("CPUs","How many CPUs to use?",initialvalue=250,parent=self)
@@ -541,7 +559,7 @@ class SpaceHASTENGUI(tk.Tk):
         job_args.scratch = self.c.SCRATCH_DEFAULT
 
         if int(self.gui_export_mode.get()) == 1:
-            export_filename = filedialog.asksaveasfilename(filetypes=[("CSV files","*.csv")],defaultextension=".csv",title="Export virtual hits to CSV...",initialfile="spacehasten_virtualhits_cutoff"+str(job_args.cutoff).replace(".","_")+"_"+job_args.name+"_iter"+str(functions.get_latest_iteration(job_args.name))+".csv")
+            export_filename = filedialog.asksaveasfilename(filetypes=[("CSV files","*.csv")],defaultextension=".csv",title="Export virtual hits to CSV...",initialfile="spacehasten_virtualhits_cutoff"+str(job_args.cutoff).replace(".","_")+"_"+job_args.name+"_iter"+str(functions.get_latest_iteration(job_args.name))+".csv",initialdir=os.getcwd())
             if len(export_filename)==0:
                 messagebox.showwarning(title="Note",message="Exporting cancelled")
                 self.frame_working.grid_forget()
@@ -550,7 +568,7 @@ class SpaceHASTENGUI(tk.Tk):
             job_args.resfilename = export_filename
             worker = threading.Thread(target=export_functions.export_results,args=(job_args,))
         else:
-            export_filename = filedialog.asksaveasfilename(filetypes=[("maegz files","*.maegz")],defaultextension=".csv",title="Export poses of virtual hits to maegz...",initialfile="spacehasten_virtualhits_cutoff"+str(job_args.cutoff).replace(".","_")+"_"+job_args.name+".maegz")
+            export_filename = filedialog.asksaveasfilename(filetypes=[("maegz files","*.maegz")],defaultextension=".csv",title="Export poses of virtual hits to maegz...",initialfile="spacehasten_virtualhits_cutoff"+str(job_args.cutoff).replace(".","_")+"_"+job_args.name+"_iter"+str(functions.get_latest_iteration(job_args.name))+".maegz",initialdir=os.getcwd())
             if len(export_filename)==0:
                 messagebox.showwarning(title="Note",message="Exporting cancelled")
                 self.frame_working.grid_forget()
