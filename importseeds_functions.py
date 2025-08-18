@@ -60,6 +60,9 @@ def import_seeds(args):
 
     print("1. Creating new database...")
     args.q.put("Percent:10")
+
+    functions.update_dbsh_properties(dbname,args)
+
     conn = sqlite3.connect(dbname)
     c = conn.cursor()
     c.execute("CREATE TABLE data (spacehastenid INTEGER PRIMARY KEY,reghash TEXT,smiles TEXT,smilesid TEXT,dock_score REAL,pred_score REAL,spacelight REAL,ftrees REAL,query INTEGER,dock_iteration INTEGER,pred_version INTEGER,simsearch_cycle INTEGER)")

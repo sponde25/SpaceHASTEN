@@ -1,6 +1,6 @@
 # SpaceHASTEN: functions to do the predicting
 #
-# Copyright (c) 2024 Orion Corporation
+# Copyright (c) 2024-2025 Orion Corporation
 # 
 # Redistribution and use in source and binary forms, with or without 
 # modification, are permitted provided that the following conditions are met:
@@ -34,7 +34,7 @@ import tqdm
 import glob
 import time
 import multiprocessing as mp
-import slurm_functions
+import scheduler_functions
 
 def get_chemprop_predictions(param):
     """
@@ -118,7 +118,7 @@ def update_predicted_scores(args):
     if len(to_update) == 0:
         print("Note: No undocked compounds to update.")
         return
-    # split data into smaller chunks for slurm
+    # split data into smaller chunks for scheduler
     smiles_per_cpu = round(float(len(to_update))/float(args.cpu))
 
     os.system("mkdir -p "+cycle_dir+"/PREDICT")
@@ -154,12 +154,12 @@ def update_predicted_scores(args):
     if not new_file:
         w.close()
     
-    slurm_functions.write_predict_slurm(cycle_dir+"/PREDICT",args)
+    scheduler_functions.write_predict_scheduler(cycle_dir+"/PREDICT",args)
 
     curdir = os.getcwd()
     os.chdir(cycle_dir+"/PREDICT")
     os.system("rm -f jobdone-"+args.name+"-CPU* predicted_predict_*.csv")
-    print("Predicting docking scores via slurm at "+cycle_dir+"/PREDICT ...")
+    print("Predicting docking scores via scheduler at "+cycle_dir+"/PREDICT ...")
     os.system("sbatch submit_predict_"+args.name+"_cycle"+str(functions.get_latest_cycle(args.name))+".sh")
     os.chdir(curdir)
 

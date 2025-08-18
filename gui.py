@@ -69,6 +69,7 @@ class SpaceHASTENGUI(tk.Tk):
     frame_working = None
     frame_task_menu = None
     frame_export_menu = None
+    frame_props_menu = None
     c = None
     progressbar_working = None
     progressbar_value = None
@@ -121,11 +122,24 @@ class SpaceHASTENGUI(tk.Tk):
         self.gui_cycle_mode = tk.StringVar(self,"1")
         self.gui_export_mode = tk.IntVar(self,1)
         self.progressbar_value = tk.DoubleVar(self,0)
+        self.gui_mw_min = tk.DoubleVar(self,self.c.PROP_MW_MIN_DEFAULT)
+        self.gui_mw_max = tk.DoubleVar(self,self.c.PROP_MW_MAX_DEFAULT)
+        self.gui_slogp_min = tk.DoubleVar(self,self.c.PROP_SLOGP_MIN_DEFAULT)
+        self.gui_slogp_max = tk.DoubleVar(self,self.c.PROP_SLOGP_MAX_DEFAULT)
+        self.gui_hba_min = tk.IntVar(self,self.c.PROP_HBA_MIN_DEFAULT)
+        self.gui_hba_max = tk.IntVar(self,self.c.PROP_HBA_MAX_DEFAULT)
+        self.gui_hbd_min = tk.IntVar(self,self.c.PROP_HBD_MIN_DEFAULT)
+        self.gui_hbd_max = tk.IntVar(self,self.c.PROP_HBD_MAX_DEFAULT)
+        self.gui_rotbonds_min = tk.IntVar(self,self.c.PROP_ROTBONDS_MIN_DEFAULT)
+        self.gui_rotbonds_max = tk.IntVar(self,self.c.PROP_ROTBONDS_MAX_DEFAULT)
+        self.gui_tpsa_min = tk.DoubleVar(self,self.c.PROP_TPSA_MIN_DEFAULT)
+        self.gui_tpsa_max = tk.DoubleVar(self,self.c.PROP_TPSA_MAX_DEFAULT)
                 
         self.build_main_frame()
         self.build_working_frame()
         self.build_task_menu()
         self.build_export_menu()
+        self.build_props_menu()
 
         self.frame_main.grid()
 
@@ -165,14 +179,31 @@ class SpaceHASTENGUI(tk.Tk):
                     self.gui_search_cycle.set(int(msg.split(":")[1]))
                 if msg.startswith("UpdateVS"):
                     self.button_vs.config(text="Continue virtual screening")
+                if msg == "AskProps":
+                    self.frame_main.grid_forget()
+                    self.frame_props_menu.grid()
+                if msg == "DoneProps":
+                    self.frame_props_menu.grid_forget()
+                    self.frame_working.grid()
+                    self.gui_new()
+                if msg == "PropsAdjust":
+                    self.frame_task_menu.grid_forget()
+                    self.frame_props_menu.grid()
+                if msg == "DoneAdjustProps":
+                    self.frame_props_menu.grid_forget()
+                    self.frame_task_menu.grid()
             except queue.Empty:
                 pass
+
+    # https://stackoverflow.com/questions/3704568/tkinter-button-command-activates-upon-running-program
+    def gui_ask_props(self):
+        self.q.put("AskProps")
 
     def build_main_frame(self):
         self.frame_main = tk.Frame(self)        
         tk.Label(self.frame_main,image=self.logo).grid(row=0)
         tk.Button(self.frame_main,text="Pick Enamine REALSpace seeds",font=self.font_buttons,command=self.gui_pickseeds,bg=self.color_button_bg,fg=self.color_button_fg,activebackground=self.color_button_active_bg,activeforeground=self.color_button_active_fg).grid(row=1)
-        tk.Button(self.frame_main,text="New job",font=self.font_buttons,command=self.gui_new,bg=self.color_button_bg,fg=self.color_button_fg,activebackground=self.color_button_active_bg,activeforeground=self.color_button_active_fg).grid(row=2)
+        tk.Button(self.frame_main,text="New job",font=self.font_buttons,command=self.gui_ask_props,bg=self.color_button_bg,fg=self.color_button_fg,activebackground=self.color_button_active_bg,activeforeground=self.color_button_active_fg).grid(row=2)
         tk.Button(self.frame_main,text="Load existing job",font=self.font_buttons,command=self.gui_load,bg=self.color_button_bg,fg=self.color_button_fg,activebackground=self.color_button_active_bg,activeforeground=self.color_button_active_fg).grid(row=3)
         tk.Button(self.frame_main,text="Quit",font=self.font_buttons,command=quit,bg=self.color_button_bg,fg=self.color_button_fg,activebackground=self.color_button_active_bg,activeforeground=self.color_button_active_fg).grid(row=4)
         tk.Label(self.frame_main,text="").grid(row=5)
@@ -205,8 +236,12 @@ class SpaceHASTENGUI(tk.Tk):
         tk.Button(self.frame_task_menu,text="Dock",command=self.gui_docking,font=self.font_buttons,bg=self.color_button_bg,fg=self.color_button_fg,activebackground=self.color_button_active_bg,activeforeground=self.color_button_active_fg).grid(row=7,column=2)
         tk.Button(self.frame_task_menu,text="Train",command=self.gui_train,font=self.font_buttons,bg=self.color_button_bg,fg=self.color_button_fg,activebackground=self.color_button_active_bg,activeforeground=self.color_button_active_fg).grid(row=7,column=3)
         ttk.Separator(self.frame_task_menu,orient=tk.HORIZONTAL).grid(row=8,columnspan=4,sticky="ew")
-        tk.Button(self.frame_task_menu,text="Go back",command=self.gui_goto_main_menu,font=self.font_buttons,bg=self.color_button_bg,fg=self.color_button_fg,activebackground=self.color_button_active_bg,activeforeground=self.color_button_active_fg).grid(row=9,columnspan=4)
-        tk.Button(self.frame_task_menu,text="Quit",command=quit,font=self.font_buttons,bg=self.color_button_bg,fg=self.color_button_fg,activebackground=self.color_button_active_bg,activeforeground=self.color_button_active_fg).grid(row=10,columnspan=4)
+        tk.Button(self.frame_task_menu,text="Properties",command=self.gui_adjust_props,font=self.font_buttons,bg=self.color_button_bg,fg=self.color_button_fg,activebackground=self.color_button_active_bg,activeforeground=self.color_button_active_fg).grid(row=9,columnspan=4)
+        tk.Button(self.frame_task_menu,text="Go back",command=self.gui_goto_main_menu,font=self.font_buttons,bg=self.color_button_bg,fg=self.color_button_fg,activebackground=self.color_button_active_bg,activeforeground=self.color_button_active_fg).grid(row=10,columnspan=4)
+        tk.Button(self.frame_task_menu,text="Quit",command=quit,font=self.font_buttons,bg=self.color_button_bg,fg=self.color_button_fg,activebackground=self.color_button_active_bg,activeforeground=self.color_button_active_fg).grid(row=11,columnspan=4)
+
+    def gui_adjust_props(self):
+        self.q.put("PropsAdjust")
 
     def validate_float_value(self,P):
         if P == "" or P == "-":
@@ -216,7 +251,64 @@ class SpaceHASTENGUI(tk.Tk):
         except ValueError:
             return False
         return True
-        
+
+    def validate_int_value(self,P):
+        if P == "" or P == "-":
+            return True
+        try:
+            int(P)
+        except ValueError:
+            return False
+        return True
+
+    def build_props_menu(self):
+        self.frame_props_menu = tk.Frame(self)
+        tk.Label(self.frame_props_menu,image=self.logo,font=self.font_text).grid(row=0,columnspan=3)
+        tk.Label(self.frame_props_menu,text="Minimum:",font=self.font_text).grid(row=1,column=1)
+        tk.Label(self.frame_props_menu,text="Maximum:",font=self.font_text).grid(row=1,column=2)
+        ttk.Separator(self.frame_props_menu,orient=tk.HORIZONTAL).grid(row=2,columnspan=3,sticky="ew")
+        tk.Label(self.frame_props_menu,text="Molecular weight:",font=self.font_text).grid(row=3,column=0)
+        tk.Entry(self.frame_props_menu,textvariable=self.gui_mw_min,width=5,font=self.font_text,validate="all",validatecommand=(self.register(self.validate_float_value),"%P")).grid(row=3,column=1)
+        tk.Entry(self.frame_props_menu,textvariable=self.gui_mw_max,width=5,font=self.font_text,validate="all",validatecommand=(self.register(self.validate_float_value),"%P")).grid(row=3,column=2)
+        tk.Label(self.frame_props_menu,text="LogP",font=self.font_text).grid(row=4,column=0)
+        tk.Entry(self.frame_props_menu,textvariable=self.gui_slogp_min,width=5,font=self.font_text,validate="all",validatecommand=(self.register(self.validate_float_value),"%P")).grid(row=4,column=1)
+        tk.Entry(self.frame_props_menu,textvariable=self.gui_slogp_max,width=5,font=self.font_text,validate="all",validatecommand=(self.register(self.validate_float_value),"%P")).grid(row=4,column=2)
+        tk.Label(self.frame_props_menu,text="Hydrogen bond acceptors:",font=self.font_text).grid(row=5,column=0)
+        tk.Entry(self.frame_props_menu,textvariable=self.gui_hba_min,width=5,font=self.font_text,validate="all",validatecommand=(self.register(self.validate_int_value),"%P")).grid(row=5,column=1)
+        tk.Entry(self.frame_props_menu,textvariable=self.gui_hba_max,width=5,font=self.font_text,validate="all",validatecommand=(self.register(self.validate_int_value),"%P")).grid(row=5,column=2)
+        tk.Label(self.frame_props_menu,text="Hydrogen bond donors",font=self.font_text).grid(row=6,column=0)
+        tk.Entry(self.frame_props_menu,textvariable=self.gui_hbd_min,width=5,font=self.font_text,validate="all",validatecommand=(self.register(self.validate_int_value),"%P")).grid(row=6,column=1)
+        tk.Entry(self.frame_props_menu,textvariable=self.gui_hbd_max,width=5,font=self.font_text,validate="all",validatecommand=(self.register(self.validate_int_value),"%P")).grid(row=6,column=2)
+        tk.Label(self.frame_props_menu,text="Rotatable bonds:",font=self.font_text).grid(row=7,column=0)
+        tk.Entry(self.frame_props_menu,textvariable=self.gui_rotbonds_min,width=5,font=self.font_text,validate="all",validatecommand=(self.register(self.validate_int_value),"%P")).grid(row=7,column=1)
+        tk.Entry(self.frame_props_menu,textvariable=self.gui_rotbonds_max,width=5,font=self.font_text,validate="all",validatecommand=(self.register(self.validate_int_value),"%P")).grid(row=7,column=2)
+        tk.Label(self.frame_props_menu,text="TPSA:",font=self.font_text).grid(row=8,column=0)
+        tk.Entry(self.frame_props_menu,textvariable=self.gui_tpsa_min,width=5,font=self.font_text,validate="all",validatecommand=(self.register(self.validate_float_value),"%P")).grid(row=8,column=1)
+        tk.Entry(self.frame_props_menu,textvariable=self.gui_tpsa_max,width=5,font=self.font_text,validate="all",validatecommand=(self.register(self.validate_float_value),"%P")).grid(row=8,column=2)
+        ttk.Separator(self.frame_props_menu,orient=tk.HORIZONTAL).grid(row=9,columnspan=3,sticky="ew")
+        tk.Button(self.frame_props_menu,text="Done",command=self.gui_done_props,font=self.font_buttons,bg=self.color_button_bg,fg=self.color_button_fg,activebackground=self.color_button_active_bg,activeforeground=self.color_button_active_fg).grid(row=10,columnspan=3)
+
+    def gui_done_props(self):
+        # if we are creating new job, properties are added by importseeds_functions.import_seeds()
+        if self.gui_dbname.get() != "<not defined>":
+            job_args = SimpleNamespace()
+            job_args.prop_mw_min = str(self.gui_mw_min.get())
+            job_args.prop_mw_max = str(self.gui_mw_max.get())
+            job_args.prop_slogp_min = str(self.gui_slogp_min.get())
+            job_args.prop_slogp_max = str(self.gui_slogp_max.get())
+            job_args.prop_hba_min = str(self.gui_hba_min.get())
+            job_args.prop_hba_max = str(self.gui_hba_max.get())
+            job_args.prop_hbd_min = str(self.gui_hbd_min.get())
+            job_args.prop_hbd_max = str(self.gui_hbd_max.get())
+            job_args.prop_rotbonds_min = str(self.gui_rotbonds_min.get())
+            job_args.prop_rotbonds_max = str(self.gui_rotbonds_max.get())
+            job_args.prop_tpsa_min = str(self.gui_tpsa_min.get())
+            job_args.prop_tpsa_max = str(self.gui_tpsa_max.get())
+            functions.update_dbsh_properties(self.gui_dbname.get(),job_args)
+            self.q.put("DoneAdjustProps")
+        else:
+            self.q.put("DoneProps")
+
     def build_export_menu(self):
         self.frame_export_menu = tk.Frame(self)
         tk.Label(self.frame_export_menu,image=self.logo,font=self.font_text).grid(row=0)
@@ -321,9 +413,9 @@ class SpaceHASTENGUI(tk.Tk):
             if ask_n_queries is None: return
             ask_n_docked = self.gui_ask_num("Number of docked molecules","How many molecules to dock?",self.c.DOCKING_DEFAULT,"Virtual screening cancelled")
             if ask_n_docked is None: return
-            ask_cpu_count_simsearch = self.gui_ask_num("SimSearch tasks","How many parallel SimSearch tasks ("+self.c.SLURM_CPU_COUNT_SEARCH+" core(s) each)?",250,"Virtual screening cancelled")
+            ask_cpu_count_simsearch = self.gui_ask_num("SimSearch tasks","How many parallel SimSearch tasks ("+self.c.CPU_COUNT_SEARCH+" core(s) each)?",250,"Virtual screening cancelled")
             if ask_cpu_count_simsearch is None: return
-            ask_cpu_count_docking = self.gui_ask_num("Docking tasks","How many parallel docking tasks ("+self.c.SLURM_CPU_COUNT_DOCK+" core(s) each)?",250,"Virtual screening cancelled")
+            ask_cpu_count_docking = self.gui_ask_num("Docking tasks","How many parallel docking tasks ("+self.c.CPU_COUNT_DOCK+" core(s) each)?",250,"Virtual screening cancelled")
             if ask_cpu_count_docking is None: return
 
             job_args = SimpleNamespace()
@@ -411,10 +503,8 @@ class SpaceHASTENGUI(tk.Tk):
         self.q.put("UpdateModel:"+str(functions.get_latest_model(job_args.name)))
         self.q.put("Percent:99.9")
         self.q.put("DoneTaskmenu")
-            
+
     def gui_new(self):
-        self.frame_main.grid_forget()
-        self.frame_working.grid()
         csv_or_smiles = messagebox.askyesnocancel("Docked already?","Have you already docked the seeds?")
         if csv_or_smiles is None:
             messagebox.showwarning(title="Note",message="New job cancelled")
@@ -474,6 +564,19 @@ class SpaceHASTENGUI(tk.Tk):
         job_args.q = self.q
         job_args.glidegridfile = glidegridfile
 
+        job_args.prop_mw_min = str(self.gui_mw_min.get())
+        job_args.prop_mw_max = str(self.gui_mw_max.get())
+        job_args.prop_slogp_min = str(self.gui_slogp_min.get())
+        job_args.prop_slogp_max = str(self.gui_slogp_max.get())
+        job_args.prop_hba_min = str(self.gui_hba_min.get())
+        job_args.prop_hba_max = str(self.gui_hba_max.get())
+        job_args.prop_hbd_min = str(self.gui_hbd_min.get())
+        job_args.prop_hbd_max = str(self.gui_hbd_max.get())
+        job_args.prop_rotbonds_min = str(self.gui_rotbonds_min.get())
+        job_args.prop_rotbonds_max = str(self.gui_rotbonds_max.get())
+        job_args.prop_tpsa_min = str(self.gui_tpsa_min.get())
+        job_args.prop_tpsa_max = str(self.gui_tpsa_max.get())
+
         if len(job_args.name)>self.c.MAX_JOBNAME_LEN:
             self.frame_working.grid_forget()
             self.frame_main.grid()
@@ -523,6 +626,20 @@ class SpaceHASTENGUI(tk.Tk):
             messagebox.showwarning(title="Note",message="Loading cancelled")
             return
         self.gui_dbname.set(dbname)
+        prop_args = functions.get_dbsh_properties(dbname)
+        self.gui_mw_min.set(float(prop_args.prop_mw_min))
+        self.gui_mw_max.set(float(prop_args.prop_mw_max))
+        self.gui_slogp_min.set(float(prop_args.prop_slogp_min))
+        self.gui_slogp_max.set(float(prop_args.prop_slogp_max))
+        self.gui_hba_min.set(int(prop_args.prop_hba_min))
+        self.gui_hba_max.set(int(prop_args.prop_hba_max))
+        self.gui_hbd_min.set(int(prop_args.prop_hbd_min))
+        self.gui_hbd_max.set(int(prop_args.prop_hbd_max))
+        self.gui_rotbonds_min.set(int(prop_args.prop_rotbonds_min))
+        self.gui_rotbonds_max.set(int(prop_args.prop_rotbonds_max))
+        self.gui_tpsa_min.set(float(prop_args.prop_tpsa_min))
+        self.gui_tpsa_max.set(float(prop_args.prop_tpsa_max))
+
         name = dbname.split("/")[-1].split(".")[0]
         os.chdir("/".join(dbname.split("/")[0:-1]))
         self.gui_search_cycle.set(functions.get_latest_cycle(name))
@@ -545,6 +662,10 @@ class SpaceHASTENGUI(tk.Tk):
     def gui_goto_task_menu(self):
         self.frame_export_menu.grid_forget()
         self.frame_task_menu.grid()
+
+    def gui_goto_new_search(self):
+        self.frame_props_menu.grid_forget()
+        self.frame_working.grid()
 
     def gui_export(self):
         self.q.put("Percent:0.0")
@@ -598,7 +719,7 @@ class SpaceHASTENGUI(tk.Tk):
 
         ask_n_docked = self.gui_ask_num("Number of docked molecules","How many molecules to dock?",self.c.DOCKING_DEFAULT,"Docking cancelled")
         if ask_n_docked is None: return
-        ask_cpu_count_docking = self.gui_ask_num("Docking tasks","How many parallel docking tasks ("+self.c.SLURM_CPU_COUNT_DOCK+" core(s) each)?",250,"Docking cancelled")
+        ask_cpu_count_docking = self.gui_ask_num("Docking tasks","How many parallel docking tasks ("+self.c.CPU_COUNT_DOCK+" core(s) each)?",250,"Docking cancelled")
         if ask_cpu_count_docking is None: return
 
         job_args = SimpleNamespace()
@@ -652,7 +773,7 @@ class SpaceHASTENGUI(tk.Tk):
         
         ask_n_queries = self.gui_ask_num("Number of SimSearch queries","How many SimSearch queries to run?",self.c.QUERIES_DEFAULT,"Virtual screening cancelled")
         if ask_n_queries is None: return
-        ask_cpu_count_simsearch = self.gui_ask_num("SimSearch tasks","How many parallel SimSearch tasks ("+self.c.SLURM_CPU_COUNT_SEARCH+" core(s) each)?",250,"Virtual screening cancelled")
+        ask_cpu_count_simsearch = self.gui_ask_num("SimSearch tasks","How many parallel SimSearch tasks ("+self.c.CPU_COUNT_SEARCH+" core(s) each)?",250,"Virtual screening cancelled")
         if ask_cpu_count_simsearch is None: return
         
         job_args = SimpleNamespace()

@@ -38,6 +38,63 @@ import cfg
 
 import sys
 import subprocess
+from types import SimpleNamespace
+
+def get_dbsh_properties(dbname):
+    """
+    Get property ranges from .dbsh
+    
+    :params dbname: contains .dbsh filename
+    :return args Namespace containg values
+    """
+    job_args = SimpleNamespace()
+    conn = sqlite3.connect(dbname)
+    c = conn.cursor()
+    try:
+        job_args.prop_mw_min,job_args.prop_mw_max = c.execute("SELECT min_limit,max_limit FROM properties WHERE property LIKE 'mw'").fetchall()[0]
+        job_args.prop_slogp_min,job_args.prop_slogp_max = c.execute("SELECT min_limit,max_limit FROM properties WHERE property LIKE 'slogp'").fetchall()[0]
+        job_args.prop_hba_min,job_args.prop_hba_max = c.execute("SELECT min_limit,max_limit FROM properties WHERE property LIKE 'hba'").fetchall()[0]
+        job_args.prop_hbd_min,job_args.prop_hbd_max = c.execute("SELECT min_limit,max_limit FROM properties WHERE property LIKE 'hbd'").fetchall()[0]
+        job_args.prop_rotbonds_min,job_args.prop_rotbonds_max = c.execute("SELECT min_limit,max_limit FROM properties WHERE property LIKE 'rotbonds'").fetchall()[0]
+        job_args.prop_tpsa_min,job_args.prop_tpsa_max = c.execute("SELECT min_limit,max_limit FROM properties WHERE property LIKE 'tpsa'").fetchall()[0]
+    except:
+        print("NOTE: Most likely old .dbsh file and No properties found in "+dbname+", using defaults from spacehasten.ini....")
+        def_config = cfg.SpaceHASTENConfiguration()
+        job_args.prop_mw_min = def_config.PROP_MW_MIN_DEFAULT
+        job_args.prop_mw_max = def_config.PROP_MW_MAX_DEFAULT
+        job_args.prop_slogp_min = def_config.PROP_SLOGP_MIN_DEFAULT
+        job_args.prop_slogp_max = def_config.PROP_SLOGP_MAX_DEFAULT
+        job_args.prop_hba_min = def_config.PROP_HBA_MIN_DEFAULT
+        job_args.prop_hba_max = def_config.PROP_HBA_MAX_DEFAULT
+        job_args.prop_hbd_min = def_config.PROP_HBD_MIN_DEFAULT
+        job_args.prop_hbd_max = def_config.PROP_HBD_MAX_DEFAULT
+        job_args.prop_rotbonds_min = def_config.PROP_ROTBONDS_MIN_DEFAULT
+        job_args.prop_rotbonds_max = def_config.PROP_ROTBONDS_MAX_DEFAULT
+        job_args.prop_tpsa_min = def_config.PROP_TPSA_MIN_DEFAULT
+        job_args.prop_tpsa_max = def_config.PROP_TPSA_MAX_DEFAULT
+    conn.close()
+    return job_args
+
+
+def update_dbsh_properties(dbname,args):
+    """ 
+    Update property ranges in .dbshfile using args
+
+    :params dbname: contains .dbsh filename
+    :param args: contains all property ranges
+    """
+    conn = sqlite3.connect(dbname)
+    c = conn.cursor()
+    c.execute("DROP TABLE IF EXISTS properties")
+    c.execute("CREATE TABLE properties (property TEXT,is_double INTEGER,min_limit TEXT,max_limit TEXT)")
+    c.execute("INSERT INTO properties (property,is_double,min_limit,max_limit) VALUES ('mw',1,"+args.prop_mw_min+","+args.prop_mw_max+")")
+    c.execute("INSERT INTO properties (property,is_double,min_limit,max_limit) VALUES ('slogp',1,"+args.prop_slogp_min+","+args.prop_slogp_max+")")
+    c.execute("INSERT INTO properties (property,is_double,min_limit,max_limit) VALUES ('hba',0,"+args.prop_hba_min+","+args.prop_hba_max+")")
+    c.execute("INSERT INTO properties (property,is_double,min_limit,max_limit) VALUES ('hbd',0,"+args.prop_hbd_min+","+args.prop_hbd_max+")")
+    c.execute("INSERT INTO properties (property,is_double,min_limit,max_limit) VALUES ('rotbonds',0,"+args.prop_rotbonds_min+","+args.prop_rotbonds_max+")")
+    c.execute("INSERT INTO properties (property,is_double,min_limit,max_limit) VALUES ('tpsa',1,"+args.prop_tpsa_min+","+args.prop_tpsa_max+")")
+    conn.commit()
+    conn.close()
 
 def check_glide_gridgen_input(glideinfile):
     """ 

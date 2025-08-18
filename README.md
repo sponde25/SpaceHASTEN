@@ -1,4 +1,4 @@
-SpaceHASTEN version 0.5, Developed by Tuomo Kalliokoski, Orion Pharma <tuomo.kalliokoski at orionpharma.com>, 2025-06-24
+SpaceHASTEN version 0.6, Developed by Tuomo Kalliokoski, Orion Pharma <tuomo.kalliokoski at orionpharma.com>, 2025-08-18
 
 # Introduction
 
@@ -9,12 +9,12 @@ Only Linux is supported (tested on Ubuntu 22.04.4 and Rocky Linux 8.8).
 
 SpaceHASTEN requires following commercial software:
 
-* Schrödinger Suite (version 2024-4): phase/ligprep, glide, python API (run)[https://www.schrodinger.com/release-download/]
-* SpaceLight (version 1.5.0)[https://www.biosolveit.de/download/?product=spacelight]
-* FTrees (version 6.13.0)[https://www.biosolveit.de/download/?product=ftrees]
+* Schrödinger Suite (version 2025-3): phase/ligprep, glide, python API (run)[https://www.schrodinger.com/release-download/]
+* SpaceLight (version 2.0.0)[https://www.biosolveit.de/download/?product=spacelight]
+* FTrees (version 7.0.0)[https://www.biosolveit.de/download/?product=ftrees]
 
 Depending where you work, anaconda3 [may or may not be free for you][https://www.anaconda.com/pricing]:
-* miniconda3[https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh]
+* miniconda3 [https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh]
 
 In addition, these free tools must be installed:
 
@@ -69,3 +69,7 @@ If you still think that you have all pieces in place, follow these instructions:
     * When picking Enamine seeds, original compound names are now kept instead of renaming them (issue #12, gui.py and functions.py)
     * Glide .in file is now checked for the common mistake of picking grid generation .in file instead (issue #7, gui.py and functions.py)
     * various smaller changes to installer and post-install verification tool (install_spacehasten.py and verify_spacehasten.py)
+* 0.6:
+    * properties are now adjustable for each screen separately and not anymore globally controlled via spacehasten.ini (issue #14, gui.py, cfg.py, simsearch_functions.py, importseeds_functions.py, functions.py)
+    * similarity searching doesn't crash anymore if no compounds are retrieved (simsearch_functions.py)
+    * alpha-version of SGE support (issue #8, cfg.py, slurm_functions.py renamed to scheduler_functions.py, docking_functions.py, prediction_functions.py, training_functions.py, simsearch_functions.py, spacehasten, gui.py, install_spacehasten.py, verify_spacehasten.py, verify)

@@ -101,22 +101,19 @@ def write_train_slurm(c,verdir):
     """
     Write slurm script for training
 
-    :param control_dir: Work directory
-    :param args: the args
     """
     jobname="verifytrain"
     w = open("submit_"+jobname+".sh","wt")
     w.write("#!/bin/bash\n")
-    w.write("#SBATCH -J "+jobname+"\n")
+    w.write(c.SCHEDULER_JOBNAME+" "+jobname+"\n")
     w.write("#SBATCH -o train.log\n")
     w.write("#SBATCH -e train.err\n")
-    w.write("#SBATCH "+c.SLURM_GPU_PARAMETER+"\n")
-    if c.SLURM_GPU_EXCLUSIVE == "1":
-        w.write("#SBATCH --exclusive\n")
+    w.write(c.SCHEDULER_GPU+"\n")
+    w.write(c.SCHEDULER_GPU_EXCLUSIVE+"\n")
     w.write("cd "+verdir+"\n")
-    w.write(c.SLURM_PREPARE_ANACONDA + "\n")
-    w.write(c.SLURM_ACTIVATE_CHEMPROP + "\n")
-    w.write("chemprop train --task-type regression --target-columns docking_score --data-path example.csv --save-dir verifytrain_model --batch-size 250 --no-cache --epochs 30\n")
+    w.write(c.PREPARE_ANACONDA + "\n")
+    w.write(c.ACTIVATE_CHEMPROP + "\n")
+    w.write("chemprop train --devices 1 --num-workers 0 --task-type regression --target-columns docking_score --data-path example.csv --save-dir verifytrain_model --batch-size 250 --no-cache --epochs 30\n")
     w.write("touch jobdone-verifytrain\n")
     w.close()
 
@@ -126,11 +123,11 @@ def write_dock_slurm(c):
     personal_scratch=c.SCRATCH_DEFAULT+"/"+os.getenv("USER")+"/"+cpuname
     w = open("submit_"+jobname+".sh","wt")
     w.write("#!/bin/bash\n")
-    w.write("#SBATCH -J "+jobname+"\n")
-    w.write("#SBATCH -o /dev/null\n")
-    w.write("#SBATCH -e /dev/null\n")
-    w.write("#SBATCH -p "+c.SLURM_PARTITION+"\n")
-    w.write("#SBATCH -n 1\n")
+    w.write(c.SCHEDULER_JOBNAME+" "+jobname+"\n")
+    w.write(c.SCHEDULER_OUTPUT_LOG+"\n")
+    w.write(c.SCHEDULER_OUTPUT_ERR+"\n")
+    w.write(c.SCHEDULER_PARTITION+"\n")
+    w.write(c.SCHEDULER_CPU_PER_TASK+str(c.CPU_COUNT_DOCK)+"\n")
     w.write("export SCHRODINGER_FEATURE_FLAGS=\"\"\n")
     w.write("curdir=$(pwd)\n")
     w.write("rm -fr "+personal_scratch+"\n")
@@ -263,6 +260,7 @@ print("     |_|                                               ")
 print()
 print("SpaceHASTEN " + str(cfg.SpaceHASTENConfiguration.SPACEHASTEN_VERSION)+"\n")
 print("This script checks that all bits and pieces required to run SpaceHASTEN are in place.")
+print("NOTE: this works only with slurm, SGE users should manually verify their installation.")
 
 c = cfg.SpaceHASTENConfiguration()
 print("SpaceHASTEN directory:",c.SPACEHASTEN_DIRECTORY)

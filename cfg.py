@@ -37,7 +37,7 @@ class SpaceHASTENConfiguration:
     CONTROL_EXE = SPACEHASTEN_DIRECTORY+"/control.py"
     CHUNKPREDICT_EXE = SPACEHASTEN_DIRECTORY+"/chunkpredict.py"
     EXPORTPOSES_EXE = "$SCHRODINGER/run " + SPACEHASTEN_DIRECTORY + "/export_poses.py"
-    SPACEHASTEN_VERSION=0.5
+    SPACEHASTEN_VERSION = 0.6
     MAX_CORES = 250
     MAX_JOBNAME_LEN = 15
     EXE_SPACELIGHT_DEFAULT = "/data/programs/BiosolveIT/spacelight-1.5.0-Linux-x64/spacelight"
@@ -73,15 +73,34 @@ class SpaceHASTENConfiguration:
     FIELD_SCORE_DEFAULT = "r_i_docking_score"
     FIELD_SIMILARITY_SPACELIGHT = "fingerprint-similarity"
     FIELD_SIMILARITY_FTREES = "pharmacophore-similarity"
-    SLURM_PARTITION = "jobs"
-    SLURM_PREPARE_ANACONDA = "source /data/programs/oce/actoce"
-    SLURM_ACTIVATE_CHEMPROP = "conda activate chemprop"
-    SLURM_GPU_PARAMETER = "--gpus=1"
-    SLURM_GPU_EXCLUSIVE = "1"
-    SLURM_CPU_COUNT_SEARCH = "2"
-    SLURM_CPU_COUNT_DOCK = "1"
-    SLURM_CPU_COUNT_PREDICT = "1"
-    SLURM_CPU_COUNT_CONTROL = "1"
+
+    SCHEDULER = "slurm"
+    PREPARE_ANACONDA = None
+    ACTIVATE_CHEMPROP = None
+    GPU_EXCLUSIVE = "1"
+    CPU_COUNT_SEARCH = "2"
+    CPU_COUNT_DOCK = "1"
+    CPU_COUNT_PREDICT = "1"
+    CPU_COUNT_CONTROL = "1"
+
+    SCHEDULER_SUBMIT = None
+    SCHEDULER_JOBNAME = None
+    SCHEDULER_OUTPUT_LOG = None
+    SCHEDULER_OUTPUT_ERR = None
+    SCHEDULER_PARTITION = None
+    SCHEDULER_CPU_PER_TASK = None
+    SCHEDULER_ARRAY_JOB = None
+    SCHEDULER_ARRAY_ID = None
+    SCHEDULER_GPU = None
+    SCHEDULER_GPU_EXLUSIVE = None
+    SCHEDULER_PARTITION = None
+
+    SLURM_PARTITION = None
+    SLURM_GPU_PARAMETER = None
+
+    SGE_QUEUE = None
+    SGE_PE = None
+    SGE_GPU_PARAMETER = None
     
     ENAMINEREAL_SEEDS = "/data/tuomo/PROJECTS/SPACEHASTEN/Enamine_Diverse_REAL_drug-like_48.2M_cxsmiles.cxsmiles.bz2"
     ENAMINEREAL_SEEDS_COUNT = 1000000
@@ -90,6 +109,27 @@ class SpaceHASTENConfiguration:
     def __init__(self):
         cparser = configparser.ConfigParser()
         cparser.read(self.SPACEHASTEN_DIRECTORY+"/spacehasten.ini")
+
+        for setting in cparser["General"]:
+            if setting == "scheduler":
+                self.SCHEDULER = cparser["General"][setting]
+            elif setting == "prepare_anaconda":
+                self.PREPARE_ANACONDA = cparser["General"][setting]
+            elif setting == "activate_chemprop":
+                self.ACTIVATE_CHEMPROP = cparser["General"][setting]
+            elif setting == "gpu_exclusive":
+                self.GPU_EXCLUSIVE = cparser["General"][setting]
+            elif setting == "cpu_count_search":
+                self.CPU_COUNT_SEARCH = cparser["General"][setting]
+            elif setting == "cpu_count_dock":
+                self.CPU_COUNT_DOCK = cparser["General"][setting]
+            elif setting == "cpu_count_predict":
+                self.CPU_COUNT_PREDICT = cparser["General"][setting]
+            elif setting == "cpu_count_control":
+                self.CPU_COUNT_CONTROL = cparser["General"][setting]
+            else:
+                print("Error: Unknown setting in spacehasten.ini:",setting)
+                sys.exit(1)
 
         for setting in cparser["Paths"]:
             if setting == "exe_spacelight_default":
@@ -117,16 +157,21 @@ class SpaceHASTENConfiguration:
                 self.SLURM_ACTIVATE_CHEMPROP = cparser["Slurm"][setting]
             elif setting == "slurm_gpu_parameter":
                 self.SLURM_GPU_PARAMETER = cparser["Slurm"][setting]
-            elif setting == "slurm_gpu_exclusive":
-                self.SLURM_GPU_EXCLUSIVE = cparser["Slurm"][setting]
-            elif setting == "slurm_cpu_count_search":
-                self.SLURM_CPU_COUNT_SEARCH = cparser["Slurm"][setting]
-            elif setting == "slurm_cpu_count_dock":
-                self.SLURM_CPU_COUNT_DOCK = cparser["Slurm"][setting]
-            elif setting == "slurm_cpu_count_predict":
-                self.SLURM_CPU_COUNT_PREDICT = cparser["Slurm"][setting]
-            elif setting == "slurm_cpu_count_control":
-                self.SLURM_CPU_COUNT_CONTROL = cparser["Slurm"][setting]
+            else:
+                print("Error: Unknown setting in spacehasten.ini:",setting)
+                sys.exit(1)
+
+        for setting in cparser["SGE"]:
+            if setting == "sge_queue":
+                self.SGE_QUEUE = cparser["SGE"][setting]
+            elif setting == "sge_pe":
+                self.SGE_PE = cparser["SGE"][setting]
+            elif setting == "sge_prepare_anaconda":
+                self.SGE_PREPARE_ANACONDA = cparser["SGE"][setting]
+            elif setting == "sge_activate_chemprop":
+                self.SGE_ACTIVATE_CHEMPROP = cparser["SGE"][setting]
+            elif setting == "sge_gpu_parameter":
+                self.SGE_GPU_PARAMETER = cparser["SGE"][setting]
             else:
                 print("Error: Unknown setting in spacehasten.ini:",setting)
                 sys.exit(1)
@@ -178,5 +223,33 @@ class SpaceHASTENConfiguration:
             sys.exit("Error: invalid SpaceHASTEN installation, export_poses.py missing!")
         if not os.path.exists(self.SPACEHASTEN_DIRECTORY+"/spacehasten_logo.png"):
             sys.exit("Error: invalid SpaceHASTEN installation, spacehasten_logo missing!")
-        
-        
+        if self.SCHEDULER == "slurm" :
+            self.SCHEDULER_SUBMIT = "sbatch"
+            self.SCHEDULER_JOBNAME = "#SBATCH -J"
+            self.SCHEDULER_OUTPUT_LOG = "#SBATCH -o /dev/null"
+            self.SCHEDULER_OUTPUT_ERR = "#SBATCH -e /dev/null"
+            self.SCHEDULER_PARTITION = "#SBATCH -p "+self.SLURM_PARTITION
+            self.SCHEDULER_CPU_PER_TASK = "#SBATCH --cpus-per-task="
+            self.SCHEDULER_ARRAY_JOB = "#SBATCH --array=1-"
+            self.SCHEDULER_ARRAY_ID="SLURM_ARRAY_TASK_ID"
+            self.SCHEDULER_GPU = "#SBATCH "+self.SLURM_GPU_PARAMETER
+            if self.GPU_EXCLUSIVE == "1":
+                self.SCHEDULER_GPU_EXCLUSIVE = "#SBATCH --exclusive"
+            else:
+                self.SCHEDULER_GPU_EXCLUSIVE = "#nop"
+        elif self.SCHEDULER != "SGE":
+            self.SCHEDULER_SUBMIT = "qsub"
+            self.SCHEDULER_JOBNAME = "#$ -N"
+            self.SCHEDULER_OUTPUT_LOG = "#$ -o /dev/null"
+            self.SCHEDULER_OUTPUT_ERR = "#$ -e /dev/null"
+            self.SCHEDULER_PARTITION = "#$ -q "+self.SGE_QUEUE
+            self.SCHEDULER_CPU_PER_TASK = "#$ -pe "+self.SGE_PE+" "
+            self.SCHEDULER_ARRAY_JOB = "#$ -t 1-"
+            self.SCHEDULER_ARRAY_ID="SGE_TASK_ID"
+            self.SCHEDULER_GPU = "#$ "+self.SGE_GPU_PARAMETER
+            if self.GPU_EXCLUSIVE == "1":
+                self.SCHEDULER_GPU_EXCLUSIVE = "#$ -l exclusive"
+            else:
+                self.SCHEDULER_GPU_EXCLUSIVE = "#nop"
+        else:
+            sys.exit("Error: Unknown scheduler ('"+self.SCHEDULER+"') defined in spacehasten.ini (only slurm and SGE supported).")

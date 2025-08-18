@@ -1,6 +1,6 @@
 # SpaceHASTEN: docking functions
 #
-# Copyright (c) 2024 Orion Corporation
+# Copyright (c) 2024-2025 Orion Corporation
 # 
 # Redistribution and use in source and binary forms, with or without 
 # modification, are permitted provided that the following conditions are met:
@@ -33,7 +33,7 @@ import tqdm
 import glob
 import pandas as pd
 import time
-import slurm_functions
+import scheduler_functions
 import multiprocessing as mp
 import random
 
@@ -160,11 +160,11 @@ def dock(args,importing_seeds=False,do_not_update_gui=False):
             new_file = True
     if not new_file:
         w.close()
-    slurm_functions.write_dock_slurm(dock_dir,args,chunk_counter)
+    scheduler_functions.write_dock_scheduler(dock_dir,args,chunk_counter)
     curdir = os.getcwd()
     os.chdir(dock_dir)
     os.system("rm -f jobdone-"+args.name+"-CPU*")
-    print("Running docking via slurm at "+dock_dir+" ...")
+    print("Running docking via scheduler at "+dock_dir+" ...")
     os.system("sbatch submit_dockinput_"+args.name+"_iter"+str(dock_iteration)+".sh")
     os.chdir(curdir)
     #jobs_left = args.cpu - len(glob.glob(dock_dir+"/jobdone-"+args.name+"-CPU*"))

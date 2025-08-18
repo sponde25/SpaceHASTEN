@@ -25,12 +25,12 @@
 # CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) 
 # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE 
 # POSSIBILITY OF SUCH DAMAGE.
-# 
+ 
 import os
 import functions
 import sqlite3
 import pandas as pd
-import slurm_functions
+import scheduler_functions
 import time
 import glob
 
@@ -59,11 +59,11 @@ def train_new_model(args):
     training_data["docking_score"] = training_data["dock_score"]
     training_data.drop(["dock_score"],axis=1,inplace=True)
     training_data.to_csv(data_filename,index=False)
-    slurm_functions.write_train_slurm(modeldir,args)
+    scheduler_functions.write_train_scheduler(modeldir,args)
 
     curdir=os.getcwd()
     os.chdir(modeldir)
-    print("Running training via slurm at "+modeldir+" ...")
+    print("Running training via scheduler at "+modeldir+" ...")
     os.system("sbatch submit_train_"+args.name+"_ver"+str(model_version)+".sh")
     jobs_left = 1 - len(glob.glob(modeldir+"/jobdone-train_"+args.name+"*"))
     while jobs_left>0:

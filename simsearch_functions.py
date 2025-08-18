@@ -29,7 +29,7 @@
 import os
 import functions
 import sqlite3
-import slurm_functions
+import scheduler_functions
 import prediction_functions
 import glob
 import time
@@ -90,7 +90,7 @@ def process_sim_results(cycle_dir,args):
                 else:
                     duplicates += 1
         print(len(raw_mols),"before property control added from",sim_method)
-    # split data into smaller chunks for slurm
+    # split data into smaller chunks 
     smiles_per_cpu = round(float(len(raw_mols))/float(args.cpu))
     print("Splitting molecules, SMILES per CPU:",smiles_per_cpu)
 
@@ -109,6 +109,8 @@ def process_sim_results(cycle_dir,args):
     os.remove(model_name+".tar.gz")
     conn.close()
 
+    prop_args = functions.get_dbsh_properties(args.name + ".dbsh")
+
     new_file = True
     chunk_size = 0
     for smiles in tqdm.tqdm(raw_mols,mininterval=1):
@@ -126,26 +128,26 @@ def process_sim_results(cycle_dir,args):
     if not new_file:
         w.close()
     
-    slurm_functions.write_control_slurm(cycle_dir+"/CONTROL",args)
+    scheduler_functions.write_control_scheduler(cycle_dir+"/CONTROL",args)
     w = open(cycle_dir+"/CONTROL/control.param","wt")
-    w.write(str(args.c.PROP_MW_MIN_DEFAULT)+"\n")
-    w.write(str(args.c.PROP_MW_MAX_DEFAULT)+"\n")
-    w.write(str(args.c.PROP_SLOGP_MIN_DEFAULT)+"\n")
-    w.write(str(args.c.PROP_SLOGP_MAX_DEFAULT)+"\n")
-    w.write(str(args.c.PROP_HBA_MIN_DEFAULT)+"\n")
-    w.write(str(args.c.PROP_HBA_MAX_DEFAULT)+"\n")
-    w.write(str(args.c.PROP_HBD_MIN_DEFAULT)+"\n")
-    w.write(str(args.c.PROP_HBD_MAX_DEFAULT)+"\n")
-    w.write(str(args.c.PROP_ROTBONDS_MIN_DEFAULT)+"\n")
-    w.write(str(args.c.PROP_ROTBONDS_MAX_DEFAULT)+"\n")
-    w.write(str(args.c.PROP_TPSA_MIN_DEFAULT)+"\n")
-    w.write(str(args.c.PROP_TPSA_MAX_DEFAULT)+"\n")
+    w.write(prop_args.prop_mw_min+"\n")
+    w.write(prop_args.prop_mw_max+"\n")
+    w.write(prop_args.prop_slogp_min+"\n")
+    w.write(prop_args.prop_slogp_max+"\n")
+    w.write(prop_args.prop_hba_min+"\n")
+    w.write(prop_args.prop_hba_max+"\n")
+    w.write(prop_args.prop_hbd_min+"\n")
+    w.write(prop_args.prop_hbd_max+"\n")
+    w.write(prop_args.prop_rotbonds_min+"\n")
+    w.write(prop_args.prop_rotbonds_max+"\n")
+    w.write(prop_args.prop_tpsa_min+"\n")
+    w.write(prop_args.prop_tpsa_max+"\n")
     w.close()
 
     curdir = os.getcwd()
     os.chdir(cycle_dir+"/CONTROL")
     os.system("rm -f jobdone-"+args.name+"-CPU*")
-    print("Controlling properties and predicting docking_score via slurm at "+cycle_dir+"/CONTROL ...")
+    print("Controlling properties and predicting docking_score via scheduler at "+cycle_dir+"/CONTROL ...")
     os.system("sbatch submit_ctrl_"+args.name+"_cycle"+str(functions.get_latest_cycle(args.name))+".sh")
     os.chdir(curdir)
 
@@ -224,12 +226,12 @@ def simsearch(args,do_not_update_gui=False):
     w = open(cycle_dir+"/queries_"+args.name+".smi","wt")
     for smiles,spacehastenid in to_search: w.write(smiles.strip() + " " + str(spacehastenid) + "\n")
     w.close()
-    slurm_functions.write_search_slurm(cycle_dir,args)
+    scheduler_functions.write_search_scheduler(cycle_dir,args)
 
     curdir = os.getcwd()
     os.chdir(cycle_dir)
     os.system("rm -f jobdone-"+args.name+"-CPU*")
-    print("Running similarity searching via slurm...")
+    print("Running similarity searching via scheduler...")
     os.system("sbatch submit_queries_"+args.name+".sh")
     os.chdir(curdir)
     jobs_left = args.top - len(glob.glob(cycle_dir+"/jobdone-"+args.name+"-CPU*"))
@@ -252,33 +254,33 @@ def simsearch(args,do_not_update_gui=False):
         if reghash not in filtered_sims["spacelight"]:
             only_in_ftrees += 1
     print("Only in SpaceLight",only_in_spacelight,", Only in FTrees:",only_in_ftrees)
+    if len(filtered_mols) > 0:
+        print("Making sure that new compounds have unique RegistrationHashes...")
+        df_filtered_mols = pd.DataFrame(filtered_mols,columns=["rawmol"])
+        df_filtered_mols[["RegHash","SMILES","SMILES_ID"]] = df_filtered_mols["rawmol"].str.split("§",expand=True)
+        reghash_unique_filtered_mols = list(df_filtered_mols.groupby("RegHash").first()["rawmol"])
+        print(df_filtered_mols.shape[0],"before unique reghash check")
+        print(len(reghash_unique_filtered_mols),"after unique reghash check")
 
-    print("Making sure that new compounds have unique RegistrationHashes...")
-    df_filtered_mols = pd.DataFrame(filtered_mols,columns=["rawmol"])
-    df_filtered_mols[["RegHash","SMILES","SMILES_ID"]] = df_filtered_mols["rawmol"].str.split("§",expand=True)
-    reghash_unique_filtered_mols = list(df_filtered_mols.groupby("RegHash").first()["rawmol"])
-    print(df_filtered_mols.shape[0],"before unique reghash check")
-    print(len(reghash_unique_filtered_mols),"after unique reghash check")
-
-    print("Checking which are already discovered...")
-    new_filtered_mols = remove_existing(reghash_unique_filtered_mols,args)
-    
-    print("Adding new compounds to SQLite3...")
-    conn = sqlite3.connect(dbname)
-    c = conn.cursor()
-    to_db = []
-    for reghash,smiles,smilesid in new_filtered_mols:
-        spacelight_similarity = None
-        ftrees_similarity = None
-        # 0.2 used here smilesid, 0.3+ reghash
-        if reghash in filtered_sims["spacelight"]:
-            spacelight_similarity = filtered_sims["spacelight"][reghash]
-        if reghash in filtered_sims["ftrees"]:
-            ftrees_similarity = filtered_sims["ftrees"][reghash]
-        to_db.append((reghash,smiles.strip(),smilesid,spacelight_similarity,ftrees_similarity,predicted_scores[reghash],cycle_number))
-    c.executemany("INSERT INTO data(reghash,smiles,smilesid,spacelight,ftrees,pred_score,simsearch_cycle) VALUES (?,?,?,?,?,?,?)",to_db)
-    conn.commit()
-    conn.close()
+        print("Checking which are already discovered...")
+        new_filtered_mols = remove_existing(reghash_unique_filtered_mols,args)
+        
+        print("Adding new compounds to SQLite3...")
+        conn = sqlite3.connect(dbname)
+        c = conn.cursor()
+        to_db = []
+        for reghash,smiles,smilesid in new_filtered_mols:
+            spacelight_similarity = None
+            ftrees_similarity = None
+            # 0.2 used here smilesid, 0.3+ reghash
+            if reghash in filtered_sims["spacelight"]:
+                spacelight_similarity = filtered_sims["spacelight"][reghash]
+            if reghash in filtered_sims["ftrees"]:
+                ftrees_similarity = filtered_sims["ftrees"][reghash]
+            to_db.append((reghash,smiles.strip(),smilesid,spacelight_similarity,ftrees_similarity,predicted_scores[reghash],cycle_number))
+        c.executemany("INSERT INTO data(reghash,smiles,smilesid,spacelight,ftrees,pred_score,simsearch_cycle) VALUES (?,?,?,?,?,?,?)",to_db)
+        conn.commit()
+        conn.close()
     print("\nSimilarity seaching done!")
     os.system("date")
     if not do_not_update_gui:
