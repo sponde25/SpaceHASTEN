@@ -99,21 +99,6 @@ def dock(args,importing_seeds=False,do_not_update_gui=False):
     c = conn.cursor()
     to_be_docked = []
     docked_ids = set()
-    """
-    if args.sff>0:
-        # Obsolete code, but I keep it for reference
-        for smiles,spacehastenid,pred_score in c.execute("SELECT smiles,spacehastenid,pred_score FROM data WHERE dock_score IS NULL AND spacelight IS NOT NULL ORDER BY pred_score LIMIT "+str(top_spacelight)).fetchall():
-            to_be_docked.append(smiles.strip() + " " + str(spacehastenid) + "\n")
-            docked_ids.add(spacehastenid)
-        compounds_left = top_ftrees
-        for smiles,spacehastenid,pred_score in c.execute("SELECT smiles,spacehastenid,pred_score FROM data WHERE dock_score IS NULL and ftrees IS NOT NULL ORDER BY pred_score"):
-            if spacehastenid in docked_ids:
-                continue
-            compounds_left -= 1
-            to_be_docked.append(smiles.strip() + " " + str(spacehastenid) + "\n")
-            if compounds_left <= 0:
-                break
-    """
     
     if importing_seeds:
         print("Picking all imported compounds for docking...")
@@ -127,12 +112,16 @@ def dock(args,importing_seeds=False,do_not_update_gui=False):
     print("Shuffling compounds before docking...")
     random.shuffle(to_be_docked)
 
-    #smiles_per_cpu = round(float(len(to_be_docked))/float(args.cpu))
+    # issue 18: if we are docking smaller sets with large number of CPUs...
+    chunk_size = round(float(len(to_be_docked))/float(args.cpu))
+
+    if chunk_size > args.c.DOCKING_CHUNK:
+        chunk_size = args.c.DOCKING_CHUNK
     
     print("\nCompounds to be docked:")
     print("Total number:",len(to_be_docked))
-    #print("SMILES per CPU:",smiles_per_cpu)
-    print("SMILES per docking job:",args.c.DOCKING_CHUNK)
+    print("SMILES per CPU:",chunk_size)
+    print("Max. SMILES per docking job:",args.c.DOCKING_CHUNK)
 
     if importing_seeds:
         dock_iteration = 0
@@ -155,7 +144,7 @@ def dock(args,importing_seeds=False,do_not_update_gui=False):
             new_file = False
         w.write(line)
         smiles_per_chunk += 1
-        if smiles_per_chunk >= args.c.DOCKING_CHUNK:
+        if smiles_per_chunk >= chunk_size:
             w.close()
             new_file = True
     if not new_file:

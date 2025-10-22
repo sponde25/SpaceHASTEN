@@ -1,4 +1,4 @@
-SpaceHASTEN version 0.6, Developed by Tuomo Kalliokoski, Orion Pharma <tuomo.kalliokoski at orionpharma.com>, 2025-08-18
+SpaceHASTEN version 0.7, Developed by Tuomo Kalliokoski, Orion Pharma <tuomo.kalliokoski at orionpharma.com>, 2025-10-07
 
 # Introduction
 
@@ -37,8 +37,10 @@ pip install -e .
 In addition to software, you'll need some chemical spaces to search.
 Download them from BiosolveIT:[https://www.biosolveit.de/chemical-spaces/]
 
-Enamine provides diverse sets of Enamine REAL compounds that are good sources of seed molecules for Enamine REALSpace searches.
-Download Enamine REAL lead-like subset:[https://enamine.net/compound-collections/real-compounds/real-database-subsets]
+Sets of enumerated compounds can be downloaded from:
+ 
+* Enamine: https://enamine.net/compound-collections/real-compounds/real-database-subsets
+* SYNPLE: https://www.synplechem.com/solutions/public-library-download
 
 For more information, please see the publication in JCIM describing on how the method works. [https://doi.org/10.1021/acs.jcim.4c01790]
 
@@ -73,3 +75,4 @@ If you still think that you have all pieces in place, follow these instructions:
     * properties are now adjustable for each screen separately and not anymore globally controlled via spacehasten.ini (issue #14, gui.py, cfg.py, simsearch_functions.py, importseeds_functions.py, functions.py)
     * similarity searching doesn't crash anymore if no compounds are retrieved (simsearch_functions.py)
     * alpha-version of SGE support (issue #8, cfg.py, slurm_functions.py renamed to scheduler_functions.py, docking_functions.py, prediction_functions.py, training_functions.py, simsearch_functions.py, spacehasten, gui.py, install_spacehasten.py, verify_spacehasten.py, verify)
+* 0.7: docking chunk size can be now less than 1000 if more CPUs are available than there are compounds to dock (issue #18, cfg.py, docking_functions.py)
