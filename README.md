@@ -1,4 +1,4 @@
-SpaceHASTEN version 0.7, Developed by Tuomo Kalliokoski, Orion Pharma <tuomo.kalliokoski at orionpharma.com>, 2025-10-07
+SpaceHASTEN version 0.8, Developed by Tuomo Kalliokoski, Orion Pharma <tuomo.kalliokoski at orionpharma.com>, 2025-10-23
 
 # Introduction
 
@@ -76,3 +76,9 @@ If you still think that you have all pieces in place, follow these instructions:
     * similarity searching doesn't crash anymore if no compounds are retrieved (simsearch_functions.py)
     * alpha-version of SGE support (issue #8, cfg.py, slurm_functions.py renamed to scheduler_functions.py, docking_functions.py, prediction_functions.py, training_functions.py, simsearch_functions.py, spacehasten, gui.py, install_spacehasten.py, verify_spacehasten.py, verify)
 * 0.7: docking chunk size can be now less than 1000 if more CPUs are available than there are compounds to dock (issue #18, cfg.py, docking_functions.py)
+* 0.8:
+    * similarity searching results are now compressed to save disk space (issue #21, cfg.py, scheduler_functions.py, simsearch_functions.py)
+    * added archiving functionality (issue #16, gui.py, install_spacehasten.py, archive_functions.py)
+    * current working directory is now used as the default directory in file requesters (issue #23, gui.py)
+
+

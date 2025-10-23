@@ -71,7 +71,7 @@ os.makedirs(path)
 spacelight_exe = ask_for_file("/data/programs/BiosolveIT/spacelight-2.0.0-Linux-x64/spacelight")
 ftrees_exe = ask_for_file("/data/programs/BiosolveIT/ftrees-7.0.0-Linux-x64/ftrees")
 spaces_dir = ask_for_dir("/data/programs/BiosolveIT/spaces_new","BiosolveIT spaces directory")
-default_space = ask_for_file("/data/programs/BiosolveIT/spaces_new/REALSpace_76bn_2025-07.space","default space")
+default_space = ask_for_file("/data/programs/BiosolveIT/spaces_new/REALSpace_83bn_2025-09.space","default space")
 scratch_dir = ask_for_dir("/wrk","scratch directory")
 enaminereal_seeds = ask_for_file("/data/work/db/Enamine_Diverse_REAL_drug-like_48.2M_cxsmiles.cxsmiles.bz2","Enamine REAL seeds")
 prepare_anaconda = input("Please enter the anaconda3 activation command [default:source /data/programs/oce/actoce]: ")
@@ -138,7 +138,7 @@ files_to_copy = ["verify","verify_spacehasten.py","cfg.py","control.py","chunkpr
                  "export_poses.py","grid-test_dock.zip","spacehasten_logo.png","test_dock.in","examples.smi","example.csv",
                  "control.py","docking_functions.py","export_functions.py","export_poses.py","functions.py","gui.py",
                  "importseeds_functions.py","prediction_functions.py","simsearch_functions.py","scheduler_functions.py","spacehasten",
-                 "spacehasten.py","training_functions.py","example.smi"]
+                 "spacehasten.py","training_functions.py","example.smi","archive_functions.py"]
 for file_to_copy in files_to_copy:
     if not os.path.exists(file_to_copy):
         print("Error: file '"+file_to_copy+"' not found.")
