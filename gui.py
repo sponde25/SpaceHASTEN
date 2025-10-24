@@ -34,6 +34,7 @@ import docking_functions
 import prediction_functions
 import simsearch_functions
 import cfg
+import archive_functions
 
 import tkinter as tk
 from tkinter import ttk
@@ -75,6 +76,7 @@ class SpaceHASTENGUI(tk.Tk):
     progressbar_value = None
     q = None
     button_vs = None
+    
 
     # font definitions
     font_buttons = ("Arial",12)
@@ -201,15 +203,21 @@ class SpaceHASTENGUI(tk.Tk):
 
     def build_main_frame(self):
         self.frame_main = tk.Frame(self)        
-        tk.Label(self.frame_main,image=self.logo).grid(row=0)
-        tk.Button(self.frame_main,text="Pick Enamine REALSpace seeds",font=self.font_buttons,command=self.gui_pickseeds,bg=self.color_button_bg,fg=self.color_button_fg,activebackground=self.color_button_active_bg,activeforeground=self.color_button_active_fg).grid(row=1)
-        tk.Button(self.frame_main,text="New job",font=self.font_buttons,command=self.gui_ask_props,bg=self.color_button_bg,fg=self.color_button_fg,activebackground=self.color_button_active_bg,activeforeground=self.color_button_active_fg).grid(row=2)
-        tk.Button(self.frame_main,text="Load existing job",font=self.font_buttons,command=self.gui_load,bg=self.color_button_bg,fg=self.color_button_fg,activebackground=self.color_button_active_bg,activeforeground=self.color_button_active_fg).grid(row=3)
-        tk.Button(self.frame_main,text="Quit",font=self.font_buttons,command=quit,bg=self.color_button_bg,fg=self.color_button_fg,activebackground=self.color_button_active_bg,activeforeground=self.color_button_active_fg).grid(row=4)
-        tk.Label(self.frame_main,text="").grid(row=5)
-        tk.Label(self.frame_main,text="Developed by Tuomo Kalliokoski, Orion Pharma",font=self.font_text).grid(row=6)
-        tk.Label(self.frame_main,text="Powered by SpaceLight, FTrees, chemprop, Ligprep, Glide and RDKit",font=self.font_text).grid(row=7)
-        tk.Label(self.frame_main,text="J. Chem. Inf. Model. 2025, 65, 1, 125-132",font=self.font_text_italic).grid(row=8)
+        tk.Label(self.frame_main,image=self.logo).grid(row=0,columnspan=4)
+        tk.Button(self.frame_main,text="Pick Enamine REALSpace seeds",font=self.font_buttons,command=self.gui_pickseeds,bg=self.color_button_bg,fg=self.color_button_fg,activebackground=self.color_button_active_bg,activeforeground=self.color_button_active_fg).grid(row=1,column=0,columnspan=4)
+        tk.Button(self.frame_main,text="New job",font=self.font_buttons,command=self.gui_ask_props,bg=self.color_button_bg,fg=self.color_button_fg,activebackground=self.color_button_active_bg,activeforeground=self.color_button_active_fg).grid(row=2,column=0,columnspan=4)
+        tk.Button(self.frame_main,text="Load existing job",font=self.font_buttons,command=self.gui_load,bg=self.color_button_bg,fg=self.color_button_fg,activebackground=self.color_button_active_bg,activeforeground=self.color_button_active_fg).grid(row=3,column=0,columnspan=4)
+        ttk.Separator(self.frame_main,orient=tk.HORIZONTAL).grid(row=4,columnspan=4,sticky="ew")
+        tk.Label(self.frame_main,text="Archive existing job",font=self.font_text).grid(row=5,column=0)
+        tk.Button(self.frame_main,text="Create",font=self.font_buttons,command=self.gui_create_archive,bg=self.color_button_bg,fg=self.color_button_fg,activebackground=self.color_button_active_bg,activeforeground=self.color_button_active_fg).grid(row=5,column=1)
+        tk.Button(self.frame_main,text="Restore",font=self.font_buttons,command=self.gui_restore_archive,bg=self.color_button_bg,fg=self.color_button_fg,activebackground=self.color_button_active_bg,activeforeground=self.color_button_active_fg).grid(row=5,column=2)
+        tk.Button(self.frame_main,text="Clean",font=self.font_buttons,command=self.gui_clean_archive,bg=self.color_button_bg,fg=self.color_button_fg,activebackground=self.color_button_active_bg,activeforeground=self.color_button_active_fg).grid(row=5,column=3)
+        ttk.Separator(self.frame_main,orient=tk.HORIZONTAL).grid(row=6,columnspan=4,sticky="ew")
+        tk.Button(self.frame_main,text="Quit",font=self.font_buttons,command=quit,bg=self.color_button_bg,fg=self.color_button_fg,activebackground=self.color_button_active_bg,activeforeground=self.color_button_active_fg).grid(row=7,columnspan=4)
+        tk.Label(self.frame_main,text="").grid(row=8,columnspan=4)
+        tk.Label(self.frame_main,text="Developed by Tuomo Kalliokoski, Orion Pharma",font=self.font_text).grid(row=9,columnspan=4)
+        tk.Label(self.frame_main,text="Powered by SpaceLight, FTrees, chemprop, Ligprep, Glide and RDKit",font=self.font_text).grid(row=10,columnspan=4)
+        tk.Label(self.frame_main,text="J. Chem. Inf. Model. 2025, 65, 1, 125-132",font=self.font_text_italic).grid(row=11,columnspan=4)
 
     def build_working_frame(self):
         self.frame_working = tk.Frame(self)
@@ -343,7 +351,7 @@ class SpaceHASTENGUI(tk.Tk):
             self.frame_main.grid()
             return
         
-        seedsname = filedialog.asksaveasfilename(filetypes=[("SMILES","*.smi")],defaultextension=".smi",title="Save seeds as...")
+        seedsname = filedialog.asksaveasfilename(filetypes=[("SMILES","*.smi")],defaultextension=".smi",title="Save seeds as...",initialdir=os.getcwd())
         if len(seedsname)==0:
             messagebox.showwarning(title="Note",message="Picking seeds cancelled")
             self.frame_working.grid_forget()
@@ -619,9 +627,9 @@ class SpaceHASTENGUI(tk.Tk):
         
         worker = threading.Thread(target=importseeds_functions.import_seeds,args=(job_args,))
         worker.start()
-        
+
     def gui_load(self):
-        dbname = filedialog.askopenfilename(filetypes=[("SpaceHASTEN files","*.dbsh")],defaultextension=".dbsh",title="Load existing job...")
+        dbname = filedialog.askopenfilename(filetypes=[("SpaceHASTEN files","*.dbsh")],defaultextension=".dbsh",title="Load existing job...",initialdir=os.getcwd())
         if len(dbname)==0:
             messagebox.showwarning(title="Note",message="Loading cancelled")
             return
@@ -650,6 +658,88 @@ class SpaceHASTENGUI(tk.Tk):
         self.frame_main.grid_forget()
         self.frame_task_menu.grid()
         self.title("SpaceHASTEN "+str(self.c.SPACEHASTEN_VERSION)+ " -- "+dbname.split("/")[-1])
+
+    def gui_create_archive(self):
+        dbname = filedialog.askopenfilename(filetypes=[("SpaceHASTEN files","*.dbsh")],defaultextension=".dbsh",title="Pick a job to archive...",initialdir=os.getcwd())
+        if len(dbname)==0:
+            messagebox.showwarning(title="Note",message="Archiving cancelled")
+            return
+        archivename = dbname.replace(".dbsh",".archived-spacehasten")
+        if os.path.exists(archivename):
+            messagebox.showwarning(title="Note",message=archivename+" already exists")
+            return
+
+        job_args = SimpleNamespace()
+        job_args.c = self.c
+        job_args.name = dbname.split("/")[-1].split(".")[0]
+        job_args.dbname = dbname
+        job_args.scratch = self.c.SCRATCH_DEFAULT
+
+        self.frame_main.grid_forget()
+        self.frame_working.grid()
+
+        worker = threading.Thread(target=self.gui_thread_create_archive,args=(job_args,))
+        worker.start()
+
+    def gui_thread_create_archive(self,args):
+        self.q.put("Percent:0")
+        archive_functions.archive(args) 
+        self.q.put("Percent:99.9")
+        self.q.put("Done")
+
+    def gui_restore_archive(self):
+        dbname = filedialog.askopenfilename(filetypes=[("SpaceHASTEN archived files","*.archived-spacehasten")],defaultextension=".archived-spacehasten",title="Pick an archive to restore...",initialdir=os.getcwd())
+        if len(dbname)==0:
+            messagebox.showwarning(title="Note",message="Restore cancelled")
+            return
+        job_args = SimpleNamespace()
+        job_args.c = self.c
+        job_args.name = dbname.split("/")[-1].split(".")[0]
+        job_args.dbname = dbname
+        job_args.scratch = self.c.SCRATCH_DEFAULT
+        files = glob.glob(os.getenv("HOME") + "/SPACEHASTEN/SIMSEARCH_" + job_args.name + "_cycle*") + glob.glob(os.getenv("HOME") + "/SPACEHASTEN/DOCKING_" + job_args.name + "_iter*")
+        if len(files) > 0:
+            messagebox.showwarning(title="Note",message="Working space already has this job, restore cancelled.")
+            return
+
+        self.frame_main.grid_forget()
+        self.frame_working.grid()
+
+        worker = threading.Thread(target=self.gui_thread_restore_archive,args=(job_args,))
+        worker.start()
+
+    def gui_thread_restore_archive(self,args):
+        self.q.put("Percent:0")
+        archive_functions.restore(args) 
+        self.q.put("Percent:99.9")
+        self.q.put("Done")
+
+    def gui_clean_archive(self):
+        dbname = filedialog.askopenfilename(filetypes=[("SpaceHASTEN archived files","*.archived-spacehasten")],defaultextension=".archived-spacehasten",title="Pick an archive to clean from workspace...",initialdir=os.getcwd())
+        if len(dbname)==0:
+            messagebox.showwarning(title="Note",message="Cleaning cancelled")
+            return
+        job_args = SimpleNamespace()
+        job_args.c = self.c
+        job_args.name = dbname.split("/")[-1].split(".")[0]
+        job_args.dbname = dbname
+        job_args.scratch = self.c.SCRATCH_DEFAULT
+        files = glob.glob(os.getenv("HOME") + "/SPACEHASTEN/SIMSEARCH_" + job_args.name + "_cycle*") + glob.glob(os.getenv("HOME") + "/SPACEHASTEN/DOCKING_" + job_args.name + "_iter*")
+        if len(files) == 0:
+            messagebox.showwarning(title="Note",message="Working space already has cleaned for this job.")
+            return
+        self.frame_main.grid_forget()
+        self.frame_working.grid()
+
+        worker = threading.Thread(target=self.gui_thread_clean_archive,args=(job_args,))
+        worker.start()
+
+    def gui_thread_clean_archive(self,args):
+        self.q.put("Percent:0")
+        archive_functions.clean(args) 
+        self.q.put("Percent:99.9")
+        self.q.put("Done")
+        
 
     def gui_export_menu(self):
         self.frame_task_menu.grid_forget()
