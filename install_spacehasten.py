@@ -163,5 +163,5 @@ for file_to_copy in files_to_copy:
 print("SpaceHASTEN has been installed successfully.")
 print("Please verify that everything is OK by running '"+path+"/verify' before starting the actual virtual screening process.")
 print("The test should take around 15-30 minutes to run.")
-os.system("chmod +x "+path+"/verify "+path+"/spacehasten")
+os.system("chmod +x "+path+"/verify "+path+"/spacehasten "+path+"/sec_clustering.sh")
 
