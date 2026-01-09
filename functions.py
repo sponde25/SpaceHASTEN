@@ -1,6 +1,6 @@
 # SpaceHASTEN: functions used by various parts of the program
 #
-# Copyright (c) 2024-2025 Orion Corporation
+# Copyright (c) 2024-2026 Orion Corporation
 # 
 # Redistribution and use in source and binary forms, with or without 
 # modification, are permitted provided that the following conditions are met:
@@ -145,10 +145,10 @@ def get_latest_model(name):
     conn = sqlite3.connect(dbname)
     c = conn.cursor()
     model_version = c.execute("SELECT COUNT(*) FROM models").fetchall()[0][0]
+    if model_version == None:
+        model_version = 0
     conn.close()
     return model_version
-
-
 
 def get_latest_cycle(name):
     """
@@ -157,14 +157,16 @@ def get_latest_cycle(name):
     :param name: usually args.name
     :return int of the latest cycle, 0 if no exists
     """
-    cycles = glob.glob(os.getenv("HOME")+"/SPACEHASTEN/SIMSEARCH_"+name+"_cycle*")
-    if len(cycles) == 0:
+
+    dbname = name + ".dbsh"
+    if not os.path.exists(dbname):
+        raise SystemExit("Internal Error: SpaceHASTEN database ("+dbname+") missing when called get_latest_cycle()!!!")
+    conn = sqlite3.connect(dbname)
+    c = conn.cursor()
+    cycle = c.execute("SELECT MAX(simsearch_cycle) FROM data").fetchall()[0][0]
+    if cycle == None:
         cycle = 0
-    else:
-        ranked_cycles = []
-        for t in cycles:
-            ranked_cycles.append((int(t.split("_cycle")[-1]),t))
-        cycle = sorted(ranked_cycles)[-1][0]
+    conn.close()
     return cycle
 
 def get_latest_iteration(name):
@@ -174,14 +176,15 @@ def get_latest_iteration(name):
     :param name: usually args.name
     :return int of the latest iteration, 0 if no exists
     """
-    iterations = glob.glob(os.getenv("HOME")+"/SPACEHASTEN/DOCKING_"+name+"_iter*")
-    if len(iterations) == 0:
+    dbname = name + ".dbsh"
+    if not os.path.exists(dbname):
+        raise SystemExit("Internal Error: SpaceHASTEN database ("+dbname+") missing when called get_latest_iteration()!!!")
+    conn = sqlite3.connect(dbname)
+    c = conn.cursor()
+    iteration = c.execute("SELECT MAX(dock_iteration) FROM data").fetchall()[0][0]
+    if iteration == None:
         iteration = 0
-    else:
-        ranked_iterations = []
-        for t in iterations:
-            ranked_iterations.append((int(t.split("_iter")[-1]),t))
-        iteration = sorted(ranked_iterations)[-1][0]
+    conn.close()
     return iteration
 
 def mol2hash(line):

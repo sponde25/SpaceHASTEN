@@ -1,6 +1,6 @@
 # SpaceHASTEN: scheduler functions (used to be slurm_functions.py)
 #
-# Copyright (c) 2024-2025 Orion Corporation
+# Copyright (c) 2024-2026 Orion Corporation
 # 
 # Redistribution and use in source and binary forms, with or without 
 # modification, are permitted provided that the following conditions are met:
@@ -28,6 +28,9 @@
 
 import functions
 import os
+import tqdm
+import glob
+import time
 
 def write_header(w,args,jobname):
     w.write("#!/bin/bash\n")
@@ -107,7 +110,12 @@ def write_predict_scheduler(control_dir,args):
     :param control_dir: Work directory
     :param args: the args
     """
-    jobname="predict_"+args.name+"_cycle"+str(functions.get_latest_cycle(args.name))
+
+    simsearch_cycle = functions.get_latest_cycle(args.name)
+    if simsearch_cycle == 0:
+        simsearch_cycle = 1
+
+    jobname="predict_"+args.name+"_cycle"+str(simsearch_cycle)
     cpuname="predict_"+args.name+"_cpu$"+args.c.SCHEDULER_ARRAY_ID
     modelname="model_"+str(args.name)+"_ver"+str(functions.get_latest_model(args.name))
     personal_scratch=args.scratch+"/"+os.getenv("USER")+"/"+cpuname
@@ -147,7 +155,7 @@ def write_train_scheduler(control_dir,args):
     w.write(args.c.PREPARE_ANACONDA + "\n")
     w.write(args.c.ACTIVATE_CHEMPROP + "\n")
     w.write("chemprop train --devices 1 --num-workers 0 --task-type regression --target-columns docking_score --data-path "+data_filename+" --save-dir model_"+args.name+"_ver"+str(model_version)+" --batch-size 250 --no-cache --epochs 30\n")
-    w.write("touch jobdone-"+jobname+"\n")
+    w.write("touch jobdone-train_"+args.name+"-CPU1\n")
     w.close()
 
 def write_control_scheduler(control_dir,args):
@@ -157,7 +165,10 @@ def write_control_scheduler(control_dir,args):
     :param control_dir: Work directory
     :param args: the args
     """
-    jobname="ctrl_"+args.name+"_cycle"+str(functions.get_latest_cycle(args.name))
+    simsearch_cycle = functions.get_latest_cycle(args.name)
+    if simsearch_cycle == 0:
+        simsearch_cycle = 1
+    jobname="ctrl_"+args.name+"_cycle"+str(simsearch_cycle)
     cpuname="control_"+args.name+"_cpu$"+args.c.SCHEDULER_ARRAY_ID
     modelname="model_"+str(args.name)+"_ver"+str(functions.get_latest_model(args.name))
     personal_scratch=args.scratch+"/"+os.getenv("USER")+"/"+cpuname
@@ -178,3 +189,46 @@ def write_control_scheduler(control_dir,args):
     w.write("python3 "+args.c.CHUNKPREDICT_EXE+" "+str(args.chemprop_chunk)+" propoutput_"+cpuname+".csv.gz "+modelname+"\n")
     w.write("mv predicted_propoutput_"+cpuname+".csv $curdir\n")
     close_job(w,args,personal_scratch)
+
+def write_cluster_scheduler(cluster_dir,args):
+    """
+    Write scheduler script for clustering
+
+    :param cluster_dir: directory where the clustering input data is
+    :param args: the args
+    """
+    jobname="cluster_"+args.name+"_tmp"
+    cpuname=jobname+"_cpu$"+args.c.SCHEDULER_ARRAY_ID
+    personal_scratch=args.c.SCRATCH_DEFAULT+"/"+os.getenv("USER")+"/"+cpuname
+    w = open(cluster_dir+"/submit_cluster_"+args.name+".sh","wt")
+    write_header(w,args,jobname)
+    w.write(args.c.SCHEDULER_CPU_PER_TASK+str(args.c.CPU_COUNT_CLUSTERING)+"\n")
+    # a bit misleading name, but the exclusivity switch is the same for both CPU and GPU
+    w.write(args.c.SCHEDULER_GPU_EXCLUSIVE+"\n")
+    w.write("curdir=$(pwd)\n")
+    w.write("rm -fr "+personal_scratch+"\n")
+    w.write("mkdir -p "+personal_scratch+"\n")
+    w.write("gunzip -c "+cluster_dir+"/clustering_input.smi.gz >"+personal_scratch+"/clustering_input.smi\n")
+    w.write("cd "+personal_scratch+"\n")
+    w.write(args.c.PREPARE_ANACONDA + "\n")
+    w.write(args.c.ACTIVATE_CLUSTERING + "\n")
+    w.write(args.c.EXE_CLUSTERING_DEFAULT + " clustering_input.smi\n")
+    w.write("mv clustering.csv $curdir/\n")
+    close_job(w,args,personal_scratch)
+
+def wait_until_jobs_done(directory_to_monitor,name,num_jobs):
+    """
+    Wait until jobs done and update progress bar when jobs are done
+
+    :param directory_to_monitor: directory where the job writes completition files
+    :param name: job name
+    :param num_jobs: number of jobs to be done
+    """
+    pbar = tqdm.tqdm(total=num_jobs)
+    jobs_done = len(glob.glob(directory_to_monitor+"/jobdone-"+name+"-CPU*"))
+    while jobs_done<num_jobs:
+        time.sleep(5)
+        jobs_done = len(glob.glob(directory_to_monitor+"/jobdone-"+name+"-CPU*"))
+        pbar.n = jobs_done
+        pbar.refresh()
+    pbar.close()

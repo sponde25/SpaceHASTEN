@@ -1,6 +1,6 @@
 # SpaceHASTEN: installer
 #
-# Copyright (c) 2024-2025 Orion Corporation
+# Copyright (c) 2024-2026 Orion Corporation
 # 
 # Redistribution and use in source and binary forms, with or without 
 # modification, are permitted provided that the following conditions are met:
@@ -42,7 +42,7 @@ def ask_for_file(default_exe,desc=None):
     return asked_exe
 
 def ask_for_dir(default_dir,desc,exist=True):
-    asked_dir = input("Please enter the path to "+desc+" executable [default:"+default_dir+"]: ")
+    asked_dir = input("Please enter the path to "+desc+" directory [default:"+default_dir+"]: ")
     if asked_dir == "":
         asked_dir = default_dir
     if exist and not os.path.isdir(asked_dir):
@@ -62,7 +62,7 @@ print("This script will install SpaceHASTEN on your system.")
 
 print("NOTE: THIS MUST BE A NFS DIRECTORY VISIBLE TO ALL COMPUTING NODES.")
 print("ADDITIONAL NOTE: slurm is used by default, SGE users need to manually reconfigure spacehasten.ini\n")
-path = ask_for_dir("/data/programs/spacehasten-"+str(SpaceHASTENConfiguration.SPACEHASTEN_VERSION),"Installation directory",exist=False)
+path = ask_for_dir("/data/programs/spacehasten-"+str(SpaceHASTENConfiguration.SPACEHASTEN_VERSION),"Installation",exist=False)
 if os.path.exists(path):
     print("The specified path already exists.")
     print("Installation aborted.")
@@ -70,9 +70,12 @@ if os.path.exists(path):
 os.makedirs(path)
 spacelight_exe = ask_for_file("/data/programs/BiosolveIT/spacelight-2.0.0-Linux-x64/spacelight")
 ftrees_exe = ask_for_file("/data/programs/BiosolveIT/ftrees-7.0.0-Linux-x64/ftrees")
-spaces_dir = ask_for_dir("/data/programs/BiosolveIT/spaces_new","BiosolveIT spaces directory")
+spaces_dir = ask_for_dir("/data/programs/BiosolveIT/spaces_new","BiosolveIT spaces")
 default_space = ask_for_file("/data/programs/BiosolveIT/spaces_new/REALSpace_83bn_2025-09.space","default space")
-scratch_dir = ask_for_dir("/wrk","scratch directory")
+default_seeds = ask_for_file("/data/programs/BiosolveIT/spaces_seeds/Enamine_Diverse_REAL_drug-like_48.2M_cxsmiles.cxsmiles.bz2","default enumerated seeds")
+seeds_dir = ask_for_dir("/data/programs/BiosolveIT/spaces_seeds","Directory for enumerated seeds")
+
+scratch_dir = ask_for_dir("/wrk","scratch (local fast disk)")
 enaminereal_seeds = ask_for_file("/data/work/db/Enamine_Diverse_REAL_drug-like_48.2M_cxsmiles.cxsmiles.bz2","Enamine REAL seeds")
 prepare_anaconda = input("Please enter the anaconda3 activation command [default:source /data/programs/oce/actoce]: ")
 if prepare_anaconda == "":
@@ -80,7 +83,11 @@ if prepare_anaconda == "":
 activate_chemprop = input("Please enter the anaconda3 chemprop activation command [default:conda activate chemprop-2.1.2]: ")
 if activate_chemprop == "":
     activate_chemprop = "conda activate chemprop-2.1.2"
-gpu_exclusive = input("Please type 1 here if you want GPU exlusive run, type 0 otherwise [default:1]: ")
+activate_clustering = input("Please enter the anaconda3 clustering activation command [default:conda activate fpsim2-0.7.3]:")
+if activate_clustering == "":
+    activate_clustering = "conda activate fpsim2-0.7.3"
+clustering_exe = input("Please enter clustering script command or press ENTER to use the built-in code:")
+gpu_exclusive = input("Please type 1 here if you want node exlusivity for training and clustering, type 0 otherwise [default:1]: ")
 if gpu_exclusive == "":
     gpu_exclusive = "1"
 slurm_queue = input("Please enter the SLURM partition name [default:jobs]: ")
@@ -89,6 +96,9 @@ if slurm_queue == "":
 slurm_gpu_parameter = input("Please enter the SLURM GPU parameter [default:--gpus=1]: ")
 if slurm_gpu_parameter == "":
     slurm_gpu_parameter = "--gpus=1"
+slurm_cpu_clustering = input("Please enter the number of cores for clustering [default:64]: ")
+if slurm_cpu_clustering == "":
+    slurm_cpu_clustering = "64"
 
 print("Copying files...")
 w = open(path+"/spacehasten.ini","wt")
@@ -96,11 +106,13 @@ w.write("[General]\n")
 w.write("SCHEDULER = slurm\n")
 w.write("PREPARE_ANACONDA = "+prepare_anaconda+"\n")
 w.write("ACTIVATE_CHEMPROP = "+activate_chemprop+"\n")
+w.write("ACTIVATE_CLUSTERING = "+activate_clustering+"\n")
 w.write("GPU_EXCLUSIVE = "+gpu_exclusive+"\n")
 w.write("CPU_COUNT_SEARCH = 2\n")
 w.write("CPU_COUNT_DOCK = 1\n")
 w.write("CPU_COUNT_PREDICT = 1\n")
 w.write("CPU_COUNT_CONTROL = 1\n")
+w.write("CPU_COUNT_CLUSTERING = "+slurm_cpu_clustering+"\n")
 w.write("\n")
 w.write("[Paths]\n")
 w.write("EXE_SPACELIGHT_DEFAULT = "+spacelight_exe+"\n")
@@ -108,7 +120,10 @@ w.write("EXE_FTREES_DEFAULT = "+ftrees_exe+"\n")
 w.write("SPACES_DIR_DEFAULT = "+spaces_dir+"\n")
 w.write("SPACES_FILE_DEFAULT = "+default_space+"\n")
 w.write("SCRATCH_DEFAULT = "+scratch_dir+"\n")
-w.write("ENAMINEREAL_SEEDS = "+enaminereal_seeds+"\n")
+w.write("SEEDS_DIR_DEFAULT = "+seeds_dir+"\n")
+w.write("SEEDS_FILE_DEFAULT = "+default_seeds+"\n")
+if clustering_exe != "":
+    w.write("EXE_CLUSTERING_DEFAULT = "+clustering_exe+"\n")
 w.write("\n")
 w.write("[Slurm]\n")
 w.write("SLURM_PARTITION = "+slurm_queue+"\n")
@@ -138,7 +153,7 @@ files_to_copy = ["verify","verify_spacehasten.py","cfg.py","control.py","chunkpr
                  "export_poses.py","grid-test_dock.zip","spacehasten_logo.png","test_dock.in","examples.smi","example.csv",
                  "control.py","docking_functions.py","export_functions.py","export_poses.py","functions.py","gui.py",
                  "importseeds_functions.py","prediction_functions.py","simsearch_functions.py","scheduler_functions.py","spacehasten",
-                 "spacehasten.py","training_functions.py","example.smi","archive_functions.py"]
+                 "spacehasten.py","training_functions.py","example.smi","archive_functions.py","cluster_functions.py","sec_clustering.sh","cmdline.py"]
 for file_to_copy in files_to_copy:
     if not os.path.exists(file_to_copy):
         print("Error: file '"+file_to_copy+"' not found.")

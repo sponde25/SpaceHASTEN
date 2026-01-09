@@ -1,6 +1,6 @@
 # SpaceHASTEN: configuration
 #
-# Copyright (c) 2024-2025 Orion Corporation
+# Copyright (c) 2024-2026 Orion Corporation
 # 
 # Redistribution and use in source and binary forms, with or without 
 # modification, are permitted provided that the following conditions are met:
@@ -37,7 +37,7 @@ class SpaceHASTENConfiguration:
     CONTROL_EXE = SPACEHASTEN_DIRECTORY+"/control.py"
     CHUNKPREDICT_EXE = SPACEHASTEN_DIRECTORY+"/chunkpredict.py"
     EXPORTPOSES_EXE = "$SCHRODINGER/run " + SPACEHASTEN_DIRECTORY + "/export_poses.py"
-    SPACEHASTEN_VERSION = 0.8
+    SPACEHASTEN_VERSION = 0.9
     MAX_CORES = 250
     MAX_JOBNAME_LEN = 15
     EXE_SPACELIGHT_DEFAULT = "/data/programs/BiosolveIT/spacelight-1.5.0-Linux-x64/spacelight"
@@ -61,6 +61,7 @@ class SpaceHASTENConfiguration:
     PROP_ROTBONDS_MAX_DEFAULT = 10
     PROP_TPSA_MIN_DEFAULT = 0.0
     PROP_TPSA_MAX_DEFAULT = 140.0
+    PROP_ACQUISITION_DEFAULT = "greedy"
     CHEMPROP_CHUNK_DEFAULT = 12345
     CHEMPROP_CPU_DEFAULT = 250
     SCRATCH_DEFAULT = "/wrk"
@@ -77,11 +78,13 @@ class SpaceHASTENConfiguration:
     SCHEDULER = "slurm"
     PREPARE_ANACONDA = None
     ACTIVATE_CHEMPROP = None
+    ACTIVATE_CLUSTERING = None
     GPU_EXCLUSIVE = "1"
     CPU_COUNT_SEARCH = "2"
     CPU_COUNT_DOCK = "1"
     CPU_COUNT_PREDICT = "1"
     CPU_COUNT_CONTROL = "1"
+    CPU_COUNT_CLUSTERING = "64"
 
     SCHEDULER_SUBMIT = None
     SCHEDULER_JOBNAME = None
@@ -102,9 +105,18 @@ class SpaceHASTENConfiguration:
     SGE_PE = None
     SGE_GPU_PARAMETER = None
     
-    ENAMINEREAL_SEEDS = "/data/tuomo/PROJECTS/SPACEHASTEN/Enamine_Diverse_REAL_drug-like_48.2M_cxsmiles.cxsmiles.bz2"
-    ENAMINEREAL_SEEDS_COUNT = 1000000
-    ENAMINEREAL_SEEDS_CPU = 4
+    #ENAMINEREAL_SEEDS = "/data/tuomo/PROJECTS/SPACEHASTEN/Enamine_Diverse_REAL_drug-like_48.2M_cxsmiles.cxsmiles.bz2"
+    #ENAMINEREAL_SEEDS_COUNT = 1000000
+    #ENAMINEREAL_SEEDS_CPU = 4
+    SEEDS_DIR_DEFAULT = "/data/programs/BiosolveIT/spaces_seeds"
+    SEEDS_FILE_DEFAULT = "/data/programs/BiosolveIT/spaces_seedsEnamine_Diverse_REAL_drug-like_48.2M_cxsmiles.cxsmiles.bz2"
+    SEEDS_COUNT = 1000000
+    SEEDS_CPU = 4
+    
+    # by default, sphere exclusion clustering with fpsim2 and rdkit is used
+    EXE_CLUSTERING_DEFAULT = SPACEHASTEN_DIRECTORY+"/sec_clustering.sh"
+
+
     
     def __init__(self):
         cparser = configparser.ConfigParser()
@@ -117,6 +129,8 @@ class SpaceHASTENConfiguration:
                 self.PREPARE_ANACONDA = cparser["General"][setting]
             elif setting == "activate_chemprop":
                 self.ACTIVATE_CHEMPROP = cparser["General"][setting]
+            elif setting == "activate_clustering":
+                self.ACTIVATE_CLUSTERING = cparser["General"][setting]
             elif setting == "gpu_exclusive":
                 self.GPU_EXCLUSIVE = cparser["General"][setting]
             elif setting == "cpu_count_search":
@@ -127,6 +141,8 @@ class SpaceHASTENConfiguration:
                 self.CPU_COUNT_PREDICT = cparser["General"][setting]
             elif setting == "cpu_count_control":
                 self.CPU_COUNT_CONTROL = cparser["General"][setting]
+            elif setting == "cpu_count_clustering":
+                self.CPU_COUNT_CLUSTERING = cparser["General"][setting]
             else:
                 print("Error: Unknown setting in spacehasten.ini:",setting)
                 sys.exit(1)
@@ -142,8 +158,12 @@ class SpaceHASTENConfiguration:
                 self.SPACES_DIR_DEFAULT = cparser["Paths"][setting]
             elif setting ==  "spaces_file_default":
                 self.SPACES_FILE_DEFAULT = cparser["Paths"][setting]
-            elif setting ==  "enaminereal_seeds":
-                self.ENAMINEREAL_SEEDS = cparser["Paths"][setting]
+            elif setting ==  "seeds_dir_default":
+                self.SEEDS_DIR_DEFAULT = cparser["Paths"][setting]
+            elif setting ==  "seeds_file_default":
+                self.SEEDS_FILE_DEFAULT = cparser["Paths"][setting]
+            elif setting ==  "exe_clustering_default":
+                self.EXE_CLUSTERING_DEFAULT = cparser["Paths"][setting]
             else:
                 print("Error: Unknown setting in spacehasten.ini:",setting)
                 sys.exit(1)
@@ -151,10 +171,6 @@ class SpaceHASTENConfiguration:
         for setting in cparser["Slurm"]:
             if setting == "slurm_partition":
                 self.SLURM_PARTITION = cparser["Slurm"][setting]
-            elif setting == "slurm_prepare_anaconda":
-                self.SLURM_PREPARE_ANACONDA = cparser["Slurm"][setting]
-            elif setting == "slurm_activate_chemprop":
-                self.SLURM_ACTIVATE_CHEMPROP = cparser["Slurm"][setting]
             elif setting == "slurm_gpu_parameter":
                 self.SLURM_GPU_PARAMETER = cparser["Slurm"][setting]
             else:
@@ -166,10 +182,6 @@ class SpaceHASTENConfiguration:
                 self.SGE_QUEUE = cparser["SGE"][setting]
             elif setting == "sge_pe":
                 self.SGE_PE = cparser["SGE"][setting]
-            elif setting == "sge_prepare_anaconda":
-                self.SGE_PREPARE_ANACONDA = cparser["SGE"][setting]
-            elif setting == "sge_activate_chemprop":
-                self.SGE_ACTIVATE_CHEMPROP = cparser["SGE"][setting]
             elif setting == "sge_gpu_parameter":
                 self.SGE_GPU_PARAMETER = cparser["SGE"][setting]
             else:

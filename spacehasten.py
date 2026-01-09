@@ -1,6 +1,6 @@
 # SpaceHASTEN: the main program
 #
-# Copyright (c) 2024 Orion Corporation
+# Copyright (c) 2024-2026 Orion Corporation
 # 
 # Redistribution and use in source and binary forms, with or without 
 # modification, are permitted provided that the following conditions are met:
@@ -27,9 +27,14 @@
 # POSSIBILITY OF SUCH DAMAGE.
 #
 import gui
+import cmdline
 
 if __name__ == "__main__":
-    
+
     app = gui.SpaceHASTENGUI()
-    app.mainloop()
+    app.command_line_args = cmdline.parse_cmdline()
+    if app.command_line_args.action == None:
+        app.mainloop()
+    else:
+        app.run_cmdline()
     

@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Copyright (c) 2024-2025 Orion Corporation
+# Copyright (c) 2024-2026 Orion Corporation
 # 
 # Redistribution and use in source and binary forms, with or without 
 # modification, are permitted provided that the following conditions are met:
@@ -40,4 +40,4 @@ CHEMPROP_ACTIVATE="$(grep ACTIVATE_CHEMPROP $SPACEHASTEN_DIRECTORY/spacehasten.i
 
 eval "$PREPARE_ANACONDA"
 eval "$CHEMPROP_ACTIVATE"
-python3 "$SPACEHASTEN_DIRECTORY/spacehasten.py"
+python3 "$SPACEHASTEN_DIRECTORY/spacehasten.py" $@

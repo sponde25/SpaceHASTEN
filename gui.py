@@ -1,6 +1,6 @@
 # SpaceHASTEN: graphical user interface (GUI)
 #
-# Copyright (c) 2024-2025 Orion Corporation
+# Copyright (c) 2024-2026 Orion Corporation
 # 
 # Redistribution and use in source and binary forms, with or without 
 # modification, are permitted provided that the following conditions are met:
@@ -35,6 +35,7 @@ import prediction_functions
 import simsearch_functions
 import cfg
 import archive_functions
+import cluster_functions
 
 import tkinter as tk
 from tkinter import ttk
@@ -66,6 +67,7 @@ class SpaceHASTENGUI(tk.Tk):
     gui_cycle_mode = None
     gui_export_mode = None
     gui_cutoff = None
+    gui_acquisition_method = None
     frame_main = None
     frame_working = None
     frame_task_menu = None
@@ -76,7 +78,7 @@ class SpaceHASTENGUI(tk.Tk):
     progressbar_value = None
     q = None
     button_vs = None
-    
+    command_line_args = None
 
     # font definitions
     font_buttons = ("Arial",12)
@@ -106,8 +108,6 @@ class SpaceHASTENGUI(tk.Tk):
         self.q = queue.Queue()
 
         print("Running SpaceHASTEN at "+self.c.SPACEHASTEN_DIRECTORY)
-
-
         self.title("SpaceHASTEN "+str(self.c.SPACEHASTEN_VERSION))
         self.geometry("541x400")
         self.resizable(0,0)
@@ -136,6 +136,7 @@ class SpaceHASTENGUI(tk.Tk):
         self.gui_rotbonds_max = tk.IntVar(self,self.c.PROP_ROTBONDS_MAX_DEFAULT)
         self.gui_tpsa_min = tk.DoubleVar(self,self.c.PROP_TPSA_MIN_DEFAULT)
         self.gui_tpsa_max = tk.DoubleVar(self,self.c.PROP_TPSA_MAX_DEFAULT)
+        self.gui_acquisition_method = tk.StringVar(self,self.c.PROP_ACQUISITION_DEFAULT)
                 
         self.build_main_frame()
         self.build_working_frame()
@@ -147,6 +148,105 @@ class SpaceHASTENGUI(tk.Tk):
 
         self.perioidic_call()
 
+    def run_cmdline(self):
+        print("Running SpaceHASTEN in command line mode...")
+        print("Args:",self.command_line_args)
+        job_args = SimpleNamespace()
+        job_args.c = self.c
+        job_args.q = self.q
+        job_args.dbname = self.command_line_args.database
+        job_args.name = self.command_line_args.database.split("/")[-1].split(".")[0]
+    
+        if self.command_line_args.action == "importsmiles":
+            job_args.input = self.command_line_args.smiles
+            job_args.seeds_scorefield = self.c.FIELD_SCORE_DEFAULT
+            job_args.seeds_title = self.c.FIELD_TITLE_DEFAULT
+            job_args.seeds_smiles = self.c.FIELD_SMILES_DEFAULT
+            job_args.rdkit_cpu = 0
+            job_args.dock_param = self.command_line_args.dock_params
+            job_args.glidegridfile = self.command_line_args.dock_grid
+
+            job_args.prop_mw_min = str(self.gui_mw_min.get())
+            job_args.prop_mw_max = str(self.gui_mw_max.get())
+            job_args.prop_slogp_min = str(self.gui_slogp_min.get())
+            job_args.prop_slogp_max = str(self.gui_slogp_max.get())
+            job_args.prop_hba_min = str(self.gui_hba_min.get())
+            job_args.prop_hba_max = str(self.gui_hba_max.get())
+            job_args.prop_hbd_min = str(self.gui_hbd_min.get())
+            job_args.prop_hbd_max = str(self.gui_hbd_max.get())
+            job_args.prop_rotbonds_min = str(self.gui_rotbonds_min.get())
+            job_args.prop_rotbonds_max = str(self.gui_rotbonds_max.get())
+            job_args.prop_tpsa_min = str(self.gui_tpsa_min.get())
+            job_args.prop_tpsa_max = str(self.gui_tpsa_max.get())
+            job_args.top = -1
+            job_args.scratch = self.c.SCRATCH_DEFAULT
+            job_args.cpu = self.command_line_args.dock_cpus
+            job_args.sff = -1.0
+    
+            files_to_check = []
+            files_to_check.append(job_args.dock_param)
+            files_to_check.append(job_args.glidegridfile)
+            files_to_check.append(job_args.input)
+            for f in files_to_check:
+                if not os.path.exists(f):
+                    print("ERROR: Required file "+f+" does not exist!")
+                    exit()
+
+            worker = threading.Thread(target=importseeds_functions.import_seeds,args=(job_args,))
+        elif self.command_line_args.action == "screen":
+            job_args.space = self.command_line_args.space
+            job_args.exe_spacelight = self.c.EXE_SPACELIGHT_DEFAULT
+            job_args.exe_ftrees = self.c.EXE_FTREES_DEFAULT
+            job_args.rdkit_chunk = self.c.RDKIT_CHUNK_DEFAULT
+            job_args.rdkit_cpu = self.c.RDKIT_CPU_DEFAULT      
+            job_args.chemprop_chunk = self.c.CHEMPROP_CHUNK_DEFAULT
+            job_args.chemprop_cpu = self.c.CHEMPROP_CPU_DEFAULT
+            job_args.scratch = self.c.SCRATCH_DEFAULT
+            job_args.nnn = self.c.NNN_DEFAULT
+            job_args.sim_spacelight = self.c.SIM_SPACELIGHT_DEFAULT
+            job_args.sim_ftrees = self.c.SIM_FTREES_DEFAULT
+            job_args.field_similarity_spacelight = self.c.FIELD_SIMILARITY_SPACELIGHT
+            job_args.field_similarity_ftrees = self.c.FIELD_SIMILARITY_FTREES
+            job_args.acquisition_method = self.command_line_args.mode
+
+            files_to_check = []
+            files_to_check.append(job_args.space)
+            # make sure that we are in the same directory as the database
+            files_to_check.append(job_args.name + ".dbsh")
+            for f in files_to_check:
+                if not os.path.exists(f):
+                    print("ERROR: Required file "+f+" does not exist!")
+                    exit()
+
+            worker = threading.Thread(target=self.gui_thread_virtual_screening,args=(job_args,self.command_line_args.simsearch_cpus,self.command_line_args.dock_cpus,self.command_line_args.simsearch_queries,self.command_line_args.dock_mols))
+        elif self.command_line_args.action == "exportcsv":
+            job_args.cutoff = self.command_line_args.cutoff
+            job_args.resfilename = self.command_line_args.export_file
+            job_args.scratch = self.c.SCRATCH_DEFAULT
+
+            files_to_check = []
+            # make sure that we are in the same directory as the database
+            files_to_check.append(job_args.name + ".dbsh")
+            for f in files_to_check:
+                if not os.path.exists(f):
+                    print("ERROR: Required file "+f+" does not exist!")
+                    exit()
+
+            worker = threading.Thread(target=export_functions.export_results,args=(job_args,))
+        elif self.command_line_args.action == "cluster":
+            files_to_check = []
+            # make sure that we are in the same directory as the database
+            files_to_check.append(job_args.name + ".dbsh")
+            for f in files_to_check:
+                if not os.path.exists(f):
+                    print("ERROR: Required file "+f+" does not exist!")
+                    exit()
+
+            worker = threading.Thread(target=cluster_functions.cluster_dbsh,args=(job_args,))
+        worker.start()
+        worker.join()
+        print("Task done.")
+            
     def perioidic_call(self):
         self.after(200,self.perioidic_call)
         self.check_queue()
@@ -171,6 +271,9 @@ class SpaceHASTENGUI(tk.Tk):
                     messagebox.showinfo(title="Note",message="Task done.")
                     self.frame_working.grid_forget()
                     self.frame_export_menu.grid()    
+                if msg == "DoneLoading":
+                    self.frame_working.grid_forget()
+                    self.frame_task_menu.grid()    
                 if msg.startswith("Percent:"):
                     self.progressbar_value.set(float(msg.split(":")[1]))
                 if msg.startswith("UpdateModel:"):
@@ -204,7 +307,7 @@ class SpaceHASTENGUI(tk.Tk):
     def build_main_frame(self):
         self.frame_main = tk.Frame(self)        
         tk.Label(self.frame_main,image=self.logo).grid(row=0,columnspan=4)
-        tk.Button(self.frame_main,text="Pick Enamine REALSpace seeds",font=self.font_buttons,command=self.gui_pickseeds,bg=self.color_button_bg,fg=self.color_button_fg,activebackground=self.color_button_active_bg,activeforeground=self.color_button_active_fg).grid(row=1,column=0,columnspan=4)
+        tk.Button(self.frame_main,text="Pick seeds",font=self.font_buttons,command=self.gui_pickseeds,bg=self.color_button_bg,fg=self.color_button_fg,activebackground=self.color_button_active_bg,activeforeground=self.color_button_active_fg).grid(row=1,column=0,columnspan=4)
         tk.Button(self.frame_main,text="New job",font=self.font_buttons,command=self.gui_ask_props,bg=self.color_button_bg,fg=self.color_button_fg,activebackground=self.color_button_active_bg,activeforeground=self.color_button_active_fg).grid(row=2,column=0,columnspan=4)
         tk.Button(self.frame_main,text="Load existing job",font=self.font_buttons,command=self.gui_load,bg=self.color_button_bg,fg=self.color_button_fg,activebackground=self.color_button_active_bg,activeforeground=self.color_button_active_fg).grid(row=3,column=0,columnspan=4)
         ttk.Separator(self.frame_main,orient=tk.HORIZONTAL).grid(row=4,columnspan=4,sticky="ew")
@@ -218,6 +321,7 @@ class SpaceHASTENGUI(tk.Tk):
         tk.Label(self.frame_main,text="Developed by Tuomo Kalliokoski, Orion Pharma",font=self.font_text).grid(row=9,columnspan=4)
         tk.Label(self.frame_main,text="Powered by SpaceLight, FTrees, chemprop, Ligprep, Glide and RDKit",font=self.font_text).grid(row=10,columnspan=4)
         tk.Label(self.frame_main,text="J. Chem. Inf. Model. 2025, 65, 1, 125-132",font=self.font_text_italic).grid(row=11,columnspan=4)
+        tk.Label(self.frame_main,text="Clustering tool: "+self.c.EXE_CLUSTERING_DEFAULT.split("/")[-1],font=self.font_text).grid(row=12,columnspan=4)
 
     def build_working_frame(self):
         self.frame_working = tk.Frame(self)
@@ -235,21 +339,51 @@ class SpaceHASTENGUI(tk.Tk):
         tk.Label(self.frame_task_menu,textvariable=self.gui_docking_iteration,font=self.font_text).grid(row=2,column=2,columnspan=2)
         tk.Label(self.frame_task_menu,text="Model versions:",font=self.font_text).grid(row=3,column=0,columnspan=2)
         tk.Label(self.frame_task_menu,textvariable=self.gui_model_version,font=self.font_text).grid(row=3,column=2,columnspan=2)
+        tk.Label(self.frame_task_menu,text="Acquisition method:",font=self.font_text).grid(row=4,column=0,columnspan=2)
+        tk.Label(self.frame_task_menu,textvariable=self.gui_acquisition_method,font=self.font_text).grid(row=4,column=2,columnspan=2)
+        ttk.Separator(self.frame_task_menu,orient=tk.HORIZONTAL).grid(row=5,columnspan=4,sticky="ew")
         self.button_vs = tk.Button(self.frame_task_menu,text="Start virtual screening",command=self.gui_virtual_screening,font=self.font_buttons,bg=self.color_button_bg,fg=self.color_button_fg,activebackground=self.color_button_active_bg,activeforeground=self.color_button_active_fg)
-        self.button_vs.grid(row=4,columnspan=4)
-        tk.Button(self.frame_task_menu,text="Export results",command=self.gui_export_menu,font=self.font_buttons,bg=self.color_button_bg,fg=self.color_button_fg,activebackground=self.color_button_active_bg,activeforeground=self.color_button_active_fg).grid(row=5,columnspan=4)
-        ttk.Separator(self.frame_task_menu,orient=tk.HORIZONTAL).grid(row=6,columnspan=4,sticky="ew")
-        tk.Label(self.frame_task_menu,text="Run tasks manually:",font=self.font_text).grid(row=7,column=0)
-        tk.Button(self.frame_task_menu,text="Search",command=self.gui_similarity,font=self.font_buttons,bg=self.color_button_bg,fg=self.color_button_fg,activebackground=self.color_button_active_bg,activeforeground=self.color_button_active_fg).grid(row=7,column=1)
-        tk.Button(self.frame_task_menu,text="Dock",command=self.gui_docking,font=self.font_buttons,bg=self.color_button_bg,fg=self.color_button_fg,activebackground=self.color_button_active_bg,activeforeground=self.color_button_active_fg).grid(row=7,column=2)
-        tk.Button(self.frame_task_menu,text="Train",command=self.gui_train,font=self.font_buttons,bg=self.color_button_bg,fg=self.color_button_fg,activebackground=self.color_button_active_bg,activeforeground=self.color_button_active_fg).grid(row=7,column=3)
+        self.button_vs.grid(row=6,columnspan=4)
+        tk.Button(self.frame_task_menu,text="Export results",command=self.gui_export_menu,font=self.font_buttons,bg=self.color_button_bg,fg=self.color_button_fg,activebackground=self.color_button_active_bg,activeforeground=self.color_button_active_fg).grid(row=7,columnspan=4)
         ttk.Separator(self.frame_task_menu,orient=tk.HORIZONTAL).grid(row=8,columnspan=4,sticky="ew")
-        tk.Button(self.frame_task_menu,text="Properties",command=self.gui_adjust_props,font=self.font_buttons,bg=self.color_button_bg,fg=self.color_button_fg,activebackground=self.color_button_active_bg,activeforeground=self.color_button_active_fg).grid(row=9,columnspan=4)
-        tk.Button(self.frame_task_menu,text="Go back",command=self.gui_goto_main_menu,font=self.font_buttons,bg=self.color_button_bg,fg=self.color_button_fg,activebackground=self.color_button_active_bg,activeforeground=self.color_button_active_fg).grid(row=10,columnspan=4)
-        tk.Button(self.frame_task_menu,text="Quit",command=quit,font=self.font_buttons,bg=self.color_button_bg,fg=self.color_button_fg,activebackground=self.color_button_active_bg,activeforeground=self.color_button_active_fg).grid(row=11,columnspan=4)
+        tk.Label(self.frame_task_menu,text="Run manually:",font=self.font_text).grid(row=9,column=0)
+        tk.Button(self.frame_task_menu,text="Search cycle",command=self.gui_similarity,font=self.font_buttons,bg=self.color_button_bg,fg=self.color_button_fg,activebackground=self.color_button_active_bg,activeforeground=self.color_button_active_fg).grid(row=9,column=1)
+        tk.Button(self.frame_task_menu,text="Dock next iteration",command=self.gui_docking,font=self.font_buttons,bg=self.color_button_bg,fg=self.color_button_fg,activebackground=self.color_button_active_bg,activeforeground=self.color_button_active_fg).grid(row=9,column=2)
+        tk.Button(self.frame_task_menu,text="Train model",command=self.gui_train,font=self.font_buttons,bg=self.color_button_bg,fg=self.color_button_fg,activebackground=self.color_button_active_bg,activeforeground=self.color_button_active_fg).grid(row=9,column=3)
+        ttk.Separator(self.frame_task_menu,orient=tk.HORIZONTAL).grid(row=10,columnspan=4,sticky="ew")
+        tk.Label(self.frame_task_menu,text="Advanced:",font=self.font_text).grid(row=11,column=0)
+        tk.Button(self.frame_task_menu,text="Set properties",command=self.gui_adjust_props,font=self.font_buttons,bg=self.color_button_bg,fg=self.color_button_fg,activebackground=self.color_button_active_bg,activeforeground=self.color_button_active_fg).grid(row=11,column=1)
+        tk.Button(self.frame_task_menu,text="Switch acquisition method",command=self.gui_switch_acquisition,font=self.font_buttons,bg=self.color_button_bg,fg=self.color_button_fg,activebackground=self.color_button_active_bg,activeforeground=self.color_button_active_fg).grid(row=11,column=2)
+        tk.Button(self.frame_task_menu,text="Cluster",command=self.gui_cluster,font=self.font_buttons,bg=self.color_button_bg,fg=self.color_button_fg,activebackground=self.color_button_active_bg,activeforeground=self.color_button_active_fg).grid(row=11,column=3)
+        ttk.Separator(self.frame_task_menu,orient=tk.HORIZONTAL).grid(row=12,columnspan=4,sticky="ew")
+        tk.Button(self.frame_task_menu,text="Go back",command=self.gui_goto_main_menu,font=self.font_buttons,bg=self.color_button_bg,fg=self.color_button_fg,activebackground=self.color_button_active_bg,activeforeground=self.color_button_active_fg).grid(row=13,columnspan=4)
+        tk.Button(self.frame_task_menu,text="Quit",command=quit,font=self.font_buttons,bg=self.color_button_bg,fg=self.color_button_fg,activebackground=self.color_button_active_bg,activeforeground=self.color_button_active_fg).grid(row=14,columnspan=4)
+
+    def gui_cluster(self):
+        self.q.put("Percent:0")
+        self.frame_task_menu.grid_forget()
+        self.frame_working.grid()
+        job_args = SimpleNamespace()
+        job_args.c = self.c
+        job_args.name = self.gui_dbname.get().split("/")[-1].split(".")[0]
+        job_args.dbname = self.gui_dbname.get()
+
+        worker = threading.Thread(target=self.gui_thread_cluster,args=(job_args,))
+        worker.start()
+
+    def gui_thread_cluster(self,args):
+        cluster_functions.cluster_dbsh(args)
+        self.q.put("Percent:99.9")
+        self.q.put("DoneTaskmenu")
 
     def gui_adjust_props(self):
         self.q.put("PropsAdjust")
+
+    def gui_switch_acquisition(self):
+        if self.gui_acquisition_method.get() == "greedy":
+            self.gui_acquisition_method.set("clustering")
+        else:
+            self.gui_acquisition_method.set("greedy")
 
     def validate_float_value(self,P):
         if P == "" or P == "-":
@@ -337,14 +471,21 @@ class SpaceHASTENGUI(tk.Tk):
         self.q.put("Percent:0")
         self.frame_main.grid_forget()
         self.frame_working.grid()
-        number_of_seeds = simpledialog.askinteger("Number of seeds to pick","How many seeds to pick?",initialvalue=self.c.ENAMINEREAL_SEEDS_COUNT,parent=self)
+           
+        inputseeds = filedialog.askopenfilename(filetypes=[("Seeds","*")],title="Choose seeds collection...",initialdir=self.c.SEEDS_DIR_DEFAULT,initialfile=self.c.SEEDS_FILE_DEFAULT)
+        if inputseeds is None or len(inputseeds)==0:
+            messagebox.showwarning(title="Note",message="Picking seeds cancelled")
+            self.frame_working.grid_forget()
+            self.frame_task_menu.grid()
+            return
+        number_of_seeds = simpledialog.askinteger("Number of seeds to pick","How many seeds to pick?",initialvalue=self.c.SEEDS_COUNT,parent=self)
         if number_of_seeds is None:
             messagebox.showwarning(title="Note",message="Picking seeds cancelled")
             self.frame_working.grid_forget()
             self.frame_main.grid()
             return
         
-        number_of_local_cores = simpledialog.askinteger("Number of local cores to use","How many local cores to use?",initialvalue=self.c.ENAMINEREAL_SEEDS_CPU,parent=self)
+        number_of_local_cores = simpledialog.askinteger("Number of local cores to use","How many local cores to use?",initialvalue=self.c.SEEDS_CPU,parent=self)
         if number_of_local_cores is None:
             messagebox.showwarning(title="Note",message="Picking seeds cancelled")
             self.frame_working.grid_forget()
@@ -363,19 +504,33 @@ class SpaceHASTENGUI(tk.Tk):
             messagebox.showerror(title="Error!",message="Refusing to overwrite existing file!")
             return
         
-        worker = threading.Thread(target=self.gui_thread_pickseeds,args=(seedsname,number_of_seeds,number_of_local_cores,))
+        worker = threading.Thread(target=self.gui_thread_pickseeds,args=(inputseeds,seedsname,number_of_seeds,number_of_local_cores,))
         worker.start()
 
-    def gui_thread_pickseeds(self,seedsname,num_seeds,num_cores):
+    def gui_thread_pickseeds(self,inputseeds,seedsname,num_seeds,num_cores):
         self.q.put("Percent:0")
-        print("Loading seeds from cxsmiles...")
+        
         os.system("date")
-        leadlike = pd.read_csv(self.c.ENAMINEREAL_SEEDS,compression="bz2",sep="\t")
+        if "REAL" in inputseeds:
+            print("Loading seeds from Enamine tab-seperated cxsmiles...")
+            leadlike = pd.read_csv(inputseeds,compression="bz2",sep="\t")
+            leadlike.drop(columns=["Type"],inplace=True)
+            leadlike["smiles_with_id"] = leadlike["smiles"] + "§" + leadlike["idnumber"]
+        elif "Freedom" in inputseeds: 
+            print("Loading seeds from FreedomSpace smiles...")
+            # Enamine filename has multiple dots, so pandas gets confused. Otherwise try to use pandas for speed.
+            leadlike = pd.read_csv(inputseeds,sep="\t")
+            leadlike.drop(columns=["Components","MW","HAC","LogP","HBA","HBD","RotBonds","TPSA","FSP3","InChIKey","reaction_id"],inplace=True)
+            leadlike["smiles_with_id"] = leadlike["SMILES"] + "§" + leadlike["ID"]
+        else:
+            print("Unknown seeds file format, expecting Enamine REAL or FreedomSpace collection.")
+            self.q.put("Error")
+            return
+
         self.q.put("Percent:10")
-        leadlike.drop(columns=["Type"],inplace=True)
+        
         print("Saving and picking seeds...")
         self.q.put("Percent:30")
-        leadlike["smiles_with_id"] = leadlike["smiles"] + "§" + leadlike["idnumber"]
         cx_seeds = leadlike.sample(n=num_seeds)["smiles_with_id"].to_list()
         # this consumes a lot of RAM, so not a good idea to use lots of CPUs
         self.q.put("Percent:50")
@@ -443,6 +598,7 @@ class SpaceHASTENGUI(tk.Tk):
             job_args.sim_ftrees = self.c.SIM_FTREES_DEFAULT
             job_args.field_similarity_spacelight = self.c.FIELD_SIMILARITY_SPACELIGHT
             job_args.field_similarity_ftrees = self.c.FIELD_SIMILARITY_FTREES
+            job_args.acquisition_method = self.gui_acquisition_method.get()
             worker = threading.Thread(target=self.gui_thread_virtual_screening,args=(job_args,ask_cpu_count_simsearch,ask_cpu_count_docking,ask_n_queries,ask_n_docked))
             worker.start()
         else:
@@ -627,12 +783,14 @@ class SpaceHASTENGUI(tk.Tk):
         
         worker = threading.Thread(target=importseeds_functions.import_seeds,args=(job_args,))
         worker.start()
-
+        
     def gui_load(self):
         dbname = filedialog.askopenfilename(filetypes=[("SpaceHASTEN files","*.dbsh")],defaultextension=".dbsh",title="Load existing job...",initialdir=os.getcwd())
         if len(dbname)==0:
             messagebox.showwarning(title="Note",message="Loading cancelled")
             return
+        if not os.access(dbname,os.W_OK):
+            messagebox.showwarning(title="Note",message=".dbsh is read-only. You can only export data.")
         self.gui_dbname.set(dbname)
         prop_args = functions.get_dbsh_properties(dbname)
         self.gui_mw_min.set(float(prop_args.prop_mw_min))
@@ -648,16 +806,25 @@ class SpaceHASTENGUI(tk.Tk):
         self.gui_tpsa_min.set(float(prop_args.prop_tpsa_min))
         self.gui_tpsa_max.set(float(prop_args.prop_tpsa_max))
 
+        self.frame_main.grid_forget()
+        self.frame_working.grid()
+        worker = threading.Thread(target=self.gui_thread_load,args=(dbname,))
+        worker.start()
+
+    def gui_thread_load(self,dbname):
         name = dbname.split("/")[-1].split(".")[0]
         os.chdir("/".join(dbname.split("/")[0:-1]))
+        self.q.put("Percent:0")
         self.gui_search_cycle.set(functions.get_latest_cycle(name))
+        self.q.put("Percent:33")
         self.gui_docking_iteration.set(functions.get_latest_iteration(name))
+        self.q.put("Percent:66")
         self.gui_model_version.set(functions.get_latest_model(name))
+        self.q.put("Percent:99")
         if self.gui_docking_iteration.get() > 0:
             self.button_vs.config(text="Continue virtual screening")
-        self.frame_main.grid_forget()
-        self.frame_task_menu.grid()
         self.title("SpaceHASTEN "+str(self.c.SPACEHASTEN_VERSION)+ " -- "+dbname.split("/")[-1])
+        self.q.put("DoneLoading")
 
     def gui_create_archive(self):
         dbname = filedialog.askopenfilename(filetypes=[("SpaceHASTEN files","*.dbsh")],defaultextension=".dbsh",title="Pick a job to archive...",initialdir=os.getcwd())
@@ -739,7 +906,6 @@ class SpaceHASTENGUI(tk.Tk):
         archive_functions.clean(args) 
         self.q.put("Percent:99.9")
         self.q.put("Done")
-        
 
     def gui_export_menu(self):
         self.frame_task_menu.grid_forget()
@@ -828,6 +994,7 @@ class SpaceHASTENGUI(tk.Tk):
         job_args.top = ask_n_docked
         job_args.sff = -1.0
         job_args.cpu = ask_cpu_count_docking
+        job_args.acquisition_method = self.gui_acquisition_method.get()
         
         worker = threading.Thread(target=self.gui_thread_docking,args=(job_args,))
         worker.start()
@@ -886,6 +1053,7 @@ class SpaceHASTENGUI(tk.Tk):
         job_args.cpu = ask_cpu_count_simsearch
         job_args.field_similarity_spacelight = self.c.FIELD_SIMILARITY_SPACELIGHT
         job_args.field_similarity_ftrees = self.c.FIELD_SIMILARITY_FTREES
+        job_args.acquisition_method = self.gui_acquisition_method.get()
         
         worker = threading.Thread(target=self.gui_thread_similarity,args=(job_args,))
         worker.start()

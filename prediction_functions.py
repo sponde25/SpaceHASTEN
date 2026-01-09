@@ -1,6 +1,6 @@
 # SpaceHASTEN: functions to do the predicting
 #
-# Copyright (c) 2024-2025 Orion Corporation
+# Copyright (c) 2024-2026 Orion Corporation
 # 
 # Redistribution and use in source and binary forms, with or without 
 # modification, are permitted provided that the following conditions are met:
@@ -66,11 +66,14 @@ def predict_dock(mols,args):
     new_file = True
     pred_scores = {}
 
-    os.system("rm -f pred_"+args.name+"_cycle"+str(functions.get_latest_cycle(args.name))+"_*.csv")
+    simsearch_cycle = functions.get_latest_cycle(args.name)
+    if simsearch_cycle == 0:
+        simsearch_cycle = 1
+    os.system("rm -f pred_"+args.name+"_cycle"+str(simsearch_cycle)+"_*.csv")
     for reghash,smiles,title in mols:
         if new_file:
             cpu_counter += 1
-            csv_filename = "pred_"+args.name+"_cycle"+str(functions.get_latest_cycle(args.name))+"_"+str(cpu_counter)+".csv"
+            csv_filename = "pred_"+args.name+"_cycle"+str(simsearch_cycle)+"_"+str(cpu_counter)+".csv"
             w = open(csv_filename,"wt")
             w.write("smiles,smilesid\n")
             new_file = False
@@ -84,7 +87,7 @@ def predict_dock(mols,args):
         w.close()
 
     pred_inputs = []
-    for pred_input in glob.glob("pred_"+args.name+"_cycle"+str(functions.get_latest_cycle(args.name))+"_*.csv"):
+    for pred_input in glob.glob("pred_"+args.name+"_cycle"+str(simsearch_cycle)+"_*.csv"):
         pred_inputs.append((pred_input,args))
     if args.rdkit_cpu > 0:
         cores = args.rdkit_cpu
@@ -97,7 +100,7 @@ def predict_dock(mols,args):
     for prediction in predictions:
         pred_scores.update(prediction)
 
-    os.system("rm -f pred_"+args.name+"_cycle"+str(functions.get_latest_cycle(args.name))+"_*.csv")
+    os.system("rm -f pred_"+args.name+"_cycle"+str(simsearch_cycle)+"_*.csv")
     return pred_scores
 
 def update_predicted_scores(args):
@@ -108,11 +111,15 @@ def update_predicted_scores(args):
     """
     dbname = args.name + ".dbsh"
 
+    simsearch_cycle = functions.get_latest_cycle(args.name)
+    if simsearch_cycle == 0:
+        simsearch_cycle = 1
+
     print("Predicting pred_score for all non-docked compounds with model version "+str(functions.get_latest_model(args.name)))
     conn = sqlite3.connect(dbname)
     c = conn.cursor()
 
-    cycle_dir = os.getenv("HOME")+"/SPACEHASTEN/SIMSEARCH_"+args.name+"_cycle"+str(functions.get_latest_cycle(args.name))
+    cycle_dir = os.getenv("HOME")+"/SPACEHASTEN/SIMSEARCH_"+args.name+"_cycle"+str(simsearch_cycle)
 
     to_update = c.execute("SELECT smiles,spacehastenid FROM data WHERE dock_score IS NULL").fetchall()
     if len(to_update) == 0:
@@ -160,13 +167,11 @@ def update_predicted_scores(args):
     os.chdir(cycle_dir+"/PREDICT")
     os.system("rm -f jobdone-"+args.name+"-CPU* predicted_predict_*.csv")
     print("Predicting docking scores via scheduler at "+cycle_dir+"/PREDICT ...")
-    os.system("sbatch submit_predict_"+args.name+"_cycle"+str(functions.get_latest_cycle(args.name))+".sh")
+    os.system("sbatch submit_predict_"+args.name+"_cycle"+str(simsearch_cycle)+".sh")
     os.chdir(curdir)
 
-    jobs_left = args.cpu - len(glob.glob(cycle_dir+"/PREDICT/jobdone-"+args.name+"-CPU*"))
-    while jobs_left>0:
-        time.sleep(5)
-        jobs_left = args.cpu - len(glob.glob(cycle_dir+"/PREDICT/jobdone-"+args.name+"-CPU*"))
+    scheduler_functions.wait_until_jobs_done(cycle_dir+"/PREDICT",args.name,args.cpu)
+
     print("Reading in predictions...")
     prop_inputs = []
     for prop_input in glob.glob(cycle_dir+"/PREDICT/predicted_predict_*.csv"):

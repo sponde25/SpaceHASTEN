@@ -1,6 +1,6 @@
 # SpaceHASTEN: docking functions
 #
-# Copyright (c) 2024-2025 Orion Corporation
+# Copyright (c) 2024-2026 Orion Corporation
 # 
 # Redistribution and use in source and binary forms, with or without 
 # modification, are permitted provided that the following conditions are met:
@@ -104,8 +104,11 @@ def dock(args,importing_seeds=False,do_not_update_gui=False):
         print("Picking all imported compounds for docking...")
         sql_query = "SELECT smiles,spacehastenid FROM data WHERE dock_score IS NULL"
     else:
-        print("Picking top predicted compounds for docking...")
-        sql_query = "SELECT smiles,spacehastenid FROM data WHERE pred_score IS NOT NULL AND dock_score IS NULL ORDER BY pred_score LIMIT "+str(args.top)
+        print("Picking top predicted compounds for docking (acquisition method: "+args.acquisition_method+")...")
+        if args.acquisition_method == "greedy":
+            sql_query = "SELECT smiles,spacehastenid FROM data WHERE pred_score IS NOT NULL AND dock_score IS NULL ORDER BY pred_score LIMIT "+str(args.top)
+        elif args.acquisition_method == "clustering":
+            sql_query = "SELECT smiles,data.spacehastenid FROM data,clusters WHERE data.spacehastenid=clusters.spacehastenid AND pred_score IS NOT NULL AND dock_score IS NULL GROUP BY clusterid ORDER BY MIN(pred_score) LIMIT "+str(args.top)
     for smiles,spacehastenid in c.execute(sql_query).fetchall():
         to_be_docked.append(smiles.strip() + " " + str(spacehastenid) + "\n")
     conn.close()
@@ -156,12 +159,9 @@ def dock(args,importing_seeds=False,do_not_update_gui=False):
     print("Running docking via scheduler at "+dock_dir+" ...")
     os.system("sbatch submit_dockinput_"+args.name+"_iter"+str(dock_iteration)+".sh")
     os.chdir(curdir)
-    #jobs_left = args.cpu - len(glob.glob(dock_dir+"/jobdone-"+args.name+"-CPU*"))
-    jobs_left = chunk_counter - len(glob.glob(dock_dir+"/jobdone-"+args.name+"-CPU*"))
-    while jobs_left>0:
-        time.sleep(5)
-        #jobs_left = args.cpu - len(glob.glob(dock_dir+"/jobdone-"+args.name+"-CPU*"))
-        jobs_left = chunk_counter - len(glob.glob(dock_dir+"/jobdone-"+args.name+"-CPU*"))
+
+    scheduler_functions.wait_until_jobs_done(dock_dir,args.name,chunk_counter)
+
     process_docking_results(args,dock_iteration)
     print("Docking complete!")
     os.system("date")

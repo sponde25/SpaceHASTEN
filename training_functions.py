@@ -1,6 +1,6 @@
 # SpaceHASTEN: functions to do the training
 #
-# Copyright (c) 2024-2025 Orion Corporation
+# Copyright (c) 2024-2026 Orion Corporation
 # 
 # Redistribution and use in source and binary forms, with or without 
 # modification, are permitted provided that the following conditions are met:
@@ -65,10 +65,9 @@ def train_new_model(args):
     os.chdir(modeldir)
     print("Running training via scheduler at "+modeldir+" ...")
     os.system("sbatch submit_train_"+args.name+"_ver"+str(model_version)+".sh")
-    jobs_left = 1 - len(glob.glob(modeldir+"/jobdone-train_"+args.name+"*"))
-    while jobs_left>0:
-        time.sleep(5)
-        jobs_left = 1 - len(glob.glob(modeldir+"/jobdone-train_"+args.name+"*"))
+
+    scheduler_functions.wait_until_jobs_done(modeldir,"train_"+args.name,1)
+
     os.system("rm "+data_filename)
     tarfile = "model_"+args.name+"_ver"+str(model_version)+".tar.gz"
     os.system("tar -czf "+tarfile+" model_"+args.name+"_ver"+str(model_version))
@@ -79,4 +78,5 @@ def train_new_model(args):
     conn.close()
     os.system("rm -r model_"+args.name+"_ver"+str(model_version)+" model_"+args.name+"_ver"+str(model_version)+".tar.gz")
     os.chdir(curdir)
+    os.system("rm -r "+modeldir)
     print("Training complete!")

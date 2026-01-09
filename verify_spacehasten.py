@@ -1,6 +1,6 @@
 # SpaceHASTEN: check environment sanity
 #
-# Copyright (c) 2024-2025 Orion Corporation
+# Copyright (c) 2024-2026 Orion Corporation
 # 
 # Redistribution and use in source and binary forms, with or without 
 # modification, are permitted provided that the following conditions are met:
@@ -30,6 +30,11 @@ import os
 import cfg
 import time
 import glob
+import gzip
+import pandas as pd
+from types import SimpleNamespace
+
+import scheduler_functions
 #
 # these are here to check that the required software is available
 import pandas
@@ -251,6 +256,38 @@ def check_pigz():
         print("pigz not installed.")
         exit()
 
+def check_clustering(c,verdir):
+    print("Testing clustering...")
+    print("Using clustering executable:",c.EXE_CLUSTERING_DEFAULT)
+    print("Using activate clustering command:",c.ACTIVATE_CLUSTERING)
+    cluster_dir = verdir+"_CLUSTERING_tmp"
+    os.system("rm -fr "+cluster_dir)
+    os.system("mkdir -p "+cluster_dir)
+    w = gzip.open(cluster_dir+"/clustering_input.smi.gz","wt")
+    w.write("CCO 1\n")
+    w.write("CCN 2\n")
+    w.write("CCC 3\n")
+    w.write("CCF 4\n")
+    w.write("CCCl 5\n")
+    w.close()
+    job_args = SimpleNamespace()
+    job_args.c = c
+    job_args.name = "verifyclustering"     
+    scheduler_functions.write_cluster_scheduler(cluster_dir,job_args)
+    curdir = os.getcwd()
+    os.chdir(cluster_dir)
+    os.system("rm -f jobdone-verifyclustering-CPU*")
+    print("Running clustering via scheduler...")
+    os.system(c.SCHEDULER_SUBMIT + " submit_cluster_verifyclustering.sh")
+    os.chdir(curdir)
+
+    scheduler_functions.wait_until_jobs_done(cluster_dir,"verifyclustering",1)
+    
+    clusters = pd.read_csv(cluster_dir + "/clustering.csv")
+    print(clusters)
+    os.system("rm -fr "+cluster_dir)
+    print("Clustering tested succesfully.")
+    
 print()
 print(" ___                      _ _  ___  ___  ___  ___  _ _ ")
 print("/ __> ___  ___  ___  ___ | | || . |/ __>|_ _|| __>| \ |")
@@ -260,15 +297,16 @@ print("     |_|                                               ")
 print()
 print("SpaceHASTEN " + str(cfg.SpaceHASTENConfiguration.SPACEHASTEN_VERSION)+"\n")
 print("This script checks that all bits and pieces required to run SpaceHASTEN are in place.")
-print("NOTE: this works only with slurm, SGE users should manually verify their installation.")
 
+  
 c = cfg.SpaceHASTENConfiguration()
 print("SpaceHASTEN directory:",c.SPACEHASTEN_DIRECTORY)
-verdir = "$HOME/SPACEHASTEN/VERIFY" + str(cfg.SpaceHASTENConfiguration.SPACEHASTEN_VERSION).replace(".","")
+verdir = os.getenv("HOME") + "/SPACEHASTEN/VERIFY" + str(cfg.SpaceHASTENConfiguration.SPACEHASTEN_VERSION).replace(".","")
 print("Creating directory " + verdir + " that should be visible to all computing nodes as well...")
 os.system("rm -fr " + verdir)
 os.system("mkdir -p " + verdir)
 
+check_clustering(c,verdir)
 check_pigz()
 check_slurm(c,verdir.replace("$HOME",os.getenv("HOME")))
 check_training(c,verdir.replace("$HOME",os.getenv("HOME")))

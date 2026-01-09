@@ -1,6 +1,6 @@
 # SpaceHASTEN: functions to do the exporting
 #
-# Copyright (c) 2024-2025 Orion Corporation
+# Copyright (c) 2024-2026 Orion Corporation
 # 
 # Redistribution and use in source and binary forms, with or without 
 # modification, are permitted provided that the following conditions are met:
@@ -45,11 +45,11 @@ def export_results(args):
     conn = sqlite3.connect(dbname)
     c = conn.cursor()
     w = open(args.resfilename,"wt")
-    w.write("smiles,smilesid,dock_score,pred_score,spacelight,ftrees,dock_iteration\n")
+    w.write("smiles,smilesid,dock_score,pred_score,spacelight,ftrees,dock_iteration,clusterid\n")
     #for smiles,smilesid,dock_score,pred_score,spacehasten,ftrees,dock_iteration in c.execute("SELECT smiles,smilesid,dock_score,pred_score,spacelight,ftrees,dock_iteration FROM data WHERE dock_score <= "+str(args.cutoff)+" AND (spacelight IS NOT NULL OR ftrees is NOT NULL) ORDER BY dock_score"):
-    # from 0.3, spacehastenid has been added with § suffix
-    for smiles,spacehastenid,smilesid,dock_score,pred_score,spacehasten,ftrees,dock_iteration in c.execute("SELECT smiles,spacehastenid,smilesid,dock_score,pred_score,spacelight,ftrees,dock_iteration FROM data WHERE dock_score <= "+str(args.cutoff)+" ORDER BY dock_score"):
-        w.write(smiles.strip()+","+smilesid.strip()+"/"+str(spacehastenid)+","+str(dock_score)+","+str(pred_score)+","+str(spacehasten)+","+str(ftrees)+","+str(dock_iteration)+"\n")
+    # from 0.3, spacehastenid has been added with § suffix, from 0.9 clusterid also
+    for smiles,spacehastenid,smilesid,dock_score,pred_score,spacehasten,ftrees,dock_iteration,clusterid in c.execute("SELECT smiles,data.spacehastenid,smilesid,dock_score,pred_score,spacelight,ftrees,dock_iteration,clusterid FROM data,clusters WHERE data.spacehastenid = clusters.spacehastenid AND dock_score <= "+str(args.cutoff)+" ORDER BY dock_score"):
+        w.write(smiles.strip()+","+smilesid.strip()+"/"+str(spacehastenid)+","+str(dock_score)+","+str(pred_score)+","+str(spacehasten)+","+str(ftrees)+","+str(dock_iteration)+","+str(clusterid)+"\n")
     w.close()
     conn.close()
     print("CSV created:",args.resfilename)

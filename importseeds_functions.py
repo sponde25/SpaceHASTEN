@@ -1,6 +1,6 @@
 # SpaceHASTEN: functions to import seeds
 #
-# Copyright (c) 2024-2025 Orion Corporation
+# Copyright (c) 2024-2026 Orion Corporation
 # 
 # Redistribution and use in source and binary forms, with or without 
 # modification, are permitted provided that the following conditions are met:
@@ -35,6 +35,7 @@ import sqlite3
 import training_functions
 import docking_functions
 import numpy as np
+import cluster_functions
 
 def add_param_to_dbsh(c,glideinfile):
     with open(glideinfile,"rb") as f:
@@ -132,7 +133,8 @@ def import_seeds(args):
 
     args.q.put("Percent:70")
     training_functions.train_new_model(args)
-    
+    args.q.put("Percent:80")
+    cluster_functions.cluster_dbsh(args)
     print("Import done!")
     os.system("date")
     args.q.put("Percent:99.9")

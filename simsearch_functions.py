@@ -1,6 +1,6 @@
 # SpaceHASTEN: functions to do the similarity searching
 #
-# Copyright (c) 2024-2025 Orion Corporation
+# Copyright (c) 2024-2026 Orion Corporation
 # 
 # Redistribution and use in source and binary forms, with or without 
 # modification, are permitted provided that the following conditions are met:
@@ -37,6 +37,7 @@ import pandas as pd
 import tqdm
 import gzip
 import multiprocessing as mp
+import cluster_functions
 
 def remove_existing(filtered_mols,args):
     """
@@ -96,6 +97,10 @@ def process_sim_results(cycle_dir,args):
 
     cpu_counter = 0
     
+    simsearch_cycle = functions.get_latest_cycle(args.name)
+    if simsearch_cycle == 0:
+        simsearch_cycle = 1
+
     os.system("mkdir -p "+cycle_dir+"/CONTROL")
     os.system("rm -f "+cycle_dir+"/CONTROL/control_*.smi.gz")
     model_version = functions.get_latest_model(args.name)
@@ -148,13 +153,10 @@ def process_sim_results(cycle_dir,args):
     os.chdir(cycle_dir+"/CONTROL")
     os.system("rm -f jobdone-"+args.name+"-CPU*")
     print("Controlling properties and predicting docking_score via scheduler at "+cycle_dir+"/CONTROL ...")
-    os.system("sbatch submit_ctrl_"+args.name+"_cycle"+str(functions.get_latest_cycle(args.name))+".sh")
+    os.system("sbatch submit_ctrl_"+args.name+"_cycle"+str(simsearch_cycle)+".sh")
     os.chdir(curdir)
 
-    jobs_left = args.cpu - len(glob.glob(cycle_dir+"/CONTROL/jobdone-"+args.name+"-CPU*"))
-    while jobs_left>0:
-        time.sleep(5)
-        jobs_left = args.cpu - len(glob.glob(cycle_dir+"/CONTROL/jobdone-"+args.name+"-CPU*"))
+    scheduler_functions.wait_until_jobs_done(cycle_dir+"/CONTROL",args.name,args.cpu)
 
     print("Reading in predictions...")
     prop_inputs = []
@@ -216,10 +218,26 @@ def simsearch(args,do_not_update_gui=False):
     print("Picking",args.top,"top docked/predicted compounds for similarity searching queries...")
     if not args.use_predicted:
         print("Using docking_score")
-        to_search = c.execute("SELECT smiles,spacehastenid FROM data WHERE query IS NULL AND dock_score IS NOT NULL ORDER BY dock_score LIMIT ?",[args.top]).fetchall()
+        print("Acquisition method:")
+        print(args.acquisition_method)
+        if args.acquisition_method == "greedy":
+            to_search = c.execute("SELECT smiles,spacehastenid FROM data WHERE query IS NULL AND dock_score IS NOT NULL ORDER BY dock_score LIMIT ?",[args.top]).fetchall()
+        elif args.acquisition_method == "clustering":
+            to_search = c.execute("SELECT smiles,data.spacehastenid FROM data,clusters WHERE data.spacehastenid = clusters.spacehastenid AND query IS NULL AND dock_score IS NOT NULL GROUP BY clusterid ORDER BY MIN(dock_score) LIMIT ?",[args.top]).fetchall()
+        else:
+            print("INTERNAL ERROR IN SIMSEARCH!!! UNKNOWN ACQUISITION METHOD")
+            exit()
     else:
         print("Using predicted score")
-        to_search = c.execute("SELECT smiles,spacehastenid FROM data WHERE query IS NULL AND pred_score IS NOT NULL AND dock_score IS NULL ORDER by pred_score LIMIT ?",[args.top]).fetchall()
+        print("Acquisition method:")
+        print(args.acquisition_method)
+        if args.acquisition_method == "greedy":
+            to_search = c.execute("SELECT smiles,spacehastenid FROM data WHERE query IS NULL AND pred_score IS NOT NULL AND dock_score IS NULL ORDER by pred_score LIMIT ?",[args.top]).fetchall()
+        elif args.acquisition_method == "clustering":
+            to_search = c.execute("SELECT smiles,data.spacehastenid FROM data,clusters WHERE data.spacehastenid = clusters.spacehastenid AND pred_score IS NOT NULL AND dock_score IS NULL AND query IS NULL GROUP BY clusterid ORDER BY MIN(pred_score) LIMIT ?",[args.top]).fetchall()
+        else:
+            print("INTERNAL ERROR IN SIMSEARCH!!! UNKNOWN ACQUISITION METHOD")
+            exit()
     for smiles,spacehastenid in to_search: c.execute("UPDATE data SET query = "+str(cycle_number)+" WHERE spacehastenid = "+str(spacehastenid))
     conn.commit()
     conn.close()
@@ -234,10 +252,8 @@ def simsearch(args,do_not_update_gui=False):
     print("Running similarity searching via scheduler...")
     os.system("sbatch submit_queries_"+args.name+".sh")
     os.chdir(curdir)
-    jobs_left = args.top - len(glob.glob(cycle_dir+"/jobdone-"+args.name+"-CPU*"))
-    while jobs_left>0:
-        time.sleep(5)
-        jobs_left = args.top - len(glob.glob(cycle_dir+"/jobdone-"+args.name+"-CPU*"))
+
+    scheduler_functions.wait_until_jobs_done(cycle_dir,args.name,args.top)
 
     filtered_mols,filtered_sims,predicted_scores = process_sim_results(cycle_dir,args)
     print(len(filtered_mols),"property-matched mols")
@@ -282,6 +298,7 @@ def simsearch(args,do_not_update_gui=False):
         conn.commit()
         conn.close()
     print("\nSimilarity seaching done!")
+    cluster_functions.cluster_dbsh(args)
     os.system("date")
     if not do_not_update_gui:
         args.q.put("DoneSimsearch")
