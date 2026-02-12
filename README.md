@@ -1,4 +1,4 @@
-SpaceHASTEN version 0.9, Developed by Tuomo Kalliokoski, Orion Pharma <tuomo.kalliokoski at orionpharma.com>, 2026-01-09
+SpaceHASTEN version 0.10, Developed by Tuomo Kalliokoski, Orion Pharma <tuomo.kalliokoski at orionpharma.com>, 2026-02-11
 
 # Introduction
 
@@ -9,7 +9,7 @@ Only Linux is supported (tested on Ubuntu 22.04.4 and Rocky Linux 8.8).
 
 SpaceHASTEN requires following commercial software:
 
-* Schrödinger Suite (version 2025-3): phase/ligprep, glide, python API (run)[https://www.schrodinger.com/release-download/]
+* Schrödinger Suite (version 2026-1): phase/ligprep, glide, python API (run)[https://www.schrodinger.com/release-download/]
 * SpaceLight (version 2.0.0)[https://www.biosolveit.de/download/?product=spacelight]
 * FTrees (version 7.0.0)[https://www.biosolveit.de/download/?product=ftrees]
 
@@ -132,3 +132,9 @@ The clustering feature is at really alpha-stage and is currently probably not th
     * command line interface implemented (issue #28, spacehasten.py, cmdline.py, spacehasten, gui.py)
     * installation verification check that clustering works (verify_spacehasten.py)
     * support for seeds from ChemSpace's FreedomSpace added (gui.py, cfg.py, install_spacehasten.py)
+* 0.10:
+    * New, faster version of Glide now used for docking (scheduler_functions.py)
+    * Support the changed job control in Schrodinger Suite 2026-1 (scheduler_functions.py, install_spacehasten.py, cfg.py, verify_spacehasten.py)
+    * ASCII-art now correctly printed in all Python versions (install_spacehasten.py, verify_spacehasten.py)
+    * version numbering switched from float to string (cfg.py)
+    * installer asked the location of seeds twice (install_spacehasten.py)

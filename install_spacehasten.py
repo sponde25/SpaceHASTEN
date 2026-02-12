@@ -51,11 +51,11 @@ def ask_for_dir(default_dir,desc,exist=True):
     return asked_dir
 
 print()
-print(" ___                      _ _  ___  ___  ___  ___  _ _ ")
-print("/ __> ___  ___  ___  ___ | | || . |/ __>|_ _|| __>| \ |")
-print("\__ \| . \<_> |/ | '/ ._>|   ||   |\__ \ | | | _> |   |")
-print("<___/|  _/<___|\_|_.\___.|_|_||_|_|<___/ |_| |___>|_\_|")
-print("     |_|                                               ")
+print(r""" ___                      _ _  ___  ___  ___  ___  _ _ """)
+print(r"""/ __> ___  ___  ___  ___ | | || . |/ __>|_ _|| __>| \ |""")
+print(r"""\__ \| . \<_> |/ | '/ ._>|   ||   |\__ \ | | | _> |   |""")
+print(r"""<___/|  _/<___|\_|_.\___.|_|_||_|_|<___/ |_| |___>|_\_|""")
+print(r"""     |_|                                               """)
 print()
 print("SpaceHASTEN installer " + str(SpaceHASTENConfiguration.SPACEHASTEN_VERSION)+"\n")
 print("This script will install SpaceHASTEN on your system.")
@@ -76,7 +76,6 @@ default_seeds = ask_for_file("/data/programs/BiosolveIT/spaces_seeds/Enamine_Div
 seeds_dir = ask_for_dir("/data/programs/BiosolveIT/spaces_seeds","Directory for enumerated seeds")
 
 scratch_dir = ask_for_dir("/wrk","scratch (local fast disk)")
-enaminereal_seeds = ask_for_file("/data/work/db/Enamine_Diverse_REAL_drug-like_48.2M_cxsmiles.cxsmiles.bz2","Enamine REAL seeds")
 prepare_anaconda = input("Please enter the anaconda3 activation command [default:source /data/programs/oce/actoce]: ")
 if prepare_anaconda == "":
     prepare_anaconda = "source /data/programs/oce/actoce"
@@ -99,6 +98,7 @@ if slurm_gpu_parameter == "":
 slurm_cpu_clustering = input("Please enter the number of cores for clustering [default:64]: ")
 if slurm_cpu_clustering == "":
     slurm_cpu_clustering = "64"
+schrodinger_feature_flags = input("Please enter SCHRODINGER_FEATURE_FLAGS such as -JOB_SERVER if required or press ENTER to skip (recommended):")
 
 print("Copying files...")
 w = open(path+"/spacehasten.ini","wt")
@@ -113,6 +113,8 @@ w.write("CPU_COUNT_DOCK = 1\n")
 w.write("CPU_COUNT_PREDICT = 1\n")
 w.write("CPU_COUNT_CONTROL = 1\n")
 w.write("CPU_COUNT_CLUSTERING = "+slurm_cpu_clustering+"\n")
+if schrodinger_feature_flags != "":
+    w.write("SCHRODINGER_FEATURE_FLAGS = "+ schrodinger_feature_flags + "\n")
 w.write("\n")
 w.write("[Paths]\n")
 w.write("EXE_SPACELIGHT_DEFAULT = "+spacelight_exe+"\n")

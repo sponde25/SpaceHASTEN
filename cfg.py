@@ -37,7 +37,7 @@ class SpaceHASTENConfiguration:
     CONTROL_EXE = SPACEHASTEN_DIRECTORY+"/control.py"
     CHUNKPREDICT_EXE = SPACEHASTEN_DIRECTORY+"/chunkpredict.py"
     EXPORTPOSES_EXE = "$SCHRODINGER/run " + SPACEHASTEN_DIRECTORY + "/export_poses.py"
-    SPACEHASTEN_VERSION = 0.9
+    SPACEHASTEN_VERSION = "0.10"
     MAX_CORES = 250
     MAX_JOBNAME_LEN = 15
     EXE_SPACELIGHT_DEFAULT = "/data/programs/BiosolveIT/spacelight-1.5.0-Linux-x64/spacelight"
@@ -116,8 +116,9 @@ class SpaceHASTENConfiguration:
     # by default, sphere exclusion clustering with fpsim2 and rdkit is used
     EXE_CLUSTERING_DEFAULT = SPACEHASTEN_DIRECTORY+"/sec_clustering.sh"
 
+    # by default, we don't need to set SCHRODINGER_FEATURE_FLAGS unless in AWS
+    SCHRODINGER_FEATURE_FLAGS = None
 
-    
     def __init__(self):
         cparser = configparser.ConfigParser()
         cparser.read(self.SPACEHASTEN_DIRECTORY+"/spacehasten.ini")
@@ -143,6 +144,8 @@ class SpaceHASTENConfiguration:
                 self.CPU_COUNT_CONTROL = cparser["General"][setting]
             elif setting == "cpu_count_clustering":
                 self.CPU_COUNT_CLUSTERING = cparser["General"][setting]
+            elif setting == "schrodinger_feature_flags":
+                self.SCHRODINGER_FEATURE_FLAGS = cparser["General"][setting]
             else:
                 print("Error: Unknown setting in spacehasten.ini:",setting)
                 sys.exit(1)
