@@ -104,7 +104,7 @@ def write_confgen_file(c):
 
 def write_train_slurm(c,verdir):
     """
-    Write slurm script for training
+    Write slurm script for training using model runner
 
     """
     jobname="verifytrain"
@@ -118,7 +118,22 @@ def write_train_slurm(c,verdir):
     w.write("cd "+verdir+"\n")
     w.write(c.PREPARE_ANACONDA + "\n")
     w.write(c.ACTIVATE_CHEMPROP + "\n")
-    w.write("chemprop train --devices 1 --num-workers 0 --task-type regression --target-columns docking_score --data-path example.csv --save-dir verifytrain_model --batch-size 250 --no-cache --epochs 30\n")
+    w.write("python3 "+c.MODEL_RUNNER_TRAIN_EXE+" example.csv verifytrain_model")
+    w.write(" --batch-size "+str(c.TRAIN_BATCH_SIZE))
+    w.write(" --epochs "+str(c.TRAIN_EPOCHS))
+    w.write(" --num-workers "+str(c.TRAIN_NUM_WORKERS))
+    w.write(" --devices "+c.TRAIN_DEVICES)
+    w.write(" --mp-hidden-size "+str(c.TRAIN_MP_HIDDEN_SIZE))
+    w.write(" --mp-depth "+str(c.TRAIN_MP_DEPTH))
+    w.write(" --ffn-hidden-size "+str(c.TRAIN_FFN_HIDDEN_SIZE))
+    w.write(" --ffn-layers "+str(c.TRAIN_FFN_LAYERS))
+    w.write(" --dropout "+str(c.TRAIN_DROPOUT))
+    w.write(" --activation "+c.TRAIN_ACTIVATION)
+    w.write(" --batch-norm "+str(c.TRAIN_BATCH_NORM))
+    w.write(" --warmup-epochs "+str(c.TRAIN_WARMUP_EPOCHS))
+    w.write(" --init-lr "+str(c.TRAIN_INIT_LR))
+    w.write(" --max-lr "+str(c.TRAIN_MAX_LR))
+    w.write(" --final-lr "+str(c.TRAIN_FINAL_LR) + "\n")
     w.write("touch jobdone-verifytrain\n")
     w.close()
 
@@ -212,8 +227,8 @@ def check_training(c,verdir):
     while jobs_left>0:
         time.sleep(5)
         jobs_left = 1 - len(glob.glob(train_dir+"/jobdone-verifytrain*"))
-    if not os.path.exists(train_dir+"/verifytrain_model/model_0/best.pt"):
-        print("Model not created.")
+    if not os.path.exists(train_dir+"/verifytrain_model/model_0/pytorch_model.bin"):
+        print("Model file not created.")
         exit()
     cuda = False
     for line in open(train_dir+"/train.err"):

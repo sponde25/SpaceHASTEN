@@ -36,6 +36,8 @@ class SpaceHASTENConfiguration:
     SPACEHASTEN_DIRECTORY = "/".join(os.path.abspath(sys.argv[0]).split("/")[0:-1])
     CONTROL_EXE = SPACEHASTEN_DIRECTORY+"/control.py"
     CHUNKPREDICT_EXE = SPACEHASTEN_DIRECTORY+"/chunkpredict.py"
+    MODEL_RUNNER_TRAIN_EXE = SPACEHASTEN_DIRECTORY+"/model_runner_train.py"
+    MODEL_RUNNER_PREDICT_EXE = SPACEHASTEN_DIRECTORY+"/model_runner_predict.py"
     EXPORTPOSES_EXE = "$SCHRODINGER/run " + SPACEHASTEN_DIRECTORY + "/export_poses.py"
     SPACEHASTEN_VERSION = "0.10"
     MAX_CORES = 250
@@ -65,6 +67,27 @@ class SpaceHASTENConfiguration:
     CHEMPROP_CHUNK_DEFAULT = 12345
     CHEMPROP_CPU_DEFAULT = 250
     SCRATCH_DEFAULT = "/wrk"
+    MODEL_SPEC_PATH = None
+    MODEL_HPARAMS_PATH = None
+    TRAIN_BATCH_SIZE = 250
+    TRAIN_EPOCHS = 30
+    TRAIN_NUM_WORKERS = 0
+    TRAIN_DEVICES = "1"
+    TRAIN_MP_HIDDEN_SIZE = 300
+    TRAIN_MP_DEPTH = 3
+    TRAIN_FFN_HIDDEN_SIZE = 300
+    TRAIN_FFN_LAYERS = 1
+    TRAIN_DROPOUT = 0.1
+    TRAIN_ACTIVATION = "relu"
+    TRAIN_BATCH_NORM = 0
+    TRAIN_WARMUP_EPOCHS = 2
+    TRAIN_INIT_LR = 1e-4
+    TRAIN_MAX_LR = 1e-3
+    TRAIN_FINAL_LR = 1e-4
+    PRED_BATCH_SIZE = 32
+    PRED_NUM_WORKERS = 0
+    PRED_ACCELERATOR = "cpu"
+    PRED_DEVICES = "1"
     SIM_SPACELIGHT_DEFAULT = 0.5
     SIM_FTREES_DEFAULT = 0.9
     NNN_DEFAULT = 10000
@@ -146,6 +169,48 @@ class SpaceHASTENConfiguration:
                 self.CPU_COUNT_CLUSTERING = cparser["General"][setting]
             elif setting == "schrodinger_feature_flags":
                 self.SCHRODINGER_FEATURE_FLAGS = cparser["General"][setting]
+            elif setting == "model_spec_path":
+                self.MODEL_SPEC_PATH = cparser["General"][setting]
+            elif setting == "model_hparams_path":
+                self.MODEL_HPARAMS_PATH = cparser["General"][setting]
+            elif setting == "train_batch_size":
+                self.TRAIN_BATCH_SIZE = int(cparser["General"][setting])
+            elif setting == "train_epochs":
+                self.TRAIN_EPOCHS = int(cparser["General"][setting])
+            elif setting == "train_num_workers":
+                self.TRAIN_NUM_WORKERS = int(cparser["General"][setting])
+            elif setting == "train_devices":
+                self.TRAIN_DEVICES = cparser["General"][setting]
+            elif setting == "train_mp_hidden_size":
+                self.TRAIN_MP_HIDDEN_SIZE = int(cparser["General"][setting])
+            elif setting == "train_mp_depth":
+                self.TRAIN_MP_DEPTH = int(cparser["General"][setting])
+            elif setting == "train_ffn_hidden_size":
+                self.TRAIN_FFN_HIDDEN_SIZE = int(cparser["General"][setting])
+            elif setting == "train_ffn_layers":
+                self.TRAIN_FFN_LAYERS = int(cparser["General"][setting])
+            elif setting == "train_dropout":
+                self.TRAIN_DROPOUT = float(cparser["General"][setting])
+            elif setting == "train_activation":
+                self.TRAIN_ACTIVATION = cparser["General"][setting]
+            elif setting == "train_batch_norm":
+                self.TRAIN_BATCH_NORM = int(cparser["General"][setting])
+            elif setting == "train_warmup_epochs":
+                self.TRAIN_WARMUP_EPOCHS = int(cparser["General"][setting])
+            elif setting == "train_init_lr":
+                self.TRAIN_INIT_LR = float(cparser["General"][setting])
+            elif setting == "train_max_lr":
+                self.TRAIN_MAX_LR = float(cparser["General"][setting])
+            elif setting == "train_final_lr":
+                self.TRAIN_FINAL_LR = float(cparser["General"][setting])
+            elif setting == "pred_batch_size":
+                self.PRED_BATCH_SIZE = int(cparser["General"][setting])
+            elif setting == "pred_num_workers":
+                self.PRED_NUM_WORKERS = int(cparser["General"][setting])
+            elif setting == "pred_accelerator":
+                self.PRED_ACCELERATOR = cparser["General"][setting]
+            elif setting == "pred_devices":
+                self.PRED_DEVICES = cparser["General"][setting]
             else:
                 print("Error: Unknown setting in spacehasten.ini:",setting)
                 sys.exit(1)
@@ -234,6 +299,10 @@ class SpaceHASTENConfiguration:
             sys.exit("Error: invalid SpaceHASTEN installation, control.py missing!")
         if not os.path.exists(self.SPACEHASTEN_DIRECTORY+"/chunkpredict.py"):
             sys.exit("Error: invalid SpaceHASTEN installation, chunkpredict.py missing!")
+        if not os.path.exists(self.SPACEHASTEN_DIRECTORY+"/model_runner_train.py"):
+            sys.exit("Error: invalid SpaceHASTEN installation, model_runner_train.py missing!")
+        if not os.path.exists(self.SPACEHASTEN_DIRECTORY+"/model_runner_predict.py"):
+            sys.exit("Error: invalid SpaceHASTEN installation, model_runner_predict.py missing!")
         if not os.path.exists(self.SPACEHASTEN_DIRECTORY+"/export_poses.py"):
             sys.exit("Error: invalid SpaceHASTEN installation, export_poses.py missing!")
         if not os.path.exists(self.SPACEHASTEN_DIRECTORY+"/spacehasten_logo.png"):

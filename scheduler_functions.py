@@ -106,7 +106,7 @@ def write_dock_scheduler(dock_dir,args,chunk_counter):
 
 def write_predict_scheduler(control_dir,args):
     """
-    Write scheduler script for predicting
+    Write scheduler script for predicting using model runner
 
     :param control_dir: Work directory
     :param args: the args
@@ -119,6 +119,7 @@ def write_predict_scheduler(control_dir,args):
     jobname="predict_"+args.name+"_cycle"+str(simsearch_cycle)
     cpuname="predict_"+args.name+"_cpu$"+args.c.SCHEDULER_ARRAY_ID
     modelname="model_"+str(args.name)+"_ver"+str(functions.get_latest_model(args.name))
+    output_filename="predicted_"+cpuname+".csv"
     personal_scratch=args.scratch+"/"+os.getenv("USER")+"/"+cpuname
     w = open(control_dir+"/submit_"+jobname+".sh","wt")
     w.write("#!/bin/bash\n")
@@ -130,17 +131,20 @@ def write_predict_scheduler(control_dir,args):
     w.write("mkdir -p "+personal_scratch+"\n")
     w.write("cp "+cpuname+".csv "+personal_scratch+"/\n")
     w.write("cp -r "+modelname+" "+personal_scratch+"/\n")
-    w.write("cp control.param "+personal_scratch+"/\n")
     w.write("cd "+personal_scratch+"\n")
     w.write(args.c.PREPARE_ANACONDA + "\n")
     w.write(args.c.ACTIVATE_CHEMPROP + "\n")
-    w.write("python3 "+args.c.CHUNKPREDICT_EXE+" "+str(args.chemprop_chunk)+" "+cpuname+".csv "+modelname+"\n")
-    w.write("mv predicted_"+cpuname+".csv $curdir\n")
+    w.write("python3 "+args.c.MODEL_RUNNER_PREDICT_EXE+" "+cpuname+".csv "+modelname+" "+output_filename)
+    w.write(" --batch-size "+str(args.c.PRED_BATCH_SIZE))
+    w.write(" --num-workers "+str(args.c.PRED_NUM_WORKERS))
+    w.write(" --accelerator "+args.c.PRED_ACCELERATOR)
+    w.write(" --devices "+args.c.PRED_DEVICES + "\n")
+    w.write("mv "+output_filename+" $curdir\n")
     close_job(w,args,personal_scratch)
 
 def write_train_scheduler(control_dir,args):
     """
-    Write scheduler script for training
+    Write scheduler script for training using model runner
 
     :param control_dir: Work directory
     :param args: the args
@@ -148,6 +152,7 @@ def write_train_scheduler(control_dir,args):
     model_version=functions.get_latest_model(args.name)+1
     jobname="train_"+args.name+"_ver"+str(model_version)
     data_filename=jobname+".csv"
+    model_dirname="model_"+args.name+"_ver"+str(model_version)
     w = open(control_dir+"/submit_"+jobname+".sh","wt")
     write_header(w,args,jobname)
     w.write(args.c.SCHEDULER_GPU+"\n")
@@ -155,13 +160,28 @@ def write_train_scheduler(control_dir,args):
     w.write("cd "+control_dir+"\n")
     w.write(args.c.PREPARE_ANACONDA + "\n")
     w.write(args.c.ACTIVATE_CHEMPROP + "\n")
-    w.write("chemprop train --devices 1 --num-workers 0 --task-type regression --target-columns docking_score --data-path "+data_filename+" --save-dir model_"+args.name+"_ver"+str(model_version)+" --batch-size 250 --no-cache --epochs 30\n")
+    w.write("python3 "+args.c.MODEL_RUNNER_TRAIN_EXE+" "+data_filename+" "+model_dirname)
+    w.write(" --batch-size "+str(args.c.TRAIN_BATCH_SIZE))
+    w.write(" --epochs "+str(args.c.TRAIN_EPOCHS))
+    w.write(" --num-workers "+str(args.c.TRAIN_NUM_WORKERS))
+    w.write(" --devices "+args.c.TRAIN_DEVICES)
+    w.write(" --mp-hidden-size "+str(args.c.TRAIN_MP_HIDDEN_SIZE))
+    w.write(" --mp-depth "+str(args.c.TRAIN_MP_DEPTH))
+    w.write(" --ffn-hidden-size "+str(args.c.TRAIN_FFN_HIDDEN_SIZE))
+    w.write(" --ffn-layers "+str(args.c.TRAIN_FFN_LAYERS))
+    w.write(" --dropout "+str(args.c.TRAIN_DROPOUT))
+    w.write(" --activation "+args.c.TRAIN_ACTIVATION)
+    w.write(" --batch-norm "+str(args.c.TRAIN_BATCH_NORM))
+    w.write(" --warmup-epochs "+str(args.c.TRAIN_WARMUP_EPOCHS))
+    w.write(" --init-lr "+str(args.c.TRAIN_INIT_LR))
+    w.write(" --max-lr "+str(args.c.TRAIN_MAX_LR))
+    w.write(" --final-lr "+str(args.c.TRAIN_FINAL_LR) + "\n")
     w.write("touch jobdone-train_"+args.name+"-CPU1\n")
     w.close()
 
 def write_control_scheduler(control_dir,args):
     """
-    Write scheduler script for prop control + prediction
+    Write scheduler script for prop control + prediction using model runner
 
     :param control_dir: Work directory
     :param args: the args
@@ -172,6 +192,8 @@ def write_control_scheduler(control_dir,args):
     jobname="ctrl_"+args.name+"_cycle"+str(simsearch_cycle)
     cpuname="control_"+args.name+"_cpu$"+args.c.SCHEDULER_ARRAY_ID
     modelname="model_"+str(args.name)+"_ver"+str(functions.get_latest_model(args.name))
+    propoutput_csv="propoutput_"+cpuname+".csv"
+    output_filename="predicted_"+propoutput_csv
     personal_scratch=args.scratch+"/"+os.getenv("USER")+"/"+cpuname
     w = open(control_dir+"/submit_"+jobname+".sh","wt")
     write_header(w,args,jobname)
@@ -187,8 +209,13 @@ def write_control_scheduler(control_dir,args):
     w.write(args.c.PREPARE_ANACONDA + "\n")
     w.write(args.c.ACTIVATE_CHEMPROP + "\n")
     w.write("python3 "+args.c.CONTROL_EXE+" "+cpuname+".smi.gz control.param\n")
-    w.write("python3 "+args.c.CHUNKPREDICT_EXE+" "+str(args.chemprop_chunk)+" propoutput_"+cpuname+".csv.gz "+modelname+"\n")
-    w.write("mv predicted_propoutput_"+cpuname+".csv $curdir\n")
+    w.write("gunzip -c propoutput_"+cpuname+".csv.gz > "+propoutput_csv+"\n")
+    w.write("python3 "+args.c.MODEL_RUNNER_PREDICT_EXE+" "+propoutput_csv+" "+modelname+" "+output_filename)
+    w.write(" --batch-size "+str(args.c.PRED_BATCH_SIZE))
+    w.write(" --num-workers "+str(args.c.PRED_NUM_WORKERS))
+    w.write(" --accelerator "+args.c.PRED_ACCELERATOR)
+    w.write(" --devices "+args.c.PRED_DEVICES + "\n")
+    w.write("mv "+output_filename+" $curdir\n")
     close_job(w,args,personal_scratch)
 
 def write_cluster_scheduler(cluster_dir,args):

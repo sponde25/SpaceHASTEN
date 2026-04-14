@@ -113,6 +113,25 @@ w.write("CPU_COUNT_DOCK = 1\n")
 w.write("CPU_COUNT_PREDICT = 1\n")
 w.write("CPU_COUNT_CONTROL = 1\n")
 w.write("CPU_COUNT_CLUSTERING = "+slurm_cpu_clustering+"\n")
+w.write("TRAIN_BATCH_SIZE = "+str(SpaceHASTENConfiguration.TRAIN_BATCH_SIZE)+"\n")
+w.write("TRAIN_EPOCHS = "+str(SpaceHASTENConfiguration.TRAIN_EPOCHS)+"\n")
+w.write("TRAIN_NUM_WORKERS = "+str(SpaceHASTENConfiguration.TRAIN_NUM_WORKERS)+"\n")
+w.write("TRAIN_DEVICES = "+SpaceHASTENConfiguration.TRAIN_DEVICES+"\n")
+w.write("TRAIN_MP_HIDDEN_SIZE = "+str(SpaceHASTENConfiguration.TRAIN_MP_HIDDEN_SIZE)+"\n")
+w.write("TRAIN_MP_DEPTH = "+str(SpaceHASTENConfiguration.TRAIN_MP_DEPTH)+"\n")
+w.write("TRAIN_FFN_HIDDEN_SIZE = "+str(SpaceHASTENConfiguration.TRAIN_FFN_HIDDEN_SIZE)+"\n")
+w.write("TRAIN_FFN_LAYERS = "+str(SpaceHASTENConfiguration.TRAIN_FFN_LAYERS)+"\n")
+w.write("TRAIN_DROPOUT = "+str(SpaceHASTENConfiguration.TRAIN_DROPOUT)+"\n")
+w.write("TRAIN_ACTIVATION = "+SpaceHASTENConfiguration.TRAIN_ACTIVATION+"\n")
+w.write("TRAIN_BATCH_NORM = "+str(SpaceHASTENConfiguration.TRAIN_BATCH_NORM)+"\n")
+w.write("TRAIN_WARMUP_EPOCHS = "+str(SpaceHASTENConfiguration.TRAIN_WARMUP_EPOCHS)+"\n")
+w.write("TRAIN_INIT_LR = "+str(SpaceHASTENConfiguration.TRAIN_INIT_LR)+"\n")
+w.write("TRAIN_MAX_LR = "+str(SpaceHASTENConfiguration.TRAIN_MAX_LR)+"\n")
+w.write("TRAIN_FINAL_LR = "+str(SpaceHASTENConfiguration.TRAIN_FINAL_LR)+"\n")
+w.write("PRED_BATCH_SIZE = "+str(SpaceHASTENConfiguration.PRED_BATCH_SIZE)+"\n")
+w.write("PRED_NUM_WORKERS = "+str(SpaceHASTENConfiguration.PRED_NUM_WORKERS)+"\n")
+w.write("PRED_ACCELERATOR = "+SpaceHASTENConfiguration.PRED_ACCELERATOR+"\n")
+w.write("PRED_DEVICES = "+SpaceHASTENConfiguration.PRED_DEVICES+"\n")
 if schrodinger_feature_flags != "":
     w.write("SCHRODINGER_FEATURE_FLAGS = "+ schrodinger_feature_flags + "\n")
 w.write("\n")
@@ -152,6 +171,7 @@ w.write("TPSA_MAX = 140.0\n")
 w.close()
 
 files_to_copy = ["verify","verify_spacehasten.py","cfg.py","control.py","chunkpredict.py",
+                 "model_runner_train.py","model_runner_predict.py",
                  "export_poses.py","grid-test_dock.zip","spacehasten_logo.png","test_dock.in","examples.smi","example.csv",
                  "control.py","docking_functions.py","export_functions.py","export_poses.py","functions.py","gui.py",
                  "importseeds_functions.py","prediction_functions.py","simsearch_functions.py","scheduler_functions.py","spacehasten",
@@ -166,4 +186,3 @@ print("SpaceHASTEN has been installed successfully.")
 print("Please verify that everything is OK by running '"+path+"/verify' before starting the actual virtual screening process.")
 print("The test should take around 15-30 minutes to run.")
 os.system("chmod +x "+path+"/verify "+path+"/spacehasten "+path+"/sec_clustering.sh")
-
