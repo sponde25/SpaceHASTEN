@@ -148,6 +148,7 @@ def write_dock_slurm(c):
     w.write(c.SCHEDULER_OUTPUT_ERR+"\n")
     w.write(c.SCHEDULER_PARTITION+"\n")
     w.write(c.SCHEDULER_CPU_PER_TASK+str(c.CPU_COUNT_DOCK)+"\n")
+    w.write("$SCHRODINGER/jsc local-server-start\n")
     w.write("export SCHRODINGER_FEATURE_FLAGS=\"\"\n")
     w.write("curdir=$(pwd)\n")
     w.write("rm -fr "+personal_scratch+"\n")
@@ -159,7 +160,7 @@ def write_dock_slurm(c):
     w.write("cd "+personal_scratch+"\n")
     if c.SCHRODINGER_FEATURE_FLAGS is not None:
         w.write("export SCHRODINGER_FEATURE_FLAGS=\""+args.c.SCHRODINGER_FEATURE_FLAGS+"\"\n")
-    w.write("$SCHRODINGER/pipeline -prog phase_db test.inp -OVERWRITE -WAIT -HOST localhost:1 -NJOBS 1\n")
+    w.write("$SCHRODINGER/pipeline -prog phase_db test.inp -OVERWRITE -WAIT -NOJOBID -NJOBS 1\n")
     w.write("$SCHRODINGER/phase_database $(pwd)/test.phdb export -omae $(pwd)/test -get 1 -limit 99999999 -WAIT\n")
     w.write("rm -fr $(pwd)/test.phdb\n")
     w.write("$SCHRODINGER/glide -new -OVERWRITE -WAIT -NJOBS 1 -HOST localhost:1 test.in\n")
