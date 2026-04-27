@@ -210,7 +210,7 @@ def write_control_scheduler(control_dir,args):
     w.write(args.c.PREPARE_ANACONDA + "\n")
     w.write(args.c.ACTIVATE_CHEMPROP + "\n")
     w.write("python3 "+args.c.CONTROL_EXE+" "+cpuname+".smi.gz control.param\n")
-    w.write("gunzip -c propoutput_"+cpuname+".csv.gz > "+propoutput_csv+"\n")
+    w.write("mv propoutput_"+cpuname+".csv.gz "+propoutput_csv+"\n")
     w.write("python3 "+args.c.MODEL_RUNNER_PREDICT_EXE+" "+propoutput_csv+" "+modelname+" "+output_filename)
     w.write(" --batch-size "+str(args.c.PRED_BATCH_SIZE))
     w.write(" --num-workers "+str(args.c.PRED_NUM_WORKERS))

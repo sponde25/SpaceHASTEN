@@ -56,9 +56,10 @@ def predict(data_path: str, model_path: str, output_path: str, batch_size: int,
         return 1
 
     df = pd.read_csv(data_path)
-    if "smiles" not in df.columns or "smilesid" not in df.columns:
-        logger.error("Input CSV must have 'smiles' and 'smilesid' columns")
+    if df.shape[1] < 2:
+        logger.error("Input CSV must have at least two columns (smiles, smilesid)")
         return 1
+    df.columns = ["smiles", "smilesid"] + list(df.columns[2:])
 
     smiles = df["smiles"].astype(str).tolist()
     smilesids = df["smilesid"].tolist()
