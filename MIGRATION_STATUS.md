@@ -37,7 +37,7 @@ The non-negotiables are:
 | # | Session | Status | Owner | Notes |
 |---|---|---|---|---|
 | 1 | Project scaffolding | done | | `pyproject.toml`, src layout, ruff/mypy/pytest |
-| 2 | Schema fixture & legacy `.dbsh` baseline | not-started | | `tests/fixtures/legacy_baseline.dbsh` |
+| 2 | Schema fixture & legacy `.dbsh` baseline | done | | `tests/fixtures/legacy_baseline.dbsh` |
 | 3 | `core/db.py` — typed DB layer | not-started | | locks acquisition SQL |
 | 4 | `core/molecules.py` & `config/` | not-started | | RDKit hashing, Pydantic Settings |
 | 5 | `scheduler/base.py` + `scheduler/local.py` | not-started | | enables fast integration tests |
