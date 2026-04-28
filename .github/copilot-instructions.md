@@ -2,10 +2,10 @@
 
 ## Environment
 
-Conda is at `/fastwrk/ajain/miniconda3`. Always activate it before running any Python or shell commands:
+Conda is at `/wrk/lurvas/miniconda3`. Always activate it before running any Python or shell commands:
 
 ```bash
-source /fastwrk/ajain/miniconda3/etc/profile.d/conda.sh
+source /wrk/lurvas/miniconda3/etc/profile.d/conda.sh
 conda activate spacehasten-quick
 ```
 
@@ -25,7 +25,7 @@ tmux attach -t work  # reattach
 Prefix all Python execution with the conda activation:
 
 ```bash
-source /fastwrk/ajain/miniconda3/etc/profile.d/conda.sh && conda activate spacehasten-quick && python3 ...
+source /wrk/lurvas/miniconda3/etc/profile.d/conda.sh && conda activate spacehasten-quick && python3 ...
 ```
 
 ## System Conda Environments (for SLURM jobs)
@@ -45,7 +45,7 @@ Available environments on compute nodes:
 ## SpaceHASTEN Installation
 
 ### Installation Path
-**Primary installation**: `/data/ajain/spacehasten-e2e-install/`
+**Primary installation**: `/data/lurvas/projects/coding/SpaceHASTEN`
 
 ### System Conda Environments (for SLURM jobs)
 For jobs running on compute nodes via SLURM, use the system-wide conda at `/data/programs/oce/`:
@@ -70,7 +70,7 @@ SLURM_PARTITION = jobs
 
 ### Installation Steps
 1. Run the installer: `python3 install_spacehasten.py`
-2. Specify installation path: `/data/ajain/spacehasten-e2e-install/`
+2. Specify installation path: `/data/lurvas/projects/coding/spacehasten_test/`
 3. Use system conda paths for BioSolveIT tools
 4. Set conda environments as shown above
 5. Install `pigz` system-wide: `sudo apt install pigz`
@@ -78,11 +78,11 @@ SLURM_PARTITION = jobs
 ### Verification
 Run end-to-end verification:
 ```bash
-/data/ajain/spacehasten-e2e-install/verify
+/data/lurvas/projects/coding/spacehasten_test/verify
 ```
 
 This tests: clustering, docking, chemprop training, SpaceLight, and FTrees.
 
 ## File System Restrictions
 
-**Do not modify any files outside `/data/ajain`, `/wrk`, or `/fastwrk`.** All other directories are read-only.
+**Do not modify any files outside `/data/lurvas`, `/wrk/lurvas`, or `/fastwrk/lurvas`.** All other directories are read-only.
