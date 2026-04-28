@@ -1,0 +1,113 @@
+# SpaceHASTEN Rewrite — Migration Status
+
+**Started:** 2026-04-28
+**Target package:** `spacehasten` (PEP 621, src layout)
+**Legacy tree:** workspace root (do not modify until Session 15 cutover)
+
+## Documents
+
+- [REWRITE_PLAN.md](REWRITE_PLAN.md) — strategy and architecture decisions
+- [docs/CODEBASE_REFERENCE.md](docs/CODEBASE_REFERENCE.md) — frozen
+  reference of the legacy code (per-file, schema, paths, scheduler jobs,
+  external tool commands)
+- [docs/SESSIONS.md](docs/SESSIONS.md) — per-session prompts
+
+## How sessions work
+
+1. Pick the next not-started session from the table below.
+2. Open a fresh Copilot chat **in this workspace**.
+3. Paste the matching session block from
+   [docs/SESSIONS.md](docs/SESSIONS.md) as your message.
+4. The agent in that session implements only that session's scope, runs
+   tests, and edits this file (the row below) to mark it complete.
+5. Commit. The next session starts the same way.
+
+**Hard rules** for every session — see top of [docs/SESSIONS.md](docs/SESSIONS.md).
+The non-negotiables are:
+
+- Do not touch the legacy tree until Session 15 (Session 16 is a separate
+  parallel-safe quick-wins pass).
+- Preserve the SQLite schema and acquisition SQL byte-for-byte until
+  fixture-locked tests exist.
+- Stdlib argparse only.
+- `pytest -q` must be green at the end of every session.
+
+## Session checklist
+
+| # | Session | Status | Owner | Notes |
+|---|---|---|---|---|
+| 1 | Project scaffolding | done | | `pyproject.toml`, src layout, ruff/mypy/pytest |
+| 2 | Schema fixture & legacy `.dbsh` baseline | not-started | | `tests/fixtures/legacy_baseline.dbsh` |
+| 3 | `core/db.py` — typed DB layer | not-started | | locks acquisition SQL |
+| 4 | `core/molecules.py` & `config/` | not-started | | RDKit hashing, Pydantic Settings |
+| 5 | `scheduler/base.py` + `scheduler/local.py` | not-started | | enables fast integration tests |
+| 6 | `scheduler/slurm.py` | not-started | | sbatch + sacct polling, Jinja template |
+| 7 | `workspace/` — layout, manifest, logging | not-started | | single-root WorkDir, Manifest, three-tier logs |
+| 8 | `stages/training.py` + `remote/train.py` | not-started | | introduces on-disk model registry |
+| 9 | `stages/prediction.py` + `remote/predict.py` | not-started | | |
+| 10 | `stages/clustering.py` (port `sec_clustering.sh`) | not-started | | |
+| 11 | `tools/glide.py` + `stages/docking.py` | not-started | | largest external integration |
+| 12 | `tools/spacelight.py` + `tools/ftrees.py` + `remote/prop_filter.py` + `stages/simsearch.py` | not-started | | two-phase array (search → control) |
+| 13 | `stages/seeds.py`, `stages/export.py`, `stages/archive.py` | not-started | | |
+| 14 | `cli/main.py` — argparse subcommands | not-started | | `spacehasten --help` works |
+| 15 | Port `verify_spacehasten.py`; cutover | not-started | | move legacy → `legacy/` |
+| 16 | Quick-win patches on legacy tree | not-started | | parallel-safe; SGE typo + `sbatch` calls |
+| 17 | Textual TUI | optional | | post-cutover |
+| 18 | FastAPI dashboard | optional | | post-cutover |
+
+Status values: `not-started` · `in-progress` · `blocked` · `done`.
+
+## Decisions log
+
+Append-only record of architectural decisions made during the rewrite.
+Each entry: date, session, decision, rationale.
+
+| Date | Session | Decision | Rationale |
+|---|---|---|---|
+| 2026-04-28 | 0 | Earlier `src/` scaffold deleted; restart fresh | Earlier attempt was incomplete and inconsistent with the plan. Easier to rebuild than reconcile. |
+| 2026-04-28 | 0 | Stdlib `argparse` (not Typer/Click) | Avoids dep; legacy already uses argparse; sufficient for our needs. |
+| 2026-04-28 | 0 | `sqlite3` stdlib (not SQLAlchemy/SQLModel) | Schema is small (6 tables) and stable; ORM is overkill. |
+| 2026-04-28 | 0 | On-disk model registry, BLOB legacy fallback | Legacy BLOB store makes `.dbsh` huge. Keep loader compatible with old `.dbsh` files via fallback path. |
+| 2026-04-28 | 0 | Single-root workspace under `/data/` | Plan §11.4. Eliminates `$HOME/SPACEHASTEN/` split. |
+| 2026-04-28 | 1 | Editable install shadowed by legacy `spacehasten.py` at repo root when CWD=root | Expected per SESSIONS rule 2; resolved at Session 15 cutover. Tests run via `pytest` rootdir, package imports cleanly from any other CWD. |
+
+## Open questions
+
+Park here anything that would block forward progress and needs the user
+to decide.
+
+- (none currently — populated as sessions discover questions)
+
+## Conventions
+
+- **Branch per session**: `rewrite/sNN-short-name`. Squash-merge to `main`
+  after tests pass.
+- **Commit message**: `[sNN] <verb> <what>`, e.g. `[s03] add core/db.py with locked acquisition SQL`.
+- **Test layout**: unit tests next to a peer module path
+  (`tests/unit/test_<module>.py`); integration tests in
+  `tests/integration/`.
+- **Fixtures live under `tests/fixtures/`**; `legacy_baseline.dbsh` and
+  `legacy_schema.sql` are immutable references.
+- **Legacy code is read-only** until Session 15 except for the patches in
+  Session 16.
+
+## Environment quick reference
+
+(See `.github/copilot-instructions.md` for full details.)
+
+```bash
+# Orchestrator dev environment (this workspace)
+source /wrk/lurvas/miniconda3/etc/profile.d/conda.sh
+conda activate spacehasten-quick
+
+# Compute-node environments (used inside SLURM scripts)
+source /data/programs/oce/actoce
+conda activate chemprop-2.1.2     # for train/predict/control
+conda activate fpsim2-0.7.3       # for clustering
+
+# tmux required for any non-trivial command
+tmux new -s rewrite
+```
+
+Workspace root: `/data/lurvas/projects/coding/SpaceHASTEN`. Writable
+roots only: `/data/lurvas`, `/wrk/lurvas`, `/fastwrk/lurvas`.

@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "spacehasten"
+version = "0.11.0.dev0"
+description = "SpaceHASTEN: virtual screening orchestrator (rewrite)"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.11"
+authors = [{ name = "SpaceHASTEN contributors" }]
+dependencies = [
+    "pandas>=2.0",
+    "rdkit>=2023.9",
+    "pydantic>=2",
+    "pydantic-settings>=2",
+    "tomli>=2.0;python_version<'3.11'",
+    "tomli-w>=1.0",
+    "tqdm>=4.65",
+    "rich>=13.0",
+    "jinja2>=3.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-cov>=4",
+    "ruff>=0.5",
+    "mypy>=1.10",
+    "types-pyyaml",
+]
+tui = ["textual>=0.60"]
+web = ["fastapi>=0.110", "uvicorn>=0.29"]
+
+[project.scripts]
+spacehasten = "spacehasten.cli.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+spacehasten = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+
+[tool.mypy]
+strict = true
+files = [
+    "src/spacehasten/core",
+    "src/spacehasten/stages",
+    "src/spacehasten/scheduler",
+    "src/spacehasten/workspace",
+]
+python_version = "3.11"
