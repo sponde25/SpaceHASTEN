@@ -39,7 +39,7 @@ The non-negotiables are:
 | 1 | Project scaffolding | done | | `pyproject.toml`, src layout, ruff/mypy/pytest |
 | 2 | Schema fixture & legacy `.dbsh` baseline | done | | `tests/fixtures/legacy_baseline.dbsh` |
 | 3 | `core/db.py` — typed DB layer | done | | locks acquisition SQL; 24 tests; mypy clean |
-| 4 | `core/molecules.py` & `config/` | not-started | | RDKit hashing, Pydantic Settings |
+| 4 | `core/molecules.py` & `config/` | done | | RDKit hashing + Pydantic-Settings (INI/TOML/CLI merge); opt-in `validate_install`; 22 tests; mypy clean |
 | 5 | `scheduler/base.py` + `scheduler/local.py` | not-started | | enables fast integration tests |
 | 6 | `scheduler/slurm.py` | not-started | | sbatch + sacct polling, Jinja template |
 | 7 | `workspace/` — layout, manifest, logging | not-started | | single-root WorkDir, Manifest, three-tier logs |
