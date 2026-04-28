@@ -40,7 +40,7 @@ spacehasten = "spacehasten.cli.main:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-spacehasten = ["py.typed"]
+spacehasten = ["py.typed", "scheduler/_template.sh.j2"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

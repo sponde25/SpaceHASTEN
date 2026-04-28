@@ -1,0 +1,31 @@
+#!/bin/bash
+#SBATCH -J {{ name }}
+#SBATCH -o {{ log_out }}
+#SBATCH -e {{ log_err }}
+{%- if partition %}
+#SBATCH -p {{ partition }}
+{%- endif %}
+#SBATCH --cpus-per-task={{ cpus_per_task }}
+#SBATCH --array=1-{{ array_size }}{% if max_concurrent < array_size %}%{{ max_concurrent }}{% endif %}
+{%- if gpu_parameter %}
+#SBATCH {{ gpu_parameter }}
+{%- endif %}
+{%- if exclusive %}
+#SBATCH --exclusive
+{%- endif %}
+{%- if depends_on %}
+#SBATCH --dependency=afterok:{{ depends_on | join(":") }}
+{%- endif %}
+
+set -u
+export TASK_ID="${SLURM_ARRAY_TASK_ID}"
+{%- for line in env_setup %}
+{{ line }}
+{%- endfor %}
+
+{{ command_body }}
+
+# Backward-compat completion sentinel (legacy poller used jobdone-* files).
+# The real signal is sacct; this is kept while stages migrate.
+cd "{{ workdir }}"
+touch "jobdone-{{ name }}-CPU${SLURM_ARRAY_TASK_ID}"

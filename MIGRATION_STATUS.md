@@ -41,7 +41,7 @@ The non-negotiables are:
 | 3 | `core/db.py` — typed DB layer | done | | locks acquisition SQL; 24 tests; mypy clean |
 | 4 | `core/molecules.py` & `config/` | done | | RDKit hashing + Pydantic-Settings (INI/TOML/CLI merge); opt-in `validate_install`; 22 tests; mypy clean |
 | 5 | `scheduler/base.py` + `scheduler/local.py` | done | | `ArrayJob`/`ArrayHandle`/`ArrayStatus`/`ArrayResult` + `Scheduler` ABC with backoff `wait()`; `LocalScheduler` with worker pool, per-task logs, cancel; 7 tests; ruff/mypy clean |
-| 6 | `scheduler/slurm.py` | not-started | | sbatch + sacct polling, Jinja template |
+| 6 | `scheduler/slurm.py` | done | | `SlurmScheduler` (sbatch `--parsable` + sacct polling + afterok deps), shared Jinja template, `make_scheduler` factory; snapshot fixtures locked; 14 tests; ruff/mypy clean |
 | 7 | `workspace/` — layout, manifest, logging | not-started | | single-root WorkDir, Manifest, three-tier logs |
 | 8 | `stages/training.py` + `remote/train.py` | not-started | | introduces on-disk model registry |
 | 9 | `stages/prediction.py` + `remote/predict.py` | not-started | | |

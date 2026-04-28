@@ -9,7 +9,9 @@ from .base import (
     Scheduler,
     TaskState,
 )
+from .factory import SchedulerKind, make_scheduler
 from .local import LocalScheduler
+from .slurm import SlurmScheduler
 
 __all__ = [
     "ArrayHandle",
@@ -19,5 +21,8 @@ __all__ = [
     "LocalScheduler",
     "ProgressCallback",
     "Scheduler",
+    "SchedulerKind",
+    "SlurmScheduler",
     "TaskState",
+    "make_scheduler",
 ]
