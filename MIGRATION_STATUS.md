@@ -38,7 +38,7 @@ The non-negotiables are:
 |---|---|---|---|---|
 | 1 | Project scaffolding | done | | `pyproject.toml`, src layout, ruff/mypy/pytest |
 | 2 | Schema fixture & legacy `.dbsh` baseline | done | | `tests/fixtures/legacy_baseline.dbsh` |
-| 3 | `core/db.py` — typed DB layer | not-started | | locks acquisition SQL |
+| 3 | `core/db.py` — typed DB layer | done | | locks acquisition SQL; 24 tests; mypy clean |
 | 4 | `core/molecules.py` & `config/` | not-started | | RDKit hashing, Pydantic Settings |
 | 5 | `scheduler/base.py` + `scheduler/local.py` | not-started | | enables fast integration tests |
 | 6 | `scheduler/slurm.py` | not-started | | sbatch + sacct polling, Jinja template |
@@ -70,6 +70,9 @@ Each entry: date, session, decision, rationale.
 | 2026-04-28 | 0 | On-disk model registry, BLOB legacy fallback | Legacy BLOB store makes `.dbsh` huge. Keep loader compatible with old `.dbsh` files via fallback path. |
 | 2026-04-28 | 0 | Single-root workspace under `/data/` | Plan §11.4. Eliminates `$HOME/SPACEHASTEN/` split. |
 | 2026-04-28 | 1 | Editable install shadowed by legacy `spacehasten.py` at repo root when CWD=root | Expected per SESSIONS rule 2; resolved at Session 15 cutover. Tests run via `pytest` rootdir, package imports cleanly from any other CWD. |
+| 2026-04-28 | 3 | Hardcode `SCHEMA_STATEMENTS` in `core/db.py` (with test asserting parity to `tests/fixtures/legacy_schema.sql`) | Avoids runtime dependency on the test-fixture file while preserving the fixture as the immutable source of truth. |
+| 2026-04-28 | 3 | `PropertyRanges` defined in `core/db.py` as a frozen dataclass with `tuple[str,str]` limits | Matches legacy TEXT storage byte-for-byte; Session 4 will introduce a typed pydantic equivalent that converts to/from this representation. |
+| 2026-04-28 | 3 | Acquisition SQL stored as `_SQL_*` class constants and locked by `tests/unit/test_db_sql_locked.py` | Spec requires byte-identical preservation of §A.6; class-constant + assert is the simplest regression lock. |
 
 ## Open questions
 
