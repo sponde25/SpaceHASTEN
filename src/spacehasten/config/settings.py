@@ -66,6 +66,11 @@ class GeneralSettings(_Section):
     pred_num_workers: int = 0
     pred_accelerator: str = "cpu"
     pred_devices: str = "1"
+    sim_spacelight_default: float = 0.5
+    sim_ftrees_default: float = 0.9
+    nnn_default: int = 10000
+    field_similarity_spacelight: str = "fingerprint-similarity"
+    field_similarity_ftrees: str = "pharmacophore-similarity"
 
 
 class PathsSettings(_Section):
