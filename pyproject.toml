@@ -35,6 +35,7 @@ web = ["fastapi>=0.110", "uvicorn>=0.29"]
 
 [project.scripts]
 spacehasten = "spacehasten.cli.main:main"
+spacehasten-legacy-gui = "spacehasten._legacy_runner:gui_main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

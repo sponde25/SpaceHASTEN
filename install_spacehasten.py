@@ -1,188 +1,276 @@
-# SpaceHASTEN: installer
-#
-# Copyright (c) 2024-2026 Orion Corporation
-# 
-# Redistribution and use in source and binary forms, with or without 
-# modification, are permitted provided that the following conditions are met:
-# 
-# 1. Redistributions of source code must retain the above copyright notice, 
-# this list of conditions and the following disclaimer.
-# 2. Redistributions in binary form must reproduce the above copyright notice, 
-# this list of conditions and the following disclaimer in the documentation 
-# and/or other materials provided with the distribution.
-# 3. Neither the name of the copyright holder nor the names of its contributors
-# may be used to endorse or promote products derived from this software 
-# without specific prior written permission.
-# 
-# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" 
-# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE 
-# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE 
-# ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE 
-# LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR 
-# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF 
-# SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS 
-# INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN 
-# CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) 
-# ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE 
-# POSSIBILITY OF SUCH DAMAGE.
-#
+"""SpaceHASTEN installer (new package, Session 15 cutover).
+
+The legacy installer copied loose ``.py`` files into a target directory.
+The new installer instead installs the ``spacehasten`` Python package
+(via ``pip install``) and writes a site-specific ``spacehasten.ini``
+into the target directory along with the verify fixtures.
+
+Usage (interactive)::
+
+    python3 install_spacehasten.py
+
+The installer never edits anything outside the chosen install
+directory and the active Python environment.
+"""
+
+from __future__ import annotations
+
 import os
 import shutil
-from cfg import SpaceHASTENConfiguration
+import subprocess
+import sys
+from pathlib import Path
 
-def ask_for_file(default_exe,desc=None):
+# Default values mirror the legacy installer; we no longer import
+# legacy ``cfg.py`` so we duplicate the literals here.
+SPACEHASTEN_VERSION = "0.11.0.dev0"
+
+REPO_ROOT = Path(__file__).resolve().parent
+VERIFY_FIXTURES = (
+    "examples.smi",
+    "example.smi",
+    "example.csv",
+    "test_dock.in",
+    "grid-test_dock.zip",
+)
+
+DEFAULTS = {
+    "spacelight": "/data/programs/BiosolveIT/spacelight-2.0.0-Linux-x64/spacelight",
+    "ftrees": "/data/programs/BiosolveIT/ftrees-7.0.0-Linux-x64/ftrees",
+    "spaces_dir": "/data/programs/BiosolveIT/spaces_new",
+    "default_space": "/data/programs/BiosolveIT/spaces_new/REALSpace_83bn_2025-09.space",
+    "default_seeds": (
+        "/data/programs/BiosolveIT/spaces_seeds/"
+        "Enamine_Diverse_REAL_drug-like_48.2M_cxsmiles.cxsmiles.bz2"
+    ),
+    "seeds_dir": "/data/programs/BiosolveIT/spaces_seeds",
+    "scratch": "/wrk",
+    "prepare_anaconda": "source /data/programs/oce/actoce",
+    "activate_chemprop": "conda activate chemprop-2.1.2",
+    "activate_clustering": "conda activate fpsim2-0.7.3",
+    "slurm_queue": "jobs",
+    "slurm_gpu_parameter": "--gpus=1",
+    "slurm_cpu_clustering": "64",
+    "gpu_exclusive": "1",
+    "schrodinger_feature_flags": "",
+}
+
+
+def _ask_for_file(default: str, desc: str | None = None) -> str:
     if desc is None:
-        desc = default_exe.split("/")[-1]
-    asked_exe = input("Please enter the path to "+desc+" executable [default:"+default_exe+"]: ")
-    if asked_exe == "":
-        asked_exe = default_exe
-    if not os.path.exists(asked_exe):
-        print("The specified path does not exist.")
-        exit()
-    return asked_exe
+        desc = default.split("/")[-1]
+    answer = input(
+        f"Please enter the path to {desc} executable [default:{default}]: "
+    ).strip()
+    if not answer:
+        answer = default
+    if not Path(answer).exists():
+        print(f"The specified path does not exist: {answer}")
+        sys.exit(1)
+    return answer
 
-def ask_for_dir(default_dir,desc,exist=True):
-    asked_dir = input("Please enter the path to "+desc+" directory [default:"+default_dir+"]: ")
-    if asked_dir == "":
-        asked_dir = default_dir
-    if exist and not os.path.isdir(asked_dir):
-        print("The specified path is not a directory.")
-        exit()
-    return asked_dir
 
-print()
-print(r""" ___                      _ _  ___  ___  ___  ___  _ _ """)
-print(r"""/ __> ___  ___  ___  ___ | | || . |/ __>|_ _|| __>| \ |""")
-print(r"""\__ \| . \<_> |/ | '/ ._>|   ||   |\__ \ | | | _> |   |""")
-print(r"""<___/|  _/<___|\_|_.\___.|_|_||_|_|<___/ |_| |___>|_\_|""")
-print(r"""     |_|                                               """)
-print()
-print("SpaceHASTEN installer " + str(SpaceHASTENConfiguration.SPACEHASTEN_VERSION)+"\n")
-print("This script will install SpaceHASTEN on your system.")
+def _ask_for_dir(default: str, desc: str, exist: bool = True) -> str:
+    answer = input(
+        f"Please enter the path to {desc} directory [default:{default}]: "
+    ).strip()
+    if not answer:
+        answer = default
+    if exist and not Path(answer).is_dir():
+        print(f"The specified path is not a directory: {answer}")
+        sys.exit(1)
+    return answer
 
-print("NOTE: THIS MUST BE A NFS DIRECTORY VISIBLE TO ALL COMPUTING NODES.")
-print("ADDITIONAL NOTE: slurm is used by default, SGE users need to manually reconfigure spacehasten.ini\n")
-path = ask_for_dir("/data/programs/spacehasten-"+str(SpaceHASTENConfiguration.SPACEHASTEN_VERSION),"Installation",exist=False)
-if os.path.exists(path):
-    print("The specified path already exists.")
-    print("Installation aborted.")
-    exit()
-os.makedirs(path)
-spacelight_exe = ask_for_file("/data/programs/BiosolveIT/spacelight-2.0.0-Linux-x64/spacelight")
-ftrees_exe = ask_for_file("/data/programs/BiosolveIT/ftrees-7.0.0-Linux-x64/ftrees")
-spaces_dir = ask_for_dir("/data/programs/BiosolveIT/spaces_new","BiosolveIT spaces")
-default_space = ask_for_file("/data/programs/BiosolveIT/spaces_new/REALSpace_83bn_2025-09.space","default space")
-default_seeds = ask_for_file("/data/programs/BiosolveIT/spaces_seeds/Enamine_Diverse_REAL_drug-like_48.2M_cxsmiles.cxsmiles.bz2","default enumerated seeds")
-seeds_dir = ask_for_dir("/data/programs/BiosolveIT/spaces_seeds","Directory for enumerated seeds")
 
-scratch_dir = ask_for_dir("/wrk","scratch (local fast disk)")
-prepare_anaconda = input("Please enter the anaconda3 activation command [default:source /data/programs/oce/actoce]: ")
-if prepare_anaconda == "":
-    prepare_anaconda = "source /data/programs/oce/actoce"
-activate_chemprop = input("Please enter the anaconda3 chemprop activation command [default:conda activate chemprop-2.1.2]: ")
-if activate_chemprop == "":
-    activate_chemprop = "conda activate chemprop-2.1.2"
-activate_clustering = input("Please enter the anaconda3 clustering activation command [default:conda activate fpsim2-0.7.3]:")
-if activate_clustering == "":
-    activate_clustering = "conda activate fpsim2-0.7.3"
-clustering_exe = input("Please enter clustering script command or press ENTER to use the built-in code:")
-gpu_exclusive = input("Please type 1 here if you want node exlusivity for training and clustering, type 0 otherwise [default:1]: ")
-if gpu_exclusive == "":
-    gpu_exclusive = "1"
-slurm_queue = input("Please enter the SLURM partition name [default:jobs]: ")
-if slurm_queue == "":
-    slurm_queue = "jobs"
-slurm_gpu_parameter = input("Please enter the SLURM GPU parameter [default:--gpus=1]: ")
-if slurm_gpu_parameter == "":
-    slurm_gpu_parameter = "--gpus=1"
-slurm_cpu_clustering = input("Please enter the number of cores for clustering [default:64]: ")
-if slurm_cpu_clustering == "":
-    slurm_cpu_clustering = "64"
-schrodinger_feature_flags = input("Please enter SCHRODINGER_FEATURE_FLAGS such as -JOB_SERVER if required or press ENTER to skip (recommended):")
+def _ask(prompt: str, default: str = "") -> str:
+    suffix = f" [default:{default}]" if default else ""
+    answer = input(f"{prompt}{suffix}: ").strip()
+    return answer or default
 
-print("Copying files...")
-w = open(path+"/spacehasten.ini","wt")
-w.write("[General]\n")
-w.write("SCHEDULER = slurm\n")
-w.write("PREPARE_ANACONDA = "+prepare_anaconda+"\n")
-w.write("ACTIVATE_CHEMPROP = "+activate_chemprop+"\n")
-w.write("ACTIVATE_CLUSTERING = "+activate_clustering+"\n")
-w.write("GPU_EXCLUSIVE = "+gpu_exclusive+"\n")
-w.write("CPU_COUNT_SEARCH = 2\n")
-w.write("CPU_COUNT_DOCK = 1\n")
-w.write("CPU_COUNT_PREDICT = 1\n")
-w.write("CPU_COUNT_CONTROL = 1\n")
-w.write("CPU_COUNT_CLUSTERING = "+slurm_cpu_clustering+"\n")
-w.write("TRAIN_BATCH_SIZE = "+str(SpaceHASTENConfiguration.TRAIN_BATCH_SIZE)+"\n")
-w.write("TRAIN_EPOCHS = "+str(SpaceHASTENConfiguration.TRAIN_EPOCHS)+"\n")
-w.write("TRAIN_NUM_WORKERS = "+str(SpaceHASTENConfiguration.TRAIN_NUM_WORKERS)+"\n")
-w.write("TRAIN_DEVICES = "+SpaceHASTENConfiguration.TRAIN_DEVICES+"\n")
-w.write("TRAIN_MP_HIDDEN_SIZE = "+str(SpaceHASTENConfiguration.TRAIN_MP_HIDDEN_SIZE)+"\n")
-w.write("TRAIN_MP_DEPTH = "+str(SpaceHASTENConfiguration.TRAIN_MP_DEPTH)+"\n")
-w.write("TRAIN_FFN_HIDDEN_SIZE = "+str(SpaceHASTENConfiguration.TRAIN_FFN_HIDDEN_SIZE)+"\n")
-w.write("TRAIN_FFN_LAYERS = "+str(SpaceHASTENConfiguration.TRAIN_FFN_LAYERS)+"\n")
-w.write("TRAIN_DROPOUT = "+str(SpaceHASTENConfiguration.TRAIN_DROPOUT)+"\n")
-w.write("TRAIN_ACTIVATION = "+SpaceHASTENConfiguration.TRAIN_ACTIVATION+"\n")
-w.write("TRAIN_BATCH_NORM = "+str(SpaceHASTENConfiguration.TRAIN_BATCH_NORM)+"\n")
-w.write("TRAIN_WARMUP_EPOCHS = "+str(SpaceHASTENConfiguration.TRAIN_WARMUP_EPOCHS)+"\n")
-w.write("TRAIN_INIT_LR = "+str(SpaceHASTENConfiguration.TRAIN_INIT_LR)+"\n")
-w.write("TRAIN_MAX_LR = "+str(SpaceHASTENConfiguration.TRAIN_MAX_LR)+"\n")
-w.write("TRAIN_FINAL_LR = "+str(SpaceHASTENConfiguration.TRAIN_FINAL_LR)+"\n")
-w.write("PRED_BATCH_SIZE = "+str(SpaceHASTENConfiguration.PRED_BATCH_SIZE)+"\n")
-w.write("PRED_NUM_WORKERS = "+str(SpaceHASTENConfiguration.PRED_NUM_WORKERS)+"\n")
-w.write("PRED_ACCELERATOR = "+SpaceHASTENConfiguration.PRED_ACCELERATOR+"\n")
-w.write("PRED_DEVICES = "+SpaceHASTENConfiguration.PRED_DEVICES+"\n")
-if schrodinger_feature_flags != "":
-    w.write("SCHRODINGER_FEATURE_FLAGS = "+ schrodinger_feature_flags + "\n")
-w.write("\n")
-w.write("[Paths]\n")
-w.write("EXE_SPACELIGHT_DEFAULT = "+spacelight_exe+"\n")
-w.write("EXE_FTREES_DEFAULT = "+ftrees_exe+"\n")
-w.write("SPACES_DIR_DEFAULT = "+spaces_dir+"\n")
-w.write("SPACES_FILE_DEFAULT = "+default_space+"\n")
-w.write("SCRATCH_DEFAULT = "+scratch_dir+"\n")
-w.write("SEEDS_DIR_DEFAULT = "+seeds_dir+"\n")
-w.write("SEEDS_FILE_DEFAULT = "+default_seeds+"\n")
-if clustering_exe != "":
-    w.write("EXE_CLUSTERING_DEFAULT = "+clustering_exe+"\n")
-w.write("\n")
-w.write("[Slurm]\n")
-w.write("SLURM_PARTITION = "+slurm_queue+"\n")
-w.write("SLURM_GPU_PARAMETER = "+slurm_gpu_parameter+"\n")
-w.write("\n")
-w.write("[SGE]\n")
-w.write("SGE_QUEUE = jobs\n")
-w.write("SGE_PE = smp\n")
-w.write("SGE_GPU_PARAMETER = -l gpu=1\n")
-w.write("\n")
-w.write("[Properties]\n")
-w.write("MW_MIN = 0.0\n")
-w.write("MW_MAX = 500.0\n")
-w.write("SLOGP_MIN = -10.0\n")
-w.write("SLOGP_MAX = 5.0\n")
-w.write("HBA_MIN = 0\n")
-w.write("HBA_MAX = 10\n")
-w.write("HBD_MIN = 0\n")
-w.write("HBD_MAX = 5\n")
-w.write("ROTBONDS_MIN = 0\n")
-w.write("ROTBONDS_MAX = 10\n")
-w.write("TPSA_MIN = 0.0\n")
-w.write("TPSA_MAX = 140.0\n")
-w.close()
 
-files_to_copy = ["verify","verify_spacehasten.py","cfg.py","control.py","chunkpredict.py",
-                 "model_runner_train.py","model_runner_predict.py",
-                 "export_poses.py","grid-test_dock.zip","spacehasten_logo.png","test_dock.in","examples.smi","example.csv",
-                 "control.py","docking_functions.py","export_functions.py","export_poses.py","functions.py","gui.py",
-                 "importseeds_functions.py","prediction_functions.py","simsearch_functions.py","scheduler_functions.py","spacehasten",
-                 "spacehasten.py","training_functions.py","example.smi","archive_functions.py","cluster_functions.py","sec_clustering.sh","cmdline.py"]
-for file_to_copy in files_to_copy:
-    if not os.path.exists(file_to_copy):
-        print("Error: file '"+file_to_copy+"' not found.")
-        exit()
-    shutil.copy(file_to_copy,path)
+def _print_banner() -> None:
+    print()
+    print(r" ___                  _  _   _   ___ _____ ___ _  _")
+    print(r"/ __|_ __  __ _ __ ___| || | /_\ / __|_   _| __| \| |")
+    print(r"\__ \ '_ \/ _` / _/ -_) __ |/ _ \\__ \ | |  | _|| .` |")
+    print(r"|___/ .__/\__,_\__\___|_||_/_/ \_\___/ |_| |___|_|\_|")
+    print(r"    |_|")
+    print()
+    print(f"SpaceHASTEN installer {SPACEHASTEN_VERSION}\n")
 
-print("SpaceHASTEN has been installed successfully.")
-print("Please verify that everything is OK by running '"+path+"/verify' before starting the actual virtual screening process.")
-print("The test should take around 15-30 minutes to run.")
-os.system("chmod +x "+path+"/verify "+path+"/spacehasten "+path+"/sec_clustering.sh")
+
+def _write_ini(path: Path, *, answers: dict[str, str]) -> None:
+    a = answers
+    lines: list[str] = []
+    lines.append("[General]")
+    lines.append("SCHEDULER = slurm")
+    lines.append(f"PREPARE_ANACONDA = {a['prepare_anaconda']}")
+    lines.append(f"ACTIVATE_CHEMPROP = {a['activate_chemprop']}")
+    lines.append(f"ACTIVATE_CLUSTERING = {a['activate_clustering']}")
+    lines.append(f"GPU_EXCLUSIVE = {a['gpu_exclusive']}")
+    lines.append("CPU_COUNT_SEARCH = 2")
+    lines.append("CPU_COUNT_DOCK = 1")
+    lines.append("CPU_COUNT_PREDICT = 1")
+    lines.append("CPU_COUNT_CONTROL = 1")
+    lines.append(f"CPU_COUNT_CLUSTERING = {a['slurm_cpu_clustering']}")
+    if a["schrodinger_feature_flags"]:
+        lines.append(
+            f"SCHRODINGER_FEATURE_FLAGS = {a['schrodinger_feature_flags']}"
+        )
+    lines.append("")
+    lines.append("[Paths]")
+    lines.append(f"EXE_SPACELIGHT_DEFAULT = {a['spacelight']}")
+    lines.append(f"EXE_FTREES_DEFAULT = {a['ftrees']}")
+    lines.append(f"SPACES_DIR_DEFAULT = {a['spaces_dir']}")
+    lines.append(f"SPACES_FILE_DEFAULT = {a['default_space']}")
+    lines.append(f"SCRATCH_DEFAULT = {a['scratch']}")
+    lines.append(f"SEEDS_DIR_DEFAULT = {a['seeds_dir']}")
+    lines.append(f"SEEDS_FILE_DEFAULT = {a['default_seeds']}")
+    # Point export_poses_script at the legacy file shipped with the repo.
+    legacy_export = REPO_ROOT / "legacy" / "export_poses.py"
+    if legacy_export.exists():
+        lines.append(f"EXPORT_POSES_SCRIPT = {legacy_export}")
+    lines.append("")
+    lines.append("[Slurm]")
+    lines.append(f"SLURM_PARTITION = {a['slurm_queue']}")
+    lines.append(f"SLURM_GPU_PARAMETER = {a['slurm_gpu_parameter']}")
+    lines.append("")
+    lines.append("[SGE]")
+    lines.append("SGE_QUEUE = jobs")
+    lines.append("SGE_PE = smp")
+    lines.append("SGE_GPU_PARAMETER = -l gpu=1")
+    lines.append("")
+    lines.append("[Properties]")
+    lines.append("MW_MIN = 0.0")
+    lines.append("MW_MAX = 500.0")
+    lines.append("SLOGP_MIN = -10.0")
+    lines.append("SLOGP_MAX = 5.0")
+    lines.append("HBA_MIN = 0")
+    lines.append("HBA_MAX = 10")
+    lines.append("HBD_MIN = 0")
+    lines.append("HBD_MAX = 5")
+    lines.append("ROTBONDS_MIN = 0")
+    lines.append("ROTBONDS_MAX = 10")
+    lines.append("TPSA_MIN = 0.0")
+    lines.append("TPSA_MAX = 140.0")
+    lines.append("")
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def _pip_install_package() -> None:
+    print("\nInstalling the spacehasten package into the active Python "
+          "environment...")
+    cmd = [sys.executable, "-m", "pip", "install", str(REPO_ROOT)]
+    print("  $", " ".join(cmd))
+    rc = subprocess.run(cmd).returncode
+    if rc != 0:
+        print(f"pip install failed (rc={rc}). Aborting installation.")
+        sys.exit(1)
+
+
+def main() -> None:
+    _print_banner()
+    print("This installer writes a site config (`spacehasten.ini`) to a "
+          "directory of your choice, copies the verify fixtures, and "
+          "installs the `spacehasten` Python package into the active "
+          "Python environment via `pip install`.\n")
+    print("NOTE: the install directory must be visible to all compute "
+          "nodes (NFS).")
+    print("NOTE: SLURM is the default scheduler.\n")
+
+    install_dir = _ask_for_dir(
+        f"/data/programs/spacehasten-{SPACEHASTEN_VERSION}",
+        "Installation",
+        exist=False,
+    )
+    install_path = Path(install_dir)
+    if install_path.exists():
+        print(f"The specified path already exists: {install_path}")
+        print("Installation aborted.")
+        sys.exit(1)
+    install_path.mkdir(parents=True)
+
+    answers: dict[str, str] = {}
+    answers["spacelight"] = _ask_for_file(DEFAULTS["spacelight"])
+    answers["ftrees"] = _ask_for_file(DEFAULTS["ftrees"])
+    answers["spaces_dir"] = _ask_for_dir(DEFAULTS["spaces_dir"], "BiosolveIT spaces")
+    answers["default_space"] = _ask_for_file(DEFAULTS["default_space"], "default space")
+    answers["default_seeds"] = _ask_for_file(
+        DEFAULTS["default_seeds"], "default enumerated seeds"
+    )
+    answers["seeds_dir"] = _ask_for_dir(
+        DEFAULTS["seeds_dir"], "Directory for enumerated seeds"
+    )
+    answers["scratch"] = _ask_for_dir(
+        DEFAULTS["scratch"], "scratch (local fast disk)"
+    )
+    answers["prepare_anaconda"] = _ask(
+        "Anaconda3 activation command", DEFAULTS["prepare_anaconda"]
+    )
+    answers["activate_chemprop"] = _ask(
+        "Anaconda3 chemprop activation command", DEFAULTS["activate_chemprop"]
+    )
+    answers["activate_clustering"] = _ask(
+        "Anaconda3 clustering activation command",
+        DEFAULTS["activate_clustering"],
+    )
+    answers["gpu_exclusive"] = _ask(
+        "Type 1 if you want node exclusivity for training/clustering, "
+        "0 otherwise",
+        DEFAULTS["gpu_exclusive"],
+    )
+    answers["slurm_queue"] = _ask("SLURM partition name", DEFAULTS["slurm_queue"])
+    answers["slurm_gpu_parameter"] = _ask(
+        "SLURM GPU parameter", DEFAULTS["slurm_gpu_parameter"]
+    )
+    answers["slurm_cpu_clustering"] = _ask(
+        "Number of cores for clustering", DEFAULTS["slurm_cpu_clustering"]
+    )
+    answers["schrodinger_feature_flags"] = _ask(
+        "SCHRODINGER_FEATURE_FLAGS such as -JOB_SERVER (ENTER to skip)",
+        DEFAULTS["schrodinger_feature_flags"],
+    )
+
+    print("\nWriting site configuration...")
+    ini_path = install_path / "spacehasten.ini"
+    _write_ini(ini_path, answers=answers)
+
+    print(f"  -> {ini_path}")
+    for fixture in VERIFY_FIXTURES:
+        src = REPO_ROOT / fixture
+        if not src.exists():
+            print(f"  WARNING: missing verify fixture {src}; verify --fixtures-dir "
+                  "will need an explicit path.")
+            continue
+        dst = install_path / fixture
+        shutil.copy(src, dst)
+        print(f"  -> {dst}")
+
+    _pip_install_package()
+
+    print()
+    print("=" * 60)
+    print("SpaceHASTEN installed successfully.")
+    print("=" * 60)
+    print(f"Site config:    {ini_path}")
+    print(f"Install dir:    {install_path}")
+    print()
+    print("Next steps:")
+    print(f"  1. Verify the install on the cluster:")
+    print(f"       spacehasten verify \\")
+    print(f"           --config {ini_path} \\")
+    print(f"           --fixtures-dir {install_path}")
+    print(f"  2. Start a screening run, e.g.:")
+    print(f"       spacehasten --config {ini_path} \\")
+    print(f"           --db /data/$USER/SPACEHASTEN/myrun/myrun.dbsh \\")
+    print(f"           import-seeds --smi seeds.smi \\")
+    print(f"               --dock-params {install_path}/test_dock.in \\")
+    print(f"               --dock-grid   {install_path}/grid-test_dock.zip")
+    print()
+    print(f"The legacy Tk GUI is available for one release as the "
+          "`spacehasten-legacy-gui` console script.")
+    print("This test should take around 15-30 minutes to run.")
+
+
+if __name__ == "__main__":
+    main()

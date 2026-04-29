@@ -214,7 +214,10 @@ def _add_resume(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> Non
 
 
 def _add_verify(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    from .verify import add_verify_arguments
+
     p = sub.add_parser("verify", help="End-to-end smoke test (Session 15).")
+    add_verify_arguments(p)
     p.set_defaults(func=_cmd_verify)
 
 
@@ -464,10 +467,9 @@ def _cmd_resume(args: argparse.Namespace) -> int:
 
 
 def _cmd_verify(args: argparse.Namespace) -> int:
-    raise SystemExit(
-        "error: `spacehasten verify` is implemented in Session 15; "
-        "use `verify_spacehasten.py` from the legacy tree for now."
-    )
+    from .verify import run_verify
+
+    return run_verify(args)
 
 
 # --------------------------------------------------------------------------- #
