@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from .layout import WorkDir
 from .logging_setup import configure_logging, stage_log_context
-from .manifest import Manifest, RunRecord, StageRecord
+from .manifest import Manifest, ModelRecord, RunRecord, StageRecord
 
 __all__ = [
     "Manifest",
+    "ModelRecord",
     "RunRecord",
     "StageRecord",
     "WorkDir",

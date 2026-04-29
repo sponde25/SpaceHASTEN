@@ -49,6 +49,21 @@ class RunRecord(BaseModel):
     status: str = "running"  # running|completed|failed
 
 
+class ModelRecord(BaseModel):
+    """On-disk registry entry for a trained model.
+
+    The manifest is the source of truth for the model registry; the
+    legacy ``models`` SQL table is kept only as a (now-empty) compatibility
+    blob for older code paths.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: int
+    model_dir: str  # workspace-relative or absolute path
+    recorded_at: datetime = Field(default_factory=_utcnow)
+
+
 class Manifest(BaseModel):
     """Workspace manifest persisted as ``manifest.json``."""
 
@@ -59,6 +74,7 @@ class Manifest(BaseModel):
     created_at: datetime = Field(default_factory=_utcnow)
     stages: dict[str, StageRecord] = Field(default_factory=dict)
     runs: list[RunRecord] = Field(default_factory=list)
+    models: dict[str, ModelRecord] = Field(default_factory=dict)
 
     # ------------------------------------------------------------------ #
     # I/O                                                                 #
@@ -138,3 +154,16 @@ class Manifest(BaseModel):
         record.status = status
         record.ended_at = _utcnow()
         return record
+
+    # ------------------------------------------------------------------ #
+    # Model registry                                                      #
+    # ------------------------------------------------------------------ #
+
+    def record_model(self, version: int, model_dir: Path | str) -> ModelRecord:
+        """Add or replace the registry entry for a trained model version."""
+        record = ModelRecord(version=version, model_dir=str(model_dir))
+        self.models[str(version)] = record
+        return record
+
+    def get_model(self, version: int) -> ModelRecord | None:
+        return self.models.get(str(version))

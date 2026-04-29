@@ -338,6 +338,60 @@ class Database:
             raise KeyError(f"no model with version {version}")
         return bytes(row[0])
 
+    def load_model_path(self, version: int, workdir: object) -> Path:
+        """Resolve the on-disk path to a trained model checkpoint.
+
+        Prefers the new on-disk registry layout
+        (``workdir.model_dir(version)/model_0/pytorch_model.bin``). Falls
+        back to extracting the legacy ``models.model_tar`` BLOB to that
+        same location for back-compat with pre-Session-8 databases.
+
+        ``workdir`` is typed as :class:`object` to avoid an import cycle
+        with :mod:`spacehasten.workspace`; only its ``model_dir(version)``
+        method is used.
+        """
+        model_dir_method = getattr(workdir, "model_dir", None)
+        if not callable(model_dir_method):
+            raise TypeError("workdir must expose a model_dir(version) method")
+        model_dir = Path(model_dir_method(version))
+        bin_path = model_dir / "model_0" / "pytorch_model.bin"
+        if bin_path.exists():
+            return bin_path
+
+        # Back-compat: extract legacy BLOB.
+        try:
+            blob = self.load_model_blob(version)
+        except KeyError as exc:
+            raise FileNotFoundError(
+                f"model version {version} not found on disk and no legacy BLOB available"
+            ) from exc
+        if not blob:
+            raise FileNotFoundError(
+                f"model version {version} has no on-disk checkpoint and the legacy"
+                " BLOB is empty (likely written by Session-8+ training)"
+            )
+        import io
+        import tarfile
+
+        bin_path.parent.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as tar:
+            tar.extractall(path=model_dir.parent)
+        if not bin_path.exists():
+            # Some legacy tars contain a top-level model_<name>_ver<N>/model_0/...
+            # directory rather than model_0/ directly. Find the checkpoint.
+            for candidate in model_dir.parent.rglob("pytorch_model.bin"):
+                bin_path.parent.mkdir(parents=True, exist_ok=True)
+                import shutil as _shutil
+
+                _shutil.copy(candidate, bin_path)
+                break
+        if not bin_path.exists():
+            raise FileNotFoundError(
+                "could not locate pytorch_model.bin after extracting legacy BLOB "
+                f"for version {version}"
+            )
+        return bin_path
+
     # ----- docking blobs -----
 
     def store_dock_param(self, blob: bytes) -> None:
