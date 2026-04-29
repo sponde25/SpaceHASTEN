@@ -57,6 +57,7 @@ ahead — later sessions assume artefacts from earlier ones.
 | 14 | `cli/main.py` — argparse subcommands | 5 | 13 |
 | 15 | Port `verify_spacehasten.py` to new CLI; cutover | 7 | 14 |
 | 16 | Quick wins on legacy tree (parallel-safe) | A | — |
+| 16b | Mypy clean-up of `remote/` modules (parallel-safe) | A | 12 |
 | 17 | TUI (Textual) | 6 | 14 |
 | 18 | FastAPI dashboard (optional) | 6 | 14 |
 
@@ -742,6 +743,95 @@ rewrite proceeds. Safe to do at any time after Session 1; no dependencies.
 
 **Done when**
 - `verify_spacehasten.py` still passes on the cluster.
+
+---
+
+## Session 16b — Mypy clean-up of `remote/` modules (parallel-safe)
+
+**Scope.** Eliminate the six pre-existing mypy errors in
+`src/spacehasten/remote/{predict,train,cluster}.py` that surface when the
+caller widens the strict scope from `core,stages,scheduler,workspace` to
+include `remote/`. None of the errors block runtime; they are
+import-stub gaps and one untyped union access. Safe to run at any time
+after Session 12; no dependencies on later sessions.
+
+**Read first**
+- The six mypy errors as currently reported by:
+  ```bash
+  mypy src/spacehasten/core src/spacehasten/stages src/spacehasten/scheduler \
+       src/spacehasten/workspace src/spacehasten/tools src/spacehasten/remote
+  ```
+  Expected output (Session 12 baseline):
+  ```
+  src/spacehasten/remote/cluster.py:162: error: Skipping analyzing "FPSim2": module is installed, but missing library stubs or py.typed marker  [import-untyped]
+  src/spacehasten/remote/cluster.py:205: error: Skipping analyzing "FPSim2.io": module is installed, but missing library stubs or py.typed marker  [import-untyped]
+  src/spacehasten/remote/train.py:24: error: Skipping analyzing "chemprop": module is installed, but missing library stubs or py.typed marker  [import-untyped]
+  src/spacehasten/remote/predict.py:24: error: Skipping analyzing "chemprop": module is installed, but missing library stubs or py.typed marker  [import-untyped]
+  src/spacehasten/remote/predict.py:98: error: Item "list[Any]" of "Any | list[Any]" has no attribute "cpu"  [union-attr]
+  src/spacehasten/remote/predict.py:98: error: Item "None" of "list[Any] | list[list[Any]] | None" has no attribute "__iter__" (not iterable)  [union-attr]
+  ```
+- [src/spacehasten/remote/predict.py:80-110](../src/spacehasten/remote/predict.py)
+  for the union-attr context (`trainer.predict(...)` returns
+  `list[Tensor] | list[list[Tensor]] | None`).
+- The Session 1 strict-mypy scope contract at [pyproject.toml](../pyproject.toml).
+
+**Do**
+1. Suppress the third-party import-stub errors at the *import site* —
+   not via a global `[[tool.mypy.overrides]]` block, so the suppression
+   is grep-able and we keep an audit trail when stubs eventually appear.
+   - `src/spacehasten/remote/cluster.py`:
+     - Line 162 (`import FPSim2 ...`): append `# type: ignore[import-untyped]`.
+     - Line 205 (`from FPSim2.io import ...`): append `# type: ignore[import-untyped]`.
+   - `src/spacehasten/remote/train.py:24` and
+     `src/spacehasten/remote/predict.py:24` (`from chemprop import ...`):
+     append `# type: ignore[import-untyped]`.
+2. Fix the `predict.py:98` union-attr error properly (do NOT just
+   `# type: ignore` it). The chemprop/Lightning return type for
+   `trainer.predict(...)` widens to
+   `list[Tensor] | list[list[Tensor]] | None`. Tighten the runtime
+   handling so mypy can narrow:
+   - Add an explicit `if batch_preds is None: raise RuntimeError("trainer.predict returned None")` immediately after the call.
+   - Flatten the (potentially nested) list into a flat `list[Tensor]`
+     before the `np.concatenate` step:
+     ```python
+     def _flatten(preds: list[Tensor] | list[list[Tensor]]) -> list[Tensor]:
+         if preds and isinstance(preds[0], list):
+             return [t for sub in preds for t in sub]  # type: ignore[misc]
+         return cast(list[Tensor], preds)
+     ```
+     Use `from typing import cast` and import `Tensor` from `torch`.
+     Keep the comprehension `[p.cpu().numpy() for p in flat_preds]`.
+   - Verify the runtime behaviour is unchanged on a small CPU-only
+     prediction (`pytest tests/integration/test_prediction_local.py -q`
+     should still pass — the stub remote-predict isn't exercised here,
+     so just smoke-test by importing the module:
+     `python3 -c "import spacehasten.remote.predict"`).
+3. Re-run mypy across the full `remote/` scope and confirm zero errors:
+   ```bash
+   rm -rf .mypy_cache
+   mypy src/spacehasten/core src/spacehasten/stages src/spacehasten/scheduler \
+        src/spacehasten/workspace src/spacehasten/tools src/spacehasten/remote
+   # → Success: no issues found in 27 source files
+   ```
+4. Widen the strict scope: in `pyproject.toml`, the existing
+   `[tool.mypy]` block (per Session 1) restricts strict mode to
+   `src/spacehasten/{core,stages,scheduler,workspace}`. Append
+   `tools` and `remote` to that list so future drift is caught
+   automatically. Do **not** add `cli/` until Session 14 lands.
+
+**Do NOT**
+- Add a workspace-wide `ignore_missing_imports = true`. The whole point
+  is per-import auditability.
+- "Fix" the union-attr by silencing it with a blanket `# type: ignore`.
+- Touch any of the legacy `*.py` files at the workspace root.
+- Bump dependency versions or add new ones.
+
+**Done when**
+- The full mypy command above prints `Success: no issues found in 27 source files`.
+- `pytest -q` is still green (130+ tests).
+- `ruff check src tests` is still clean.
+- `MIGRATION_STATUS.md` row 16b is marked `done` and the decision is
+  logged in the decisions table.
 
 ---
 

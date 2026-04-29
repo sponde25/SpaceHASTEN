@@ -52,6 +52,7 @@ The non-negotiables are:
 | 14 | `cli/main.py` — argparse subcommands | not-started | | `spacehasten --help` works |
 | 15 | Port `verify_spacehasten.py`; cutover | not-started | | move legacy → `legacy/` |
 | 16 | Quick-win patches on legacy tree | not-started | | parallel-safe; SGE typo + `sbatch` calls |
+| 16b | Mypy clean-up of `remote/` modules | not-started | | parallel-safe; suppress 3rd-party stub gaps + fix `predict.py:98` union-attr; widen strict scope to `tools` + `remote` |
 | 17 | Textual TUI | optional | | post-cutover |
 | 18 | FastAPI dashboard | optional | | post-cutover |
 
