@@ -726,6 +726,225 @@ real SLURM. After it passes, mark legacy cutover.
 
 ---
 
+## Session 15.1 — Verify hardening
+
+**Status going in.** Session 15 landed `cli/verify.py`, the legacy →
+`legacy/` move, and the new `install_spacehasten.py`, but the on-cluster
+run failed four out of six checks. Three root causes; this session fixes
+all of them. **Decisions already made by the user** (do not relitigate):
+
+- **Stage A → option A** (script-path invocation; no new shared env).
+- **Stage B.2 → option B.2.a** (verify-internal CSV-to-DB shim, no new
+  public API in `stages/training.py`).
+- **Default chemical-space path** must be
+  `/data/programs/BiosolveIT/spaces_new/REALSpace_83bn_2025-09.space`.
+
+**Read first**
+- Latest [src/spacehasten/cli/verify.py](../src/spacehasten/cli/verify.py)
+  (current behaviour, will be partly rewritten).
+- [legacy/verify_spacehasten.py](../legacy/verify_spacehasten.py)
+  (the regression target — match its check structure, not byte-by-byte).
+- [legacy/scheduler_functions.py](../legacy/scheduler_functions.py)
+  (the legacy training/clustering scheduler scripts; note they
+  `source <PREPARE_ANACONDA>` then `conda activate <env>` then call a
+  bare `python3 <script>`).
+- [src/spacehasten/stages/{training,clustering,prediction,simsearch}.py](../src/spacehasten/stages)
+  — every place where `python3 -m spacehasten.remote.<X>` is currently
+  emitted as the compute-node command. There are four such call sites
+  (training, clustering, prediction, and the simsearch *control* task —
+  search tasks are pure SpaceLight/FTrees binaries, no Python).
+- [src/spacehasten/remote/{train,predict,cluster,prop_filter}.py](../src/spacehasten/remote)
+  — must be runnable as standalone scripts with no `from spacehasten...`
+  imports (Stage A.0 audit).
+
+**Do**
+
+### Stage A — Script-path invocation for remote modules
+
+1. **A.0 (audit, must run first).** In each of
+   `src/spacehasten/remote/{train.py,predict.py,cluster.py,prop_filter.py}`,
+   `grep -n '^from spacehasten\|^import spacehasten'`. Expected: zero
+   matches. If any exist, refactor them out (inline the constant or
+   move it into the remote module) — these scripts must not depend on
+   the rest of the package being importable.
+2. **A.1.** Add `Settings.paths.spacehasten_src_dir: str | None = None`
+   in [src/spacehasten/config/settings.py](../src/spacehasten/config/settings.py).
+   Semantics: absolute path to the directory containing
+   `remote/train.py` etc. on a filesystem visible to compute nodes.
+3. **A.2.** Add a small helper, e.g.
+   `Settings.remote_script_path(name: str) -> Path`, that returns
+   `paths.spacehasten_src_dir / "remote" / f"{name}.py"` and raises a
+   clear error if `spacehasten_src_dir` is unset. Use it everywhere
+   below.
+4. **A.3.** Update the four call sites to emit
+   `("python3", str(settings.remote_script_path("train")))` instead of
+   `("python3", "-m", "spacehasten.remote.train")`:
+   - `stages/training.py` — `_DEFAULT_TRAIN_COMMAND`
+   - `stages/clustering.py` — `_DEFAULT_CLUSTER_COMMAND`
+   - `stages/prediction.py` — `_DEFAULT_PREDICT_COMMAND` (or wherever
+     the predict command is built)
+   - `stages/simsearch.py` — the `_build_control_command` helper for
+     the `prop_filter` + chemprop predict task
+   Each helper takes `settings` already; thread `settings` in if any
+   does not. Tests that monkey-patch the command prefix should still
+   work because the prefix argument remains overridable.
+5. **A.4.** Update `install_spacehasten.py`:
+   - Write `[Paths] SPACEHASTEN_SRC_DIR = <abs path to repo>/src/spacehasten`
+     into the generated `spacehasten.ini` (use `Path(REPO_ROOT)` —
+     the installer already knows where it is).
+   - Keep the `pip install <repo>` step (orchestrator side still needs
+     the package importable).
+6. **A.5.** Update affected unit/integration tests:
+   - Tests that assert on the rendered command string (e.g. the
+     SLURM snapshot fixtures) need to be updated for the new
+     script-path form. Snapshot fixtures live under
+     `tests/fixtures/expected_submit_*.sh`.
+   - Tests that pass `command_prefix=...` to override stay the same.
+   - Add a tiny unit test:
+     `Settings(paths=PathsSettings(spacehasten_src_dir=None)).remote_script_path("train")`
+     raises a clear `ValueError`.
+7. **A.6.** Add a one-line note to the `MIGRATION_STATUS.md` decisions
+   table: "Script-path invocation for remote modules; chose not to
+   build a shared `spacehasten` conda env on compute nodes (would
+   conflict with chemprop/fpsim2 pins)."
+
+### Stage B — Restructure verify
+
+1. **B.1.** Decouple every check into its own subdirectory under
+   `<verify_workdir>/<check>/` with its own `.dbsh` (or no DB):
+   - `pigz/` — no files
+   - `scheduler/` — smoke array (existing)
+   - `clustering/` — fresh DB seeded with the 5 hard-coded SMILES
+     (`CCO`, `CCN`, `CCC`, `CCF`, `CCCl`); call
+     `clustering.cluster()`. Assert ≥1 cluster row ingested.
+   - `docking/` — fresh DB → `seeds.import_seeds(smi=examples.smi,
+     auto_train=False)` → `docking.dock(top_n=10, cpus=1)`. Assert
+     ≥1 row has `dock_score IS NOT NULL`. **No training here.**
+   - `training/` — see B.2.
+   - `biosolveit/` — unchanged structurally (Stage C fixes the
+     space-file default).
+2. **B.2 (option B.2.a, decided).** Training check uses `example.csv`
+   directly:
+   - Locate `example.csv` via `_resolve_fixture("example.csv", ...)`.
+   - Open a fresh `<verify_workdir>/training/training.dbsh`,
+     `db.create_schema()`.
+   - Read `example.csv` (columns
+     `smiles,smilesid,docking_score`) and ingest each row via
+     `db.insert_seed_docked(reghash=tautomer_hash(smi), smiles, smilesid,
+     dock_score=float(score))`. Skip rows whose hash is `None`. Commit.
+   - Call `training.train(db, sub_workdir, scheduler, settings,
+     cutoff=10.0)`.
+   - Assert `sub_workdir.model_dir(version)/model_0/pytorch_model.bin`
+     exists.
+   - **Do not change the public `stages/training.train` signature.**
+     The CSV-to-DB shim lives entirely inside `cli/verify.py`.
+3. **B.3.** Delete the implicit-docking fallback (`_cb_training`
+   currently runs docking if it wasn't selected). After B.1+B.2 the
+   checks are independent so the fallback is dead code.
+4. **B.4.** Carry over the legacy CUDA warning. After training
+   succeeds, look in the per-task SLURM `.err` log under
+   `sub_workdir.slurm_logs_dir(...)` (or whatever the new layout
+   produces — the existing training stage writes
+   `train.err` next to the model dir; check what's actually there) for
+   `GPU available: True`. Print a non-fatal `WARNING: CUDA not
+   available, training will be slower` if absent. Do not fail the
+   check on its absence.
+5. **B.5.** Add an integration test
+   `tests/integration/test_verify_smoke.py` that runs
+   `cli.verify.run_verify(...)` with `--only pigz scheduler` against a
+   `LocalScheduler` (fast — these two checks don't touch the cluster).
+   Use `monkeypatch` to set `--workdir` to a `tmp_path`. Mark
+   `--keep-workdir` so the test can inspect artefacts.
+6. **B.6.** Verify-only ergonomics: when running on the cluster, the
+   six checks should keep going past the first failure (already true).
+   Make sure failures in one check do *not* corrupt the workdir for
+   later checks (since each now has its own subdir, this should be
+   automatic — confirm).
+
+### Stage C — Auto-discover `spacehasten.ini` and fix space-file default
+
+1. **C.1.** When `--config` is unset, `cli/verify.run_verify`
+   auto-discovers config in this order:
+   1. `$SPACEHASTEN_INI` (env var).
+   2. `<fixtures_dir>/spacehasten.ini` (if `--fixtures-dir` was
+      passed).
+   3. The directory above the resolved fixtures dir (i.e. an install
+      root that contains both fixtures and config).
+   4. Fall through to defaults; print a clear warning.
+   Reuse the existing `_resolve_fixture` walk-up pattern so the
+   discovery rules stay consistent.
+2. **C.2.** Update the hard-coded default in
+   `PathsSettings.spaces_file_default` to
+   `/data/programs/BiosolveIT/spaces_new/REALSpace_83bn_2025-09.space`
+   and `spaces_dir_default` to
+   `/data/programs/BiosolveIT/spaces_new`. (These are last-resort
+   fallbacks; the installer already writes these correct values into
+   `spacehasten.ini`.)
+3. **C.3.** When `_check_biosolveit` finds the space file missing,
+   the error should suggest passing `--config <ini>` and show which
+   path it actually checked.
+
+### Stage D — Compute-node failure diagnostics (optional but recommended)
+
+Currently a SLURM-task crash surfaces only as "expected output file
+missing". Make the stage layer (`stages/{clustering,training,docking,
+prediction,simsearch}`) tail the per-task SLURM `.err` and `.out` (last
+~50 lines) into the raised exception when `result.success is False` or
+when an expected output file is absent.
+
+1. **D.1.** Add a small helper in `scheduler/base.py` (or a new
+   `scheduler/diagnostics.py`):
+   `tail_logs(handle: ArrayHandle, n_lines: int = 50) -> str` that
+   reads `handle.workdir / slurm-<jobid>_<task>.{out,err}` (or the
+   `LocalScheduler`'s per-task log files; both exist) and returns a
+   formatted snippet.
+2. **D.2.** Use it in the four stage modules' "job succeeded but
+   output missing" / "job failed" paths.
+3. **D.3.** `cli/verify` summary: when a check fails, append the log
+   path and the tailed snippet to the summary table.
+
+This stage is *nice-to-have*; ship it last and do not block A/B/C on
+it.
+
+**Do NOT**
+- Re-introduce a dependency on the legacy tree from the new package.
+- Change the public signature of any `stages/*` function (B.2.a is
+  explicit on this).
+- Build a new conda env on compute nodes (option B was rejected).
+- Touch `legacy/` files.
+
+**Done when**
+1. `spacehasten verify` (no flags, on the cluster, with
+   `spacehasten.ini` next to the install) passes all six checks.
+2. The verify workdir has six independent subdirs
+   (`pigz` may be empty); training uses `example.csv` (≈600 rows),
+   not the 10 docking outputs.
+3. `pytest -q` is green; ruff and mypy stay clean on the existing
+   strict scope.
+4. `MIGRATION_STATUS.md` row 15 is updated with the
+   stage-A/B/C/D outcomes; new decisions appended to the decisions
+   table; commit message is `[s15.1] verify hardening (script-path
+   remote invocation; restructure)`.
+
+**Hand-off notes from this session**
+
+- The current `cli/verify.py` is *not* far from the target — Stage B
+  is mostly a structural reshuffle plus a CSV ingestion helper.
+  Don't rewrite the file from scratch.
+- The four call sites for Stage A.3 are the only place where
+  `spacehasten.remote.<X>` is shelled out as a `-m` invocation; grep
+  for `"-m", "spacehasten.remote"` to confirm.
+- The 10-row docking baseline is fine for the *docking* check — the
+  Glide pipeline is what's being smoked there. Training needs the
+  ≈600-row `example.csv` because chemprop's GPU code path is what's
+  being smoked there.
+- The on-cluster verify run from this session left
+  `/data/lurvas/SPACEHASTEN/VERIFY-0110dev0` half-populated; the
+  `--keep-workdir` flag makes this inspectable. Wipe before the next
+  attempt.
+
+---
+
 ## Session 16 — Quick-win patches on legacy tree (parallel-safe)
 
 **Scope.** Tiny fixes to the legacy code that reduce drift while the
