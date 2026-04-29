@@ -87,6 +87,8 @@ class PathsSettings(_Section):
         "Enamine_Diverse_REAL_drug-like_48.2M_cxsmiles.cxsmiles.bz2"
     )
     exe_clustering_default: str | None = None  # resolved at install/use
+    schrodinger_run: str = "$SCHRODINGER/run"
+    export_poses_script: str | None = None  # path to legacy export_poses.py
 
 
 class SlurmSettings(_Section):
