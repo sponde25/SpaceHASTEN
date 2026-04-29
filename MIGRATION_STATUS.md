@@ -44,7 +44,7 @@ The non-negotiables are:
 | 6 | `scheduler/slurm.py` | done | | `SlurmScheduler` (sbatch `--parsable` + sacct polling + afterok deps), shared Jinja template, `make_scheduler` factory; snapshot fixtures locked; 14 tests; ruff/mypy clean |
 | 7 | `workspace/` — layout, manifest, logging | done | | `WorkDir` paths + bootstrap + /wrk warning, Pydantic `Manifest` (atomic save, stage/run records), three-tier logging (rotating master + Rich/Stream console + per-stage `FileHandler`); 22 tests; ruff/mypy clean |
 | 8 | `stages/training.py` + `remote/train.py` | done | | on-disk model registry (manifest source of truth, legacy `models` BLOB shim retained); `Database.load_model_path` with BLOB fallback; `Manifest.record_model`; local-scheduler integration test with stub remote/train; 103 tests; ruff/mypy clean |
-| 9 | `stages/prediction.py` + `remote/predict.py` | not-started | | |
+| 9 | `stages/prediction.py` + `remote/predict.py` | done | | chunked array prediction; `${TASK_ID}`-driven `predict_<i>.csv`/`predicted_predict_<i>.csv` under `simsearch/cycle<N>/PREDICT/`; reuses `Database.load_model_path` (BLOB fallback) and `apply_pred_scores` single-transaction bulk update; local-scheduler integration test with stub remote/predict; 105 tests; ruff/mypy clean. Legacy `predict_dock` and `chunkpredict.py` intentionally not ported (dead code). |
 | 10 | `stages/clustering.py` (port `sec_clustering.sh`) | not-started | | |
 | 11 | `tools/glide.py` + `stages/docking.py` | not-started | | largest external integration |
 | 12 | `tools/spacelight.py` + `tools/ftrees.py` + `remote/prop_filter.py` + `stages/simsearch.py` | not-started | | two-phase array (search → control) |
