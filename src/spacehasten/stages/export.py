@@ -98,7 +98,8 @@ def export_poses(
     All heavy I/O happens on the compute node's fast local ``/wrk``
     scratch — no intermediate data crosses NFS.
 
-    :param iteration: dock iteration to export; defaults to the latest.
+    :param iteration: if given, export only that iteration; otherwise
+        exports all iterations.
     :param settings: required for paths (schrodinger, scratch, script).
     :param scheduler: the scheduler to submit the job to.
     :returns: path to the output ``.maegz`` file.
@@ -107,19 +108,30 @@ def export_poses(
         raise ValueError("export_poses requires Settings")
     if scheduler is None:
         raise ValueError("export_poses requires a Scheduler")
-    script = settings.paths.export_poses_script
-    if not script:
-        raise ValueError(
-            "settings.paths.export_poses_script is unset; point it at the"
-            " legacy export_poses.py file"
-        )
+    script = (
+        settings.paths.export_poses_script
+        or str(settings.remote_script_path("export_poses"))
+    )
 
-    iter_n = iteration if iteration is not None else db.latest_dock_iteration()
-    if iter_n < 1:
-        raise ValueError("no dock iterations recorded; nothing to export")
-    dock_dir = workdir.docking_dir(iter_n)
-    if not dock_dir.is_dir():
-        raise FileNotFoundError(f"docking iteration directory missing: {dock_dir}")
+    # Determine which iterations to export.
+    if iteration is not None:
+        iterations = [iteration]
+    else:
+        latest = db.latest_dock_iteration()
+        if latest < 1:
+            raise ValueError("no dock iterations recorded; nothing to export")
+        iterations = list(range(1, latest + 1))
+
+    # Collect all docking directories.
+    dock_dirs: list[Path] = []
+    for it in iterations:
+        d = workdir.docking_dir(it)
+        if d.is_dir():
+            dock_dirs.append(d)
+    if not dock_dirs:
+        raise FileNotFoundError(
+            f"no docking iteration directories found for iterations {iterations}"
+        )
 
     output = Path(output).resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -128,11 +140,19 @@ def export_poses(
     schrodinger_run = settings.paths.schrodinger_run or "$SCHRODINGER/run"
     dbsh_path = workdir.dbsh().resolve()
 
+    # Space-separated list of docking dirs for the bash script.
+    dock_dirs_str = " ".join(str(d) for d in dock_dirs)
+    iter_label = (
+        f"iter{iterations[0]}"
+        if len(iterations) == 1
+        else f"iter1-{iterations[-1]}"
+    )
+
     # Build a self-contained bash script that runs on the compute node.
     command_body = textwrap.dedent(f"""\
         set -e
-        SCRATCH="{scratch_root}/$USER/COLLECT_{workdir.name}_iter{iter_n}"
-        DOCK_DIR="{dock_dir}"
+        SCRATCH="{scratch_root}/$USER/COLLECT_{workdir.name}_{iter_label}"
+        DOCK_DIRS=({dock_dirs_str})
         OUTPUT="{output}"
         DBSH="{dbsh_path}"
         CUTOFF="{cutoff}"
@@ -143,7 +163,9 @@ def export_poses(
         mkdir -p "$SCRATCH"
 
         echo "Decompressing results to $SCRATCH ..."
-        ls "$DOCK_DIR"/results-*.tar.gz | xargs -P $(nproc) -I {{}} tar xzf {{}} -C "$SCRATCH"
+        for DOCK_DIR in "${{DOCK_DIRS[@]}}"; do
+            ls "$DOCK_DIR"/results-*.tar.gz 2>/dev/null
+        done | xargs -P $(nproc) -I {{}} tar xzf {{}} -C "$SCRATCH"
 
         echo "Extracting poses ..."
         find "$SCRATCH" -name '*_pv.maegz' | xargs -P $(nproc) -I {{}} \\
@@ -166,7 +188,7 @@ def export_poses(
     export_dir.mkdir(parents=True, exist_ok=True)
 
     job = ArrayJob(
-        name=f"export_poses_iter{iter_n}",
+        name=f"export_poses_{iter_label}",
         workdir=export_dir,
         array_size=1,
         max_concurrent=1,
@@ -177,8 +199,8 @@ def export_poses(
     )
     handle = scheduler.submit_array(job)
     logger.info(
-        "Submitted export_poses job %s (iteration %d, cutoff %s)",
-        handle.job_id, iter_n, cutoff,
+        "Submitted export_poses job %s (%s, cutoff %s)",
+        handle.job_id, iter_label, cutoff,
     )
     result = scheduler.wait(handle)
     if not result.success:
