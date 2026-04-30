@@ -161,7 +161,25 @@ class SlurmScheduler(Scheduler):
         per_task = self._parse_sacct(
             completed.stdout, handle.job_id, handle.array_size
         )
+        # Fallback: check sentinel files for tasks sacct doesn't report as
+        # terminal yet (works around SLURM accounting delays).
+        if not all(s.is_terminal for s in per_task):
+            per_task = self._patch_from_sentinels(per_task, handle)
         return ArrayStatus(handle=handle, task_states=per_task)
+
+    @staticmethod
+    def _patch_from_sentinels(
+        states: tuple[TaskState, ...], handle: ArrayHandle
+    ) -> tuple[TaskState, ...]:
+        """Promote non-terminal tasks to COMPLETED if their sentinel exists."""
+        patched = list(states)
+        for i, s in enumerate(patched):
+            if s.is_terminal:
+                continue
+            sentinel = handle.workdir / f"jobdone-{handle.name}-CPU{i + 1}"
+            if sentinel.exists():
+                patched[i] = TaskState.COMPLETED
+        return tuple(patched)
 
     @staticmethod
     def _parse_sacct(

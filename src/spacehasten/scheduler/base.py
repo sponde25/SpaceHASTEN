@@ -177,10 +177,23 @@ class Scheduler(ABC):
             if on_progress is not None:
                 on_progress(snap)
             if snap.all_terminal:
-                return ArrayResult(
+                result = ArrayResult(
                     handle=handle,
                     task_states=snap.task_states,
                     failed_indices=snap.failed_indices,
                 )
+                if result.success:
+                    logger.info(
+                        "Job %s (%s) completed successfully (%d/%d tasks)",
+                        handle.job_id, handle.name,
+                        snap.completed_count, handle.array_size,
+                    )
+                else:
+                    logger.warning(
+                        "Job %s (%s) finished with failures: %d/%d tasks failed",
+                        handle.job_id, handle.name,
+                        len(result.failed_indices), handle.array_size,
+                    )
+                return result
             time.sleep(interval)
-            interval = min(interval * self.backoff_factor, self.max_poll_interval)
+            interval = 5.0

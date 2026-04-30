@@ -11,6 +11,7 @@ import pytest
 
 from spacehasten.config.settings import Settings
 from spacehasten.core.db import ClusterRow, Database
+from spacehasten.scheduler.local import LocalScheduler
 from spacehasten.stages.export import export_csv, export_poses
 from spacehasten.workspace.layout import WorkDir
 
@@ -61,11 +62,13 @@ def test_export_poses_requires_settings_with_script(tmp_path: Path) -> None:
     _seed_db(db)
 
     settings = Settings()  # script unset
+    scheduler = LocalScheduler()
     try:
         with pytest.raises(ValueError, match="export_poses_script"):
             export_poses(
                 db, workdir, tmp_path / "out.mae",
                 cutoff=0.0, iteration=1, settings=settings,
+                scheduler=scheduler,
             )
     finally:
         db.close()
@@ -79,11 +82,13 @@ def test_export_poses_no_iterations(tmp_path: Path) -> None:
 
     settings = Settings()
     settings.paths.export_poses_script = "/nonexistent/export_poses.py"
+    scheduler = LocalScheduler()
     try:
         with pytest.raises(ValueError, match="no dock iterations"):
             export_poses(
                 db, workdir, tmp_path / "out.mae",
                 cutoff=0.0, settings=settings,
+                scheduler=scheduler,
             )
     finally:
         db.close()
@@ -142,15 +147,20 @@ def test_export_poses_invokes_script_per_pv(tmp_path: Path) -> None:
     settings.paths.scratch_default = str(tmp_path / "scratch")
     os.makedirs(tmp_path / "scratch", exist_ok=True)
 
-    out_path = tmp_path / "hits.mae"
+    out_path = tmp_path / "hits.maegz"
+    scheduler = LocalScheduler()
     result = export_poses(
         db, workdir, out_path,
         cutoff=0.0, iteration=1, settings=settings,
+        scheduler=scheduler,
     )
     db.close()
 
     assert result == out_path
-    body = out_path.read_bytes()
-    # Both pv hits concatenated, in sorted order.
+    assert out_path.exists()
+    # The output is gzipped (pigz); decompress and check contents.
+    import gzip
+    body = gzip.decompress(out_path.read_bytes())
+    # Both pv hits concatenated.
     assert b"HIT:chunk_1_pv\n" in body
     assert b"HIT:chunk_2_pv\n" in body

@@ -5,23 +5,22 @@ Replaces legacy ``export_functions.export_results`` and
 
 The CSV exporter is pure-Python: it pulls rows via
 :meth:`Database.select_export_rows` and writes them to the requested
-output path. Pose export still relies on Schrödinger's ``$SCHRODINGER/run``
-to drive the legacy ``export_poses.py`` over each ``*_pv.maegz`` produced
-by the docking stage.
+output path. Pose export submits an exclusive-node SLURM job that
+untars docking results on local scratch, runs ``$SCHRODINGER/run
+export_poses.py`` in parallel (all cores), concatenates the output,
+compresses with pigz, and copies the final ``.maegz`` back to NFS.
 """
 
 from __future__ import annotations
 
 import csv
-import glob
 import logging
-import os
-import shutil
-import subprocess
+import textwrap
 from pathlib import Path
 
 from spacehasten.config.settings import Settings
 from spacehasten.core.db import Database
+from spacehasten.scheduler.base import ArrayJob, Scheduler
 from spacehasten.workspace.layout import WorkDir
 
 logger = logging.getLogger(__name__)
@@ -84,24 +83,30 @@ def export_poses(
     cutoff: float,
     iteration: int | None = None,
     settings: Settings | None = None,
+    scheduler: Scheduler | None = None,
 ) -> Path:
-    """Export the Schrödinger Maestro pose file for compounds with
-    ``dock_score <= cutoff``.
+    """Export poses via an exclusive-node SLURM job.
 
-    Walks the relevant docking iteration directory, untars each
-    ``results-*.tar.gz``, then invokes ``$SCHRODINGER/run
-    <export_poses.py>`` over every ``*_pv.maegz`` to write
-    ``spacehasten_virtual_hits_*.mae`` files. They are concatenated to
-    ``output``.
+    The job runs on a single compute node using all cores:
+      1. Untars all ``results-*.tar.gz`` in parallel on local scratch.
+      2. Runs ``$SCHRODINGER/run export_poses.py`` in parallel for each
+         ``*_pv.maegz``.
+      3. Concatenates all ``spacehasten_virtual_hits_*.mae`` on scratch.
+      4. Compresses with ``pigz`` → ``.maegz``.
+      5. Copies the final file back to NFS ``output``.
+
+    All heavy I/O happens on the compute node's fast local ``/wrk``
+    scratch — no intermediate data crosses NFS.
 
     :param iteration: dock iteration to export; defaults to the latest.
-    :param settings: required (``settings.paths.export_poses_script``
-        and ``settings.paths.schrodinger_run``).
-    :returns: path to the concatenated ``output`` Maestro file.
-    :raises ValueError: if ``settings.paths.export_poses_script`` is unset.
+    :param settings: required for paths (schrodinger, scratch, script).
+    :param scheduler: the scheduler to submit the job to.
+    :returns: path to the output ``.maegz`` file.
     """
     if settings is None:
         raise ValueError("export_poses requires Settings")
+    if scheduler is None:
+        raise ValueError("export_poses requires a Scheduler")
     script = settings.paths.export_poses_script
     if not script:
         raise ValueError(
@@ -116,56 +121,75 @@ def export_poses(
     if not dock_dir.is_dir():
         raise FileNotFoundError(f"docking iteration directory missing: {dock_dir}")
 
-    # Stage extracted poses under a scratch subdirectory inside workdir.
-    scratch_root = Path(settings.paths.scratch_default or "/tmp")
-    user = os.environ.get("USER", "spacehasten")
-    resdir = scratch_root / user / f"COLLECT_{workdir.name}_iter{iter_n}"
-    if resdir.exists():
-        shutil.rmtree(resdir)
-    resdir.mkdir(parents=True, exist_ok=True)
-
-    output = Path(output)
+    output = Path(output).resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    # Untar all chunk results.
-    tarballs = sorted(glob.glob(str(dock_dir / "results-*.tar.gz")))
-    if not tarballs:
-        raise FileNotFoundError(f"no results-*.tar.gz under {dock_dir}")
-    for tar_path in tarballs:
-        subprocess.run(
-            ["tar", "xzf", tar_path, "-C", str(resdir)],
-            check=True,
-        )
-
-    # Invoke export_poses.py for each *_pv.maegz.
-    pv_files = sorted(glob.glob(str(resdir / "*_pv.maegz")))
-    if not pv_files:
-        shutil.rmtree(resdir, ignore_errors=True)
-        raise FileNotFoundError(
-            f"no *_pv.maegz produced from {dock_dir}; nothing to export"
-        )
-
+    scratch_root = settings.paths.scratch_default or "/wrk"
     schrodinger_run = settings.paths.schrodinger_run or "$SCHRODINGER/run"
-    schrodinger_run_argv = schrodinger_run.split()
-    for pv in pv_files:
-        argv = [
-            *schrodinger_run_argv,
-            str(script),
-            pv,
-            str(cutoff),
-            str(workdir.dbsh()),
-        ]
-        subprocess.run(argv, check=True)
+    dbsh_path = workdir.dbsh().resolve()
 
-    # Concatenate per-pv hits into ``output``.
-    hit_files = sorted(glob.glob(str(resdir / "spacehasten_virtual_hits_*.mae")))
-    with output.open("wb") as out_fh:
-        for hit in hit_files:
-            with open(hit, "rb") as src:
-                shutil.copyfileobj(src, out_fh)
+    # Build a self-contained bash script that runs on the compute node.
+    command_body = textwrap.dedent(f"""\
+        set -e
+        SCRATCH="{scratch_root}/$USER/COLLECT_{workdir.name}_iter{iter_n}"
+        DOCK_DIR="{dock_dir}"
+        OUTPUT="{output}"
+        DBSH="{dbsh_path}"
+        CUTOFF="{cutoff}"
+        SCHRODINGER_RUN="{schrodinger_run}"
+        EXPORT_SCRIPT="{script}"
 
-    shutil.rmtree(resdir, ignore_errors=True)
-    logger.info("Exported %d pose files to %s", len(hit_files), output)
+        rm -fr "$SCRATCH"
+        mkdir -p "$SCRATCH"
+
+        echo "Decompressing results to $SCRATCH ..."
+        ls "$DOCK_DIR"/results-*.tar.gz | xargs -P $(nproc) -I {{}} tar xzf {{}} -C "$SCRATCH"
+
+        echo "Extracting poses ..."
+        find "$SCRATCH" -name '*_pv.maegz' | xargs -P $(nproc) -I {{}} \\
+            $SCHRODINGER_RUN "$EXPORT_SCRIPT" {{}} $CUTOFF "$DBSH"
+
+        echo "Concatenating results ..."
+        cat "$SCRATCH"/spacehasten_virtual_hits_*.mae > "$SCRATCH/all_hits.mae"
+
+        echo "Compressing with pigz ..."
+        pigz -c "$SCRATCH/all_hits.mae" > "$SCRATCH/all_hits.maegz"
+
+        echo "Copying to output ..."
+        cp "$SCRATCH/all_hits.maegz" "$OUTPUT"
+
+        rm -fr "$SCRATCH"
+        echo "Done: $OUTPUT"
+    """)
+
+    export_dir = workdir.root / "export"
+    export_dir.mkdir(parents=True, exist_ok=True)
+
+    job = ArrayJob(
+        name=f"export_poses_iter{iter_n}",
+        workdir=export_dir,
+        array_size=1,
+        max_concurrent=1,
+        cpus_per_task=1,  # irrelevant with exclusive
+        exclusive=True,
+        env_setup=[],
+        command_template=command_body,
+    )
+    handle = scheduler.submit_array(job)
+    logger.info(
+        "Submitted export_poses job %s (iteration %d, cutoff %s)",
+        handle.job_id, iter_n, cutoff,
+    )
+    result = scheduler.wait(handle)
+    if not result.success:
+        from spacehasten.scheduler.diagnostics import tail_logs
+
+        raise RuntimeError(
+            f"export_poses job {handle.job_id} failed\n"
+            f"--- tail of task logs ---\n{tail_logs(handle)}"
+        )
+
+    logger.info("Pose export complete: %s", output)
     return output
 
 
