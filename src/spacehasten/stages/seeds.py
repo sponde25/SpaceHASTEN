@@ -210,9 +210,13 @@ def import_seeds(
         db.commit()
         raise ValueError(f"no parseable seeds in {seed_path}")
 
-    # 6. Insert.
+    # 6. Insert (skip duplicates by reghash).
     n_inserted = 0
+    n_skipped = 0
     for reghash, smiles, smilesid, score in hashed:
+        if db.reghash_exists(reghash):
+            n_skipped += 1
+            continue
         if is_csv:
             assert score is not None
             try:
@@ -225,6 +229,8 @@ def import_seeds(
             db.insert_seed_undocked(reghash, smiles, smilesid)
         n_inserted += 1
     db.commit()
+    if n_skipped:
+        logger.info("Skipped %d seeds already in database", n_skipped)
     logger.info("Imported %d seed rows from %s", n_inserted, seed_path)
 
     # 7. Auto-dock-then-train cascade (SMI path only).

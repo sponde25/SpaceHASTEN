@@ -23,7 +23,9 @@ def _sqlite_master(conn: sqlite3.Connection) -> list[tuple[str, str, str]]:
 
 
 def _normalise(sql: str | None) -> str:
-    return " ".join((sql or "").split())
+    s = " ".join((sql or "").split())
+    # Strip IF NOT EXISTS so we can compare against the frozen legacy schema.
+    return s.replace(" IF NOT EXISTS", "")
 
 
 def _column_info(conn: sqlite3.Connection, table: str) -> list[tuple]:

@@ -126,6 +126,12 @@ def _write_ini(path: Path, *, answers: dict[str, str]) -> None:
     lines.append(f"SCRATCH_DEFAULT = {a['scratch']}")
     lines.append(f"SEEDS_DIR_DEFAULT = {a['seeds_dir']}")
     lines.append(f"SEEDS_FILE_DEFAULT = {a['default_seeds']}")
+    # Compute-node script-path invocation (Session 15.1, Stage A): remote
+    # modules are launched as ``python3 <abs path>/remote/<x>.py`` rather
+    # than ``python3 -m`` so they do not depend on ``spacehasten`` being
+    # importable inside the chemprop / fpsim2 conda envs.
+    src_dir = REPO_ROOT / "src" / "spacehasten"
+    lines.append(f"SPACEHASTEN_SRC_DIR = {src_dir}")
     # Point export_poses_script at the legacy file shipped with the repo.
     legacy_export = REPO_ROOT / "legacy" / "export_poses.py"
     if legacy_export.exists():
@@ -179,16 +185,18 @@ def main() -> None:
     print("NOTE: SLURM is the default scheduler.\n")
 
     install_dir = _ask_for_dir(
-        f"/data/programs/spacehasten-{SPACEHASTEN_VERSION}",
+        str(REPO_ROOT),
         "Installation",
         exist=False,
     )
-    install_path = Path(install_dir)
+    install_path = Path(install_dir).resolve()
     if install_path.exists():
-        print(f"The specified path already exists: {install_path}")
-        print("Installation aborted.")
-        sys.exit(1)
-    install_path.mkdir(parents=True)
+        if not install_path.is_dir():
+            print(f"The specified path exists but is not a directory: {install_path}")
+            sys.exit(1)
+        print(f"Using existing directory: {install_path}")
+    else:
+        install_path.mkdir(parents=True)
 
     answers: dict[str, str] = {}
     answers["spacelight"] = _ask_for_file(DEFAULTS["spacelight"])
@@ -233,9 +241,17 @@ def main() -> None:
 
     print("\nWriting site configuration...")
     ini_path = install_path / "spacehasten.ini"
-    _write_ini(ini_path, answers=answers)
+    if ini_path.exists():
+        ans = input(f"  {ini_path} already exists. Overwrite? [y/N]: ").strip().lower()
+        if ans not in ("y", "yes"):
+            print("  Keeping existing spacehasten.ini.")
+        else:
+            _write_ini(ini_path, answers=answers)
+            print(f"  -> {ini_path}")
+    else:
+        _write_ini(ini_path, answers=answers)
+        print(f"  -> {ini_path}")
 
-    print(f"  -> {ini_path}")
     for fixture in VERIFY_FIXTURES:
         src = REPO_ROOT / fixture
         if not src.exists():
@@ -243,6 +259,8 @@ def main() -> None:
                   "will need an explicit path.")
             continue
         dst = install_path / fixture
+        if src.resolve() == dst.resolve():
+            continue
         shutil.copy(src, dst)
         print(f"  -> {dst}")
 

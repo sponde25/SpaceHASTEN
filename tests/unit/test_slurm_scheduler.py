@@ -154,7 +154,7 @@ def test_submit_calls_sbatch_parsable(tmp_path: Path, fake_run: FakeRun) -> None
     submit_path = tmp_path / "submit_search.sh"
     assert submit_path.exists()
     sbatch_calls = list(fake_run.calls_for("sbatch"))
-    assert sbatch_calls == [["sbatch", "--parsable", str(submit_path)]]
+    assert sbatch_calls == [["sbatch", "--parsable", "--export=NONE", str(submit_path)]]
 
 
 def test_submit_parses_clustered_jobid(tmp_path: Path, fake_run: FakeRun) -> None:
@@ -237,6 +237,23 @@ def test_status_handles_cancelled_with_uid_suffix(
     fake_run.add("sacct", stdout="100_1|CANCELLED by 1001|0:0\n")
     snap = scheduler.status(handle)
     assert snap.task_states == (TaskState.CANCELLED,)
+
+
+def test_status_handles_cancelled_unexpanded_range(
+    tmp_path: Path, fake_run: FakeRun
+) -> None:
+    """A job cancelled before SLURM expanded the array shows as a range."""
+    scheduler = SlurmScheduler()
+    fake_run.add("sbatch", stdout="200\n")
+    handle = scheduler.submit_array(_basic_job(tmp_path, array_size=4, max_concurrent=2))
+
+    fake_run.add("sacct", stdout="200_[1-4]|CANCELLED by 1001|0:0\n")
+    snap = scheduler.status(handle)
+    assert snap.task_states == (
+        TaskState.CANCELLED, TaskState.CANCELLED,
+        TaskState.CANCELLED, TaskState.CANCELLED,
+    )
+    assert snap.all_terminal
 
 
 # --------------------------------------------------------------------------- #

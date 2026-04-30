@@ -71,24 +71,30 @@ class GeneralSettings(_Section):
     nnn_default: int = 10000
     field_similarity_spacelight: str = "fingerprint-similarity"
     field_similarity_ftrees: str = "pharmacophore-similarity"
+    seeds_count: int = 1000000
+    seeds_cpu: int = 4
 
 
 class PathsSettings(_Section):
-    exe_spacelight_default: str = "/data/programs/BiosolveIT/spacelight-1.5.0-Linux-x64/spacelight"
-    exe_ftrees_default: str = "/data/programs/BiosolveIT/ftrees-6.13.0-Linux-x64/ftrees"
+    exe_spacelight_default: str = "/data/programs/BiosolveIT/spacelight-2.0.0-Linux-x64/spacelight"
+    exe_ftrees_default: str = "/data/programs/BiosolveIT/ftrees-7.0.0-Linux-x64/ftrees"
     scratch_default: str = "/wrk"
-    spaces_dir_default: str = "/data/programs/BiosolveIT/spaces"
+    spaces_dir_default: str = "/data/programs/BiosolveIT/spaces_new"
     spaces_file_default: str = (
-        "/data/programs/BiosolveIT/spaces/REALSpace_70bn_2024-09.space"
+        "/data/programs/BiosolveIT/spaces_new/REALSpace_83bn_2025-09.space"
     )
     seeds_dir_default: str = "/data/programs/BiosolveIT/spaces_seeds"
     seeds_file_default: str = (
-        "/data/programs/BiosolveIT/spaces_seeds"
+        "/data/programs/BiosolveIT/spaces_seeds/"
         "Enamine_Diverse_REAL_drug-like_48.2M_cxsmiles.cxsmiles.bz2"
     )
     exe_clustering_default: str | None = None  # resolved at install/use
     schrodinger_run: str = "$SCHRODINGER/run"
     export_poses_script: str | None = None  # path to legacy export_poses.py
+    # Absolute path to the directory containing ``remote/{train,predict,...}``
+    # on a filesystem visible to compute nodes. Set by ``install_spacehasten``
+    # and used by ``Settings.remote_script_path``.
+    spacehasten_src_dir: str | None = None
 
 
 class SlurmSettings(_Section):
@@ -189,6 +195,26 @@ class Settings(BaseModel):
         for canonical, (_ini_name, model_cls) in _SECTIONS.items():
             kwargs[canonical] = model_cls.model_validate(_coerce(model_cls, merged[canonical]))
         return cls(**kwargs)
+
+    def remote_script_path(self, name: str) -> Path:
+        """Return the absolute path to ``remote/<name>.py`` on shared storage.
+
+        Compute-node tasks invoke remote scripts as
+        ``python3 <abs path>`` rather than ``python3 -m`` so they do not
+        depend on the orchestrator's package layout being importable
+        inside the chemprop / fpsim2 conda environments.
+
+        When ``paths.spacehasten_src_dir`` is not explicitly configured,
+        the directory is auto-detected from the installed package location
+        (i.e. the parent of ``spacehasten/__init__.py``).
+        """
+        src_dir = self.paths.spacehasten_src_dir
+        if not src_dir:
+            # Auto-detect from package location.
+            import spacehasten as _pkg
+
+            src_dir = str(Path(_pkg.__file__).resolve().parent)
+        return Path(src_dir) / "remote" / f"{name}.py"
 
     def dump_toml(self, path: Path) -> None:
         payload: dict[str, Any] = {}

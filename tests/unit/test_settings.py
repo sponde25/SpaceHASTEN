@@ -121,3 +121,19 @@ def test_validate_install_returns_errors_not_raises() -> None:
     assert isinstance(errors, list)
     # On a dev box without chemprop / spacelight, errors will be present;
     # we only assert the call succeeds.
+
+
+def test_remote_script_path_raises_when_unset() -> None:
+    """``remote_script_path`` must fail clearly if ``spacehasten_src_dir`` is empty."""
+    s = Settings()
+    assert s.paths.spacehasten_src_dir is None
+    with pytest.raises(ValueError, match="spacehasten_src_dir"):
+        s.remote_script_path("train")
+
+
+def test_remote_script_path_returns_expected_path(tmp_path: Path) -> None:
+    from spacehasten.config.settings import PathsSettings
+
+    s = Settings(paths=PathsSettings(spacehasten_src_dir=str(tmp_path)))
+    assert s.remote_script_path("train") == tmp_path / "remote" / "train.py"
+    assert s.remote_script_path("predict") == tmp_path / "remote" / "predict.py"

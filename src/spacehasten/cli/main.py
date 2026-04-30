@@ -59,6 +59,7 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     _add_init(sub)
+    _add_pick_seeds(sub)
     _add_import_seeds(sub)
     _add_train(sub)
     _add_predict(sub)
@@ -75,9 +76,34 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _add_init(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    p = sub.add_parser("init", help="Bootstrap a fresh workspace skeleton.")
-    p.add_argument("--name", default=None, help="Workspace name (default: db parent dir name).")
+    p = sub.add_parser("init", help="Bootstrap a fresh workspace and create an empty .dbsh.")
+    p.add_argument("path", type=Path, help="Directory to initialise (will be created if needed).")
+    p.add_argument("--name", default=None, help="Project name (default: directory name).")
     p.set_defaults(func=_cmd_init)
+
+
+def _add_pick_seeds(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    p = sub.add_parser(
+        "pick-seeds",
+        help="Sample and canonicalize seeds from a large collection file.",
+    )
+    p.add_argument(
+        "--seeds-file", type=Path, default=None,
+        help="Path to seed collection (bz2/tsv). Default from settings.",
+    )
+    p.add_argument(
+        "--output", "-o", type=Path, required=True,
+        help="Output .smi file path.",
+    )
+    p.add_argument(
+        "--n-seeds", type=int, default=None,
+        help="Number of seeds to sample (default: from settings, typically 1000000).",
+    )
+    p.add_argument(
+        "--cores", type=int, default=None,
+        help="Number of local cores for RDKit canonicalization (default: from settings).",
+    )
+    p.set_defaults(func=_cmd_pick_seeds)
 
 
 def _add_import_seeds(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -227,16 +253,39 @@ def _add_verify(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> Non
 
 
 def _cmd_init(args: argparse.Namespace) -> int:
-    if args.db is None:
-        raise SystemExit("error: --db is required")
-    root = Path(args.db).parent
+    root = Path(args.path).resolve()
     name = args.name or root.name
-    WorkDir.bootstrap(root, name=name)
+    workdir = WorkDir.bootstrap(root, name=name)
+    setup_logging(workdir, args)
+    logger.info("Workspace initialised: %s", root)
     print(f"Initialised workspace at {root}")
     return 0
 
 
+def _cmd_pick_seeds(args: argparse.Namespace) -> int:
+    from spacehasten.stages.pick_seeds import pick_seeds
+
+    workdir = workdir_from_args(args)
+    setup_logging(workdir, args)
+    settings = settings_from_args(args)
+
+    seeds_file = args.seeds_file or Path(settings.paths.seeds_file_default)
+    n_seeds = args.n_seeds or settings.general.seeds_count
+    cores = args.cores or settings.general.seeds_cpu
+
+    n = pick_seeds(
+        seeds_file=seeds_file,
+        output=args.output,
+        n_seeds=n_seeds,
+        n_cores=cores,
+    )
+    print(f"Wrote {n} seeds to {args.output}")
+    return 0
+
+
 def _cmd_import_seeds(args: argparse.Namespace) -> int:
+    from spacehasten.core.db import Database
+
     workdir = workdir_from_args(args)
     workdir.logs_dir().mkdir(parents=True, exist_ok=True)
     setup_logging(workdir, args)
@@ -249,7 +298,7 @@ def _cmd_import_seeds(args: argparse.Namespace) -> int:
     )
     scheduler = scheduler_from_args(args, settings) if args.auto_train else None
 
-    with open_db(args) as db:
+    with Database(workdir.dbsh()) as db:
         n = seeds.import_seeds(
             db,
             workdir,
@@ -412,6 +461,7 @@ def _cmd_export_poses(args: argparse.Namespace) -> int:
 
 def _cmd_archive_create(args: argparse.Namespace) -> int:
     workdir = workdir_from_args(args)
+    setup_logging(workdir, args)
     out = archive.archive_create(workdir, bundle=args.bundle)
     print(f"Created archive {out}")
     return 0
@@ -433,6 +483,7 @@ def _cmd_archive_restore(args: argparse.Namespace) -> int:
 
 def _cmd_archive_clean(args: argparse.Namespace) -> int:
     workdir = workdir_from_args(args)
+    setup_logging(workdir, args)
     n = archive.archive_clean(workdir)
     print(f"Removed {n} regenerable directories")
     return 0
@@ -440,6 +491,7 @@ def _cmd_archive_clean(args: argparse.Namespace) -> int:
 
 def _cmd_status(args: argparse.Namespace) -> int:
     workdir = workdir_from_args(args)
+    setup_logging(workdir, args)
     manifest_path = workdir.manifest_path()
     if not manifest_path.exists():
         raise SystemExit(f"error: no manifest at {manifest_path}")

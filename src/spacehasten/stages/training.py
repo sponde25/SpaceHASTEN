@@ -32,6 +32,22 @@ _DEFAULT_TRAIN_COMMAND: tuple[str, ...] = (
     "-m",
     "spacehasten.remote.train",
 )
+"""Legacy fallback command. Production runs derive the prefix from
+``Settings.remote_script_path('train')`` so compute nodes do not need
+``spacehasten`` importable in the chemprop conda env."""
+
+
+def _default_train_command(settings: Settings) -> tuple[str, ...]:
+    """Resolve the default ``train`` command prefix from ``settings``.
+
+    Falls back to the legacy ``-m spacehasten.remote.train`` form only
+    when ``paths.spacehasten_src_dir`` is unset (e.g. in unit tests that
+    do not configure it).
+    """
+    try:
+        return ("python3", str(settings.remote_script_path("train")))
+    except ValueError:
+        return _DEFAULT_TRAIN_COMMAND
 
 
 def _build_train_command(
@@ -64,7 +80,12 @@ def _build_train_command(
         "--max-lr", str(g.train_max_lr),
         "--final-lr", str(g.train_final_lr),
     ]
-    return " ".join(parts)
+    cmd = " ".join(parts)
+    return (
+        f'echo "Starting chemprop training (csv={csv_path.name}, model_dir={model_dir.name})"\n'
+        f'{cmd}\n'
+        f'echo "Training complete"'
+    )
 
 
 def _write_training_csv(rows: Sequence[tuple[str, float]], csv_path: Path) -> None:
@@ -81,7 +102,7 @@ def train(
     settings: Settings,
     *,
     cutoff: float = 10.0,
-    train_command_prefix: Sequence[str] = _DEFAULT_TRAIN_COMMAND,
+    train_command_prefix: Sequence[str] | None = None,
 ) -> int:
     """Run one chemprop training round.
 
@@ -124,7 +145,12 @@ def train(
         if line
     ]
 
-    command = _build_train_command(csv_path, model_dir, settings, train_command_prefix)
+    prefix = (
+        train_command_prefix
+        if train_command_prefix is not None
+        else _default_train_command(settings)
+    )
+    command = _build_train_command(csv_path, model_dir, settings, prefix)
 
     job = ArrayJob(
         name=f"train_v{next_version}",
@@ -141,15 +167,19 @@ def train(
     logger.info("Submitted training job %s (version %d)", handle.job_id, next_version)
     result = scheduler.wait(handle)
     if not result.success:
+        from spacehasten.scheduler.diagnostics import tail_logs
         raise RuntimeError(
             f"training job {handle.job_id} failed; failed task indices: "
-            f"{result.failed_indices}"
+            f"{result.failed_indices}\n"
+            f"--- tail of task logs ---\n{tail_logs(handle)}"
         )
 
     bin_path = model_dir / "model_0" / "pytorch_model.bin"
     if not bin_path.exists():
+        from spacehasten.scheduler.diagnostics import tail_logs
         raise RuntimeError(
-            f"training job reported success but {bin_path} is missing"
+            f"training job reported success but {bin_path} is missing\n"
+            f"--- tail of task logs ---\n{tail_logs(handle)}"
         )
 
     # Compatibility shim: leave a row in the legacy ``models`` table with

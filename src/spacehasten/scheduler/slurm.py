@@ -113,7 +113,7 @@ class SlurmScheduler(Scheduler):
         rendered.path.write_text(rendered.text, encoding="utf-8")
         rendered.path.chmod(0o755)
 
-        cmd = ["sbatch", "--parsable", str(rendered.path)]
+        cmd = ["sbatch", "--parsable", "--export=NONE", str(rendered.path)]
         logger.debug("submitting slurm job: %s", " ".join(cmd))
         completed = subprocess.run(
             cmd,
@@ -148,11 +148,9 @@ class SlurmScheduler(Scheduler):
             "sacct",
             "-j",
             handle.job_id,
-            "-X",
             "--format=JobID,State,ExitCode",
             "-P",
             "--noheader",
-            "-n",
         ]
         completed = subprocess.run(
             cmd,
@@ -175,6 +173,8 @@ class SlurmScheduler(Scheduler):
         expanded the array) are treated as ``PENDING``.
         """
         states: dict[int, TaskState] = {}
+        # Track a "bulk state" for ranges that haven't been expanded yet.
+        bulk_state: TaskState | None = None
         for raw in sacct_output.splitlines():
             line = raw.strip()
             if not line:
@@ -186,18 +186,25 @@ class SlurmScheduler(Scheduler):
             match = _JOBID_RE.match(this_jobid)
             if match is None or match["job"] != job_id:
                 continue
-            task_field = match["task"]
-            if task_field.startswith("["):
-                # Pending range like "12345_[3-7]" — applies to every
-                # listed task; mark all unseen as PENDING.
-                continue
-            task_idx = int(task_field)
             # Strip "CANCELLED by 1234" → "CANCELLED".
             base_state = raw_state.split(" ", 1)[0].strip().upper()
-            states[task_idx] = _SACCT_STATE_MAP.get(base_state, TaskState.FAILED)
+            resolved = _SACCT_STATE_MAP.get(base_state, TaskState.FAILED)
 
+            task_field = match["task"]
+            if task_field.startswith("["):
+                # Range like "12345_[1-100]" — applies to all tasks in range.
+                # If it's a terminal state (e.g. CANCELLED), record it as bulk.
+                if resolved.is_terminal:
+                    bulk_state = resolved
+                continue
+            task_idx = int(task_field)
+            states[task_idx] = resolved
+
+        # Fill in missing tasks: use bulk_state if set (e.g. whole array
+        # cancelled before expansion), otherwise PENDING.
+        default = bulk_state if bulk_state is not None else TaskState.PENDING
         return tuple(
-            states.get(i, TaskState.PENDING) for i in range(1, array_size + 1)
+            states.get(i, default) for i in range(1, array_size + 1)
         )
 
     def cancel(self, handle: ArrayHandle) -> None:

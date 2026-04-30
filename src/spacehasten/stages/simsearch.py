@@ -66,6 +66,20 @@ _DEFAULT_PREDICT_COMMAND: Final[tuple[str, ...]] = (
 )
 
 
+def _default_prop_filter_command(settings: Settings) -> tuple[str, ...]:
+    try:
+        return ("python3", str(settings.remote_script_path("prop_filter")))
+    except ValueError:
+        return _DEFAULT_PROP_FILTER_COMMAND
+
+
+def _default_predict_command(settings: Settings) -> tuple[str, ...]:
+    try:
+        return ("python3", str(settings.remote_script_path("predict")))
+    except ValueError:
+        return _DEFAULT_PREDICT_COMMAND
+
+
 # --------------------------------------------------------------------------- #
 # Phase A — search                                                            #
 # --------------------------------------------------------------------------- #
@@ -121,8 +135,11 @@ def _build_search_command(
     # by python here so the local scheduler / sbatch sees the literal.
     return (
         f'query=$(sed -n "${{TASK_ID}}p" {queries_file} | awk \'{{print $1}}\')\n'
+        f'echo "[task ${{TASK_ID}}] query: $query"\n'
         f'{sl_cmd}\n'
+        f'echo "[task ${{TASK_ID}}] SpaceLight done"\n'
         f'{ft_cmd}\n'
+        f'echo "[task ${{TASK_ID}}] FTrees done"\n'
     )
 
 
@@ -261,7 +278,15 @@ def _build_control_command(
         "--accelerator", g.pred_accelerator,
         "--devices", g.pred_devices,
     ]
-    return " ".join(pf_parts) + "\n" + " ".join(pred_parts) + "\n"
+    pf_cmd = " ".join(pf_parts)
+    pred_cmd = " ".join(pred_parts)
+    return (
+        f'echo "[task ${{TASK_ID}}] Property filter"\n'
+        f'{pf_cmd}\n'
+        f'echo "[task ${{TASK_ID}}] Predicting"\n'
+        f'{pred_cmd}\n'
+        f'echo "[task ${{TASK_ID}}] Done"\n'
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -359,8 +384,8 @@ def simsearch(
     ftrees_adapter: FTreesAdapter | None = None,
     search_command_template: str | None = None,
     control_command_template: str | None = None,
-    prop_filter_command_prefix: Sequence[str] = _DEFAULT_PROP_FILTER_COMMAND,
-    predict_command_prefix: Sequence[str] = _DEFAULT_PREDICT_COMMAND,
+    prop_filter_command_prefix: Sequence[str] | None = None,
+    predict_command_prefix: Sequence[str] | None = None,
 ) -> int:
     """Run one full simsearch cycle.
 
@@ -470,9 +495,11 @@ def simsearch(
     logger.info("Submitted search job %s (%d queries)", handle_a.job_id, len(queries))
     res_a = scheduler.wait(handle_a)
     if not res_a.success:
+        from spacehasten.scheduler.diagnostics import tail_logs
         raise RuntimeError(
             f"search job {handle_a.job_id} failed; failed task indices: "
-            f"{res_a.failed_indices}"
+            f"{res_a.failed_indices}\n"
+            f"--- tail of task logs ---\n{tail_logs(handle_a)}"
         )
 
     # --- Phase B aggregate & control ------------------------------------- #
@@ -509,6 +536,16 @@ def simsearch(
         shutil.rmtree(local_model_dir)
     shutil.copytree(src_model_dir, local_model_dir)
 
+    pf_prefix = (
+        prop_filter_command_prefix
+        if prop_filter_command_prefix is not None
+        else _default_prop_filter_command(settings)
+    )
+    pred_prefix = (
+        predict_command_prefix
+        if predict_command_prefix is not None
+        else _default_predict_command(settings)
+    )
     control_body = (
         control_command_template
         if control_command_template is not None
@@ -516,8 +553,8 @@ def simsearch(
             control_dir=control_dir,
             model_dir=Path(local_model_dir.name),
             settings=settings,
-            prop_filter_prefix=prop_filter_command_prefix,
-            predict_prefix=predict_command_prefix,
+            prop_filter_prefix=pf_prefix,
+            predict_prefix=pred_prefix,
         )
     )
 
@@ -538,9 +575,11 @@ def simsearch(
     )
     res_b = scheduler.wait(handle_b)
     if not res_b.success:
+        from spacehasten.scheduler.diagnostics import tail_logs
         raise RuntimeError(
             f"control job {handle_b.job_id} failed; failed task indices: "
-            f"{res_b.failed_indices}"
+            f"{res_b.failed_indices}\n"
+            f"--- tail of task logs ---\n{tail_logs(handle_b)}"
         )
 
     # --- Phase C: ingest ------------------------------------------------- #

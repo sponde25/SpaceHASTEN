@@ -74,7 +74,8 @@ def test_required_args_validated(argv: list[str]) -> None:
 def test_each_subcommand_parses_minimally(tmp_path) -> None:  # type: ignore[no-untyped-def]
     """Smoke: every subcommand parses a minimal valid argv without raising."""
     parser = _build_parser()
-    db = tmp_path / "ws" / "ws.dbsh"
+    ws = tmp_path / "ws"
+    ws.mkdir()
     smi = tmp_path / "seeds.smi"
     smi.write_text("CCO seed-1\n")
     dock_in = tmp_path / "dock.in"
@@ -85,24 +86,24 @@ def test_each_subcommand_parses_minimally(tmp_path) -> None:  # type: ignore[no-
     archive_path.write_bytes(b"")
 
     samples: list[list[str]] = [
-        ["--db", str(db), "init"],
-        ["--db", str(db), "import-seeds",
+        ["init", str(ws)],
+        ["-w", str(ws), "import-seeds",
          "--smi", str(smi), "--dock-params", str(dock_in),
          "--dock-grid", str(grid)],
-        ["--db", str(db), "train"],
-        ["--db", str(db), "predict"],
-        ["--db", str(db), "search", "--source", "docked", "--top-n", "10"],
-        ["--db", str(db), "dock", "--top-n", "10"],
-        ["--db", str(db), "cluster"],
-        ["--db", str(db), "screen"],
-        ["--db", str(db), "export", "csv", "--cutoff", "-7", "--output", "out.csv"],
-        ["--db", str(db), "export", "poses", "--cutoff", "-7", "--output", "out.mae"],
-        ["--db", str(db), "archive", "create"],
+        ["-w", str(ws), "train"],
+        ["-w", str(ws), "predict"],
+        ["-w", str(ws), "search", "--source", "docked", "--top-n", "10"],
+        ["-w", str(ws), "dock", "--top-n", "10"],
+        ["-w", str(ws), "cluster"],
+        ["-w", str(ws), "screen"],
+        ["-w", str(ws), "export", "csv", "--cutoff", "-7", "--output", "out.csv"],
+        ["-w", str(ws), "export", "poses", "--cutoff", "-7", "--output", "out.mae"],
+        ["-w", str(ws), "archive", "create"],
         ["archive", "extract", "--archive", str(archive_path), "--target", str(tmp_path / "t1")],
         ["archive", "restore", "--archive", str(archive_path), "--target", str(tmp_path / "t2")],
-        ["--db", str(db), "archive", "clean"],
-        ["--db", str(db), "status"],
-        ["--db", str(db), "resume"],
+        ["-w", str(ws), "archive", "clean"],
+        ["-w", str(ws), "status"],
+        ["-w", str(ws), "resume"],
     ]
     for argv in samples:
         ns = parser.parse_args(argv)
@@ -110,9 +111,11 @@ def test_each_subcommand_parses_minimally(tmp_path) -> None:  # type: ignore[no-
 
 
 def test_init_creates_workspace(tmp_path) -> None:  # type: ignore[no-untyped-def]
-    db = tmp_path / "ws" / "ws.dbsh"
-    rc = main(["--db", str(db), "init"])
+    ws = tmp_path / "ws"
+    rc = main(["init", str(ws)])
     assert rc == 0
-    assert (tmp_path / "ws" / "manifest.json").exists()
-    assert (tmp_path / "ws" / "logs").is_dir()
-    assert (tmp_path / "ws" / "models").is_dir()
+    assert (ws / "manifest.json").exists()
+    assert (ws / "logs").is_dir()
+    assert (ws / "models").is_dir()
+    # .dbsh is NOT created until import-seeds
+    assert not (ws / "ws.dbsh").exists()

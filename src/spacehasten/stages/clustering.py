@@ -35,6 +35,14 @@ _DEFAULT_CLUSTER_COMMAND: tuple[str, ...] = (
     "-m",
     "spacehasten.remote.cluster",
 )
+"""Legacy fallback prefix; production uses ``Settings.remote_script_path``."""
+
+
+def _default_cluster_command(settings: Settings) -> tuple[str, ...]:
+    try:
+        return ("python3", str(settings.remote_script_path("cluster")))
+    except ValueError:
+        return _DEFAULT_CLUSTER_COMMAND
 
 
 def _stream_smiles_to_gzip(db: Database, out_path: Path) -> int:
@@ -86,7 +94,12 @@ def _build_cluster_command(
         "--processes",
         str(cpus),
     ]
-    return " ".join(parts)
+    cmd = " ".join(parts)
+    return (
+        f'echo "Starting clustering ({input_smi.name}, cpus={cpus})"\n'
+        f'{cmd}\n'
+        f'echo "Clustering complete"'
+    )
 
 
 def cluster(
@@ -95,7 +108,7 @@ def cluster(
     scheduler: Scheduler,
     settings: Settings,
     *,
-    cluster_command_prefix: Sequence[str] = _DEFAULT_CLUSTER_COMMAND,
+    cluster_command_prefix: Sequence[str] | None = None,
 ) -> int:
     """Run one sphere-exclusion clustering round.
 
@@ -133,8 +146,13 @@ def cluster(
     ]
 
     cpus = max(1, int(settings.general.cpu_count_clustering or 1))
+    prefix = (
+        cluster_command_prefix
+        if cluster_command_prefix is not None
+        else _default_cluster_command(settings)
+    )
     command = _build_cluster_command(
-        input_smi, output_csv, cpus, cluster_command_prefix
+        input_smi, output_csv, cpus, prefix
     )
 
     job = ArrayJob(
@@ -151,13 +169,19 @@ def cluster(
     logger.info("Submitted clustering job %s (%d compounds)", handle.job_id, n_compounds)
     result = scheduler.wait(handle)
     if not result.success:
+        from spacehasten.scheduler.diagnostics import tail_logs
         raise RuntimeError(
             f"clustering job {handle.job_id} failed; failed task indices: "
-            f"{result.failed_indices}"
+            f"{result.failed_indices}\n"
+            f"--- tail of task logs ---\n{tail_logs(handle)}"
         )
 
     if not output_csv.exists():
-        raise FileNotFoundError(f"clustering job did not produce {output_csv}")
+        from spacehasten.scheduler.diagnostics import tail_logs
+        raise FileNotFoundError(
+            f"clustering job did not produce {output_csv}\n"
+            f"--- tail of task logs ---\n{tail_logs(handle)}"
+        )
 
     rows = _ingest_clustering_csv(output_csv)
     if not rows:

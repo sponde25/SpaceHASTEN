@@ -74,6 +74,7 @@ def _build_dock_command_body(settings: Settings, dock_dir: Path) -> str:
         f"{scratch_root}/{user}/dock_{iter_token}_chunk_${{TASK_ID}}"
     )
     lines: list[str] = [
+        'echo "[task ${TASK_ID}] Starting docking chunk_${TASK_ID}"',
         '$SCHRODINGER/jsc local-server-start',
         'curdir=$(pwd)',
         f'scratch_dir="{scratch_path}"',
@@ -88,19 +89,24 @@ def _build_dock_command_body(settings: Settings, dock_dir: Path) -> str:
     if feature_flags:
         lines.append(f'export SCHRODINGER_FEATURE_FLAGS="{feature_flags}"')
     lines += [
+        'echo "[task ${TASK_ID}] Building phase database"',
         '$SCHRODINGER/pipeline -prog phase_db chunk_${TASK_ID}.inp'
         ' -OVERWRITE -WAIT -NOJOBID -NJOBS 1',
+        'echo "[task ${TASK_ID}] Exporting structures"',
         '$SCHRODINGER/phase_database $(pwd)/chunk_${TASK_ID}.phdb export'
         ' -omae $(pwd)/chunk_${TASK_ID} -get 1 -limit 99999999 -WAIT',
         'rm -fr $(pwd)/chunk_${TASK_ID}.phdb',
+        'echo "[task ${TASK_ID}] Running Glide docking"',
         '$SCHRODINGER/glide -new -OVERWRITE -WAIT -NJOBS 1'
         ' -HOST localhost:1 glide_chunk_${TASK_ID}.in',
+        'echo "[task ${TASK_ID}] Packaging results"',
         'rm -f glide_grid.zip',
         'tar --exclude=results-chunk_${TASK_ID}.tar.gz'
         ' -czf results-chunk_${TASK_ID}.tar.gz .',
         'mv results-chunk_${TASK_ID}.tar.gz "$curdir/"',
         'cd "$curdir"',
         'rm -fr "$scratch_dir"',
+        'echo "[task ${TASK_ID}] Done"',
     ]
     return "\n".join(lines)
 
@@ -246,9 +252,11 @@ def dock(
     logger.info("Submitted docking job %s (%d tasks)", handle.job_id, n_chunks)
     result = scheduler.wait(handle)
     if not result.success:
+        from spacehasten.scheduler.diagnostics import tail_logs
         raise RuntimeError(
             f"docking job {handle.job_id} failed; failed task indices: "
-            f"{result.failed_indices}"
+            f"{result.failed_indices}\n"
+            f"--- tail of task logs ---\n{tail_logs(handle)}"
         )
 
     extract_root = _extract_results(dock_dir)

@@ -26,7 +26,7 @@ from typing import Final, Literal
 
 SCHEMA_STATEMENTS: Final[tuple[str, ...]] = (
     (
-        "CREATE TABLE data ("
+        "CREATE TABLE IF NOT EXISTS data ("
         "spacehastenid INTEGER PRIMARY KEY,"
         "reghash TEXT,"
         "smiles TEXT,"
@@ -41,12 +41,12 @@ SCHEMA_STATEMENTS: Final[tuple[str, ...]] = (
         "simsearch_cycle INTEGER"
         ")"
     ),
-    "CREATE TABLE docking_param (dock_param BLOB)",
-    "CREATE TABLE docking_grid (dock_grid BLOB)",
-    "CREATE TABLE models (model_version INTEGER UNIQUE,model_tar BLOB)",
-    "CREATE TABLE properties (property TEXT,is_double INTEGER,min_limit TEXT,max_limit TEXT)",
-    "CREATE TABLE clusters(spacehastenid INTEGER PRIMARY KEY,clusterid INTEGER)",
-    "CREATE INDEX idx_reghash ON data(reghash)",
+    "CREATE TABLE IF NOT EXISTS docking_param (dock_param BLOB)",
+    "CREATE TABLE IF NOT EXISTS docking_grid (dock_grid BLOB)",
+    "CREATE TABLE IF NOT EXISTS models (model_version INTEGER UNIQUE,model_tar BLOB)",
+    "CREATE TABLE IF NOT EXISTS properties (property TEXT,is_double INTEGER,min_limit TEXT,max_limit TEXT)",
+    "CREATE TABLE IF NOT EXISTS clusters(spacehastenid INTEGER PRIMARY KEY,clusterid INTEGER)",
+    "CREATE INDEX IF NOT EXISTS idx_reghash ON data(reghash)",
 )
 
 
@@ -248,6 +248,15 @@ class Database:
         for stmt in SCHEMA_STATEMENTS:
             c.execute(stmt)
         self._conn.commit()
+
+    # ----- lookups -----
+
+    def reghash_exists(self, reghash: str) -> bool:
+        """Return True if a row with this reghash is already in the data table."""
+        row = self._conn.execute(
+            "SELECT 1 FROM data WHERE reghash = ? LIMIT 1", (reghash,)
+        ).fetchone()
+        return row is not None
 
     # ----- inserts -----
 

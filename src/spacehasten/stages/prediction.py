@@ -34,6 +34,14 @@ _DEFAULT_PREDICT_COMMAND: tuple[str, ...] = (
     "-m",
     "spacehasten.remote.predict",
 )
+"""Legacy fallback prefix; production uses ``Settings.remote_script_path``."""
+
+
+def _default_predict_command(settings: Settings) -> tuple[str, ...]:
+    try:
+        return ("python3", str(settings.remote_script_path("predict")))
+    except ValueError:
+        return _DEFAULT_PREDICT_COMMAND
 
 
 def _chunk_index_filename(prefix: str, index: int) -> str:
@@ -102,7 +110,12 @@ def _build_predict_command(
         "--accelerator", g.pred_accelerator,
         "--devices", g.pred_devices,
     ]
-    return " ".join(parts)
+    cmd = " ".join(parts)
+    return (
+        f'echo "[task ${{TASK_ID}}] Predicting chunk ${{TASK_ID}}"\n'
+        f'{cmd}\n'
+        f'echo "[task ${{TASK_ID}}] Prediction done"'
+    )
 
 
 def _ingest_predictions(
@@ -135,7 +148,7 @@ def predict_undocked(
     *,
     model_version: int,
     chunk_size: int = 12345,
-    predict_command_prefix: Sequence[str] = _DEFAULT_PREDICT_COMMAND,
+    predict_command_prefix: Sequence[str] | None = None,
 ) -> int:
     """Predict ``pred_score`` for every undocked row and update the DB.
 
@@ -184,7 +197,10 @@ def predict_undocked(
     ]
 
     command = _build_predict_command(
-        predict_dir, model_dir, settings, predict_command_prefix
+        predict_dir, model_dir, settings,
+        predict_command_prefix
+        if predict_command_prefix is not None
+        else _default_predict_command(settings),
     )
 
     job = ArrayJob(
@@ -205,9 +221,11 @@ def predict_undocked(
     )
     result = scheduler.wait(handle)
     if not result.success:
+        from spacehasten.scheduler.diagnostics import tail_logs
         raise RuntimeError(
             f"prediction job {handle.job_id} failed; failed task indices: "
-            f"{result.failed_indices}"
+            f"{result.failed_indices}\n"
+            f"--- tail of task logs ---\n{tail_logs(handle)}"
         )
 
     pairs = _ingest_predictions(predict_dir, n_chunks)

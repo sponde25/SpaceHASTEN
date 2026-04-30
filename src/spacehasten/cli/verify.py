@@ -184,7 +184,7 @@ def _check_pigz() -> str:
 
 def _check_scheduler(workdir: WorkDir, scheduler: Scheduler) -> str:
     """Submit a trivial array of size 1 and wait for completion."""
-    smoke_dir = workdir.root / "scheduler_smoke"
+    smoke_dir = workdir.root / "scheduler"
     smoke_dir.mkdir(parents=True, exist_ok=True)
     job = ArrayJob(
         name="verify_smoke",
@@ -207,9 +207,10 @@ def _check_scheduler(workdir: WorkDir, scheduler: Scheduler) -> str:
 def _check_clustering(
     workdir: WorkDir, scheduler: Scheduler, settings: Settings
 ) -> str:
-    cdir = workdir.root / "clustering_smoke"
+    """Cluster five hand-picked SMILES through the clustering stage."""
+    cdir = workdir.root / "clustering"
     cdir.mkdir(parents=True, exist_ok=True)
-    db_path = cdir / "verify_clustering.dbsh"
+    db_path = cdir / "clustering.dbsh"
     if db_path.exists():
         db_path.unlink()
     db = Database(db_path)
@@ -224,7 +225,7 @@ def _check_clustering(
     for i, (smi, name) in enumerate(smiles_pool):
         db.insert_seed_undocked(f"hv{i}", smi, name)
     db.commit()
-    sub_workdir = WorkDir(root=cdir)
+    sub_workdir = WorkDir.bootstrap(cdir, name="clustering")
     n = _clustering.cluster(db, sub_workdir, scheduler, settings)
     db.close()
     if n < 1:
@@ -232,32 +233,24 @@ def _check_clustering(
     return f"clustered {n} compounds"
 
 
-def _check_docking_and_training(
+def _check_docking(
     workdir: WorkDir,
     scheduler: Scheduler,
     settings: Settings,
     fixtures_dir: Path | None,
-    *,
-    do_training: bool,
-) -> tuple[str, str | None]:
-    """Run the docking and (optionally) training stage.
-
-    Returns ``(docking_msg, training_msg_or_None)``. We bundle them into
-    one orchestration to share a ``.dbsh`` (training reads dock_score
-    from the same DB).
-    """
+) -> str:
+    """Smoke-test the Glide docking pipeline over ``examples.smi``."""
     smi = _resolve_fixture("examples.smi", fixtures_dir)
     inp = _resolve_fixture("test_dock.in", fixtures_dir)
     grid = _resolve_fixture("grid-test_dock.zip", fixtures_dir)
 
-    ddir = workdir.root / "dock_smoke"
+    ddir = workdir.root / "docking"
     ddir.mkdir(parents=True, exist_ok=True)
-    db_path = ddir / "verify_dock.dbsh"
+    db_path = ddir / "docking.dbsh"
     if db_path.exists():
         db_path.unlink()
     db = Database(db_path)
-    sub_workdir = WorkDir(root=ddir)
-    sub_workdir.logs_dir().mkdir(parents=True, exist_ok=True)
+    sub_workdir = WorkDir.bootstrap(ddir, name="docking")
 
     n = _seeds.import_seeds(
         db,
@@ -281,38 +274,135 @@ def _check_docking_and_training(
             "SELECT spacehastenid FROM data WHERE dock_score IS NOT NULL"
         )
     )
-    if not docked:
-        db.close()
-        raise RuntimeError("docking succeeded but no dock_score values were written")
-    dock_msg = f"iter={iteration}; {len(docked)} compounds with dock_score"
-
-    train_msg: str | None = None
-    if do_training:
-        version = _training.train(
-            db, sub_workdir, scheduler, settings, cutoff=10.0,
-        )
-        model_path = sub_workdir.model_dir(version) / "model_0" / "pytorch_model.bin"
-        if not model_path.exists():
-            db.close()
-            raise RuntimeError(f"training did not produce {model_path}")
-        train_msg = f"model_version={version} at {model_path}"
-
     db.close()
-    return dock_msg, train_msg
+    if not docked:
+        raise RuntimeError("docking succeeded but no dock_score values were written")
+    return f"iter={iteration}; {len(docked)} compounds with dock_score"
+
+
+def _ingest_example_csv(db: Database, csv_path: Path) -> int:
+    """Verify-only CSV-to-DB shim for the training check (Stage B.2.a).
+
+    Reads ``example.csv`` (legacy three-column format
+    ``smiles,smilesid,docking_score``, no header) and ingests each row
+    via :meth:`Database.insert_seed_docked`. Rows whose tautomer hash
+    cannot be computed are silently skipped (matches legacy
+    behaviour). Returns the number of rows inserted.
+    """
+    from spacehasten.core.molecules import tautomer_hash
+
+    inserted = 0
+    with csv_path.open("rt", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split(",")
+            if len(parts) < 3:
+                continue
+            smiles, smilesid, score_str = parts[0], parts[1], parts[2]
+            try:
+                score = float(score_str)
+            except ValueError:
+                continue
+            reghash = tautomer_hash(smiles)
+            if reghash is None:
+                continue
+            db.insert_seed_docked(reghash, smiles, smilesid, dock_score=score)
+            inserted += 1
+    db.commit()
+    return inserted
+
+
+def _maybe_warn_no_cuda(model_dir: Path) -> None:
+    """Emit a non-fatal CUDA warning by tailing chemprop's ``train.err`` log.
+
+    Mirrors the legacy ``verify_spacehasten.py`` behaviour. The training
+    stage writes ``train.err`` next to the model directory (lightning
+    logs go to stderr).
+    """
+    candidates = [
+        model_dir / "train.err",
+        model_dir / "model_0" / "train.err",
+        model_dir.parent / "train.err",
+    ]
+    for path in candidates:
+        if not path.exists():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if "GPU available: True" in text:
+            return
+        # Found a log without the GPU line — warn once.
+        print(
+            "WARNING: CUDA not available, training will be slower "
+            f"(checked {path})",
+            flush=True,
+        )
+        return
+    # No log found at all — quietly skip; do not fail.
+
+
+def _check_training(
+    workdir: WorkDir,
+    scheduler: Scheduler,
+    settings: Settings,
+    fixtures_dir: Path | None,
+) -> str:
+    """Train one chemprop model on ``example.csv`` (≈10k rows)."""
+    csv_path = _resolve_fixture("example.csv", fixtures_dir)
+
+    tdir = workdir.root / "training"
+    tdir.mkdir(parents=True, exist_ok=True)
+    db_path = tdir / "training.dbsh"
+    if db_path.exists():
+        db_path.unlink()
+    db = Database(db_path)
+    db.create_schema()
+    sub_workdir = WorkDir.bootstrap(tdir, name="training")
+
+    n_rows = _ingest_example_csv(db, csv_path)
+    if n_rows < 1:
+        db.close()
+        raise RuntimeError(f"no training rows parsed from {csv_path}")
+
+    version = _training.train(
+        db, sub_workdir, scheduler, settings, cutoff=10.0,
+    )
+    model_dir = sub_workdir.model_dir(version)
+    model_bin = model_dir / "model_0" / "pytorch_model.bin"
+    db.close()
+    if not model_bin.exists():
+        raise RuntimeError(f"training did not produce {model_bin}")
+
+    _maybe_warn_no_cuda(model_dir)
+    return f"ingested {n_rows} rows; model_version={version} at {model_bin}"
 
 
 def _check_biosolveit(
     workdir: WorkDir,
     settings: Settings,
     fixtures_dir: Path | None,
+    config_path: Path | None,
 ) -> str:
     """Run SpaceLight and FTrees once against the default chemical space."""
     space = settings.paths.spaces_file_default
     if not space or not Path(space).exists():
-        raise RuntimeError(f"default chemical space not found: {space!r}")
+        cfg_hint = (
+            f"--config {config_path}"
+            if config_path is not None
+            else "--config <path-to-spacehasten.ini>"
+        )
+        raise RuntimeError(
+            f"default chemical space not found: {space!r}; "
+            f"pass {cfg_hint} to point at a site config that defines "
+            "[Paths] spaces_file_default."
+        )
     query_smi = _resolve_fixture("example.smi", fixtures_dir)
 
-    bdir = workdir.root / "biosolveit_smoke"
+    bdir = workdir.root / "biosolveit"
     if bdir.exists():
         shutil.rmtree(bdir)
     bdir.mkdir(parents=True)
@@ -368,8 +458,66 @@ def _check_biosolveit(
 # --------------------------------------------------------------------------- #
 
 
+def _autodiscover_config(args: argparse.Namespace) -> Path | None:
+    """Resolve a ``spacehasten.ini`` location when ``--config`` is unset.
+
+    Order:
+
+    1. ``$SPACEHASTEN_INI``
+    2. ``<fixtures_dir>/spacehasten.ini`` (if ``--fixtures-dir`` set)
+    3. The directory above the resolved fixtures dir (an install root
+       containing both fixtures and config).
+    4. Repo root (walk up from this file to find ``pyproject.toml``).
+    5. Current working directory.
+    6. ``None`` — caller falls through to defaults.
+    """
+    import os
+
+    env_val = os.environ.get("SPACEHASTEN_INI")
+    if env_val:
+        candidate = Path(env_val).expanduser()
+        if candidate.exists():
+            return candidate
+
+    if args.fixtures_dir is not None:
+        fdir = Path(args.fixtures_dir).expanduser().resolve()
+        for cand in (fdir / "spacehasten.ini", fdir.parent / "spacehasten.ini"):
+            if cand.exists():
+                return cand
+
+    # Walk up from this file to the repo root (same heuristic as
+    # _resolve_fixture) and check for spacehasten.ini there.
+    here = Path(__file__).resolve().parent
+    for parent in (here, *here.parents):
+        if (parent / "pyproject.toml").exists():
+            cand = parent / "spacehasten.ini"
+            if cand.exists():
+                return cand
+            break
+
+    # Finally, check the current working directory.
+    cwd_cand = Path.cwd() / "spacehasten.ini"
+    if cwd_cand.exists():
+        return cwd_cand
+
+    return None
+
+
 def run_verify(args: argparse.Namespace) -> int:
     """Implement ``spacehasten verify``."""
+    # Auto-discover config when none was passed, before building Settings.
+    if getattr(args, "config", None) is None:
+        discovered = _autodiscover_config(args)
+        if discovered is not None:
+            print(f"[verify] auto-discovered config: {discovered}")
+            args.config = discovered
+        else:
+            print(
+                "[verify] WARNING: no --config and no spacehasten.ini "
+                "found via $SPACEHASTEN_INI or --fixtures-dir; using "
+                "package defaults (BioSolveIT defaults will likely be wrong)."
+            )
+
     settings = settings_from_args(args)
 
     # Pick a workdir. Default mirrors legacy: $HOME/SPACEHASTEN/VERIFY-<ver>.
@@ -395,40 +543,23 @@ def run_verify(args: argparse.Namespace) -> int:
     skip = set(args.skip or ())
     selected = [name for name in selected if name not in skip]
 
-    # Build the callback table. Docking and training share a DB so we
-    # treat them as a tuple here and split the message back out.
-    docking_msg_holder: dict[str, str] = {}
-
-    def _cb_docking() -> str:
-        do_train = "training" in selected
-        dock_msg, train_msg = _check_docking_and_training(
-            workdir, scheduler, settings, args.fixtures_dir, do_training=do_train,
-        )
-        if train_msg is not None:
-            docking_msg_holder["training"] = train_msg
-        return dock_msg
-
-    def _cb_training() -> str:
-        msg = docking_msg_holder.get("training")
-        if msg is None:
-            # Training was selected without docking; run docking implicitly.
-            dock_msg, train_msg = _check_docking_and_training(
-                workdir, scheduler, settings, args.fixtures_dir, do_training=True,
-            )
-            assert train_msg is not None
-            return f"(implicit docking ran first: {dock_msg}) {train_msg}"
-        return msg
+    config_path = getattr(args, "config", None)
 
     callbacks: dict[str, Callable[[], str]] = {
         "pigz": _check_pigz,
         "scheduler": lambda: _check_scheduler(workdir, scheduler),
         "clustering": lambda: _check_clustering(workdir, scheduler, settings),
-        "docking": _cb_docking,
-        "training": _cb_training,
-        "biosolveit": lambda: _check_biosolveit(workdir, settings, args.fixtures_dir),
+        "docking": lambda: _check_docking(
+            workdir, scheduler, settings, args.fixtures_dir,
+        ),
+        "training": lambda: _check_training(
+            workdir, scheduler, settings, args.fixtures_dir,
+        ),
+        "biosolveit": lambda: _check_biosolveit(
+            workdir, settings, args.fixtures_dir, config_path,
+        ),
     }
 
-    # Run docking before training so the shared-DB flow works without surprises.
     order = [c for c in CHECK_NAMES if c in selected]
     results = _run_checks(order, callbacks)
 

@@ -20,12 +20,12 @@ from spacehasten.workspace.layout import WorkDir
 
 @pytest.fixture
 def stub_workspace(tmp_path: Path) -> Path:
-    """Bootstrap a workspace and return the .dbsh path."""
+    """Bootstrap a workspace and return the workspace root."""
     root = tmp_path / "ws"
     WorkDir.bootstrap(root, name="ws")
     db_path = root / "ws.dbsh"
     db_path.write_bytes(b"")  # empty so Database(...) opens
-    return db_path
+    return root
 
 
 def _install_stage_stubs(
@@ -49,7 +49,7 @@ def test_screen_order_one_round(
     _install_stage_stubs(monkeypatch, calls)
 
     rc = cli_main.main([
-        "--db", str(stub_workspace),
+        "-w", str(stub_workspace),
         "--scheduler", "local",
         "screen",
         "--rounds", "1",
@@ -76,7 +76,7 @@ def test_screen_train_first_two_rounds(
     _install_stage_stubs(monkeypatch, calls)
 
     rc = cli_main.main([
-        "--db", str(stub_workspace),
+        "-w", str(stub_workspace),
         "--scheduler", "local",
         "screen",
         "--rounds", "2",
