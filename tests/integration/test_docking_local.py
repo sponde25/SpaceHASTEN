@@ -72,6 +72,7 @@ def test_dock_stage_local_stub(tmp_path: Path) -> None:
     _seed_db(db, n_predicted=12)
 
     settings = Settings()  # defaults
+    settings.paths.scratch_default = str(tmp_path / "scratch")
     scheduler = LocalScheduler()
 
     iteration = dock(
@@ -144,6 +145,7 @@ def test_dock_stage_clustering_strategy(tmp_path: Path) -> None:
     db.commit()
 
     settings = Settings()
+    settings.paths.scratch_default = str(tmp_path / "scratch")
     scheduler = LocalScheduler()
     iteration = dock(
         db,
@@ -179,6 +181,7 @@ def test_dock_stage_no_candidates_raises(tmp_path: Path) -> None:
     db.commit()
 
     settings = Settings()
+    settings.paths.scratch_default = str(tmp_path / "scratch")
     scheduler = LocalScheduler()
     try:
         dock(
@@ -206,6 +209,7 @@ def test_dock_stage_persists_a_valid_results_tar(tmp_path: Path) -> None:
     _seed_db(db, n_predicted=2)
 
     settings = Settings()
+    settings.paths.scratch_default = str(tmp_path / "scratch")
     scheduler = LocalScheduler()
     dock(
         db,

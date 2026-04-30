@@ -15,7 +15,6 @@ Layout (rooted in the new single-root workspace, replacing
         chunk_<i>.inp                 # Phase/LigPrep input
         glide_chunk_<i>.in            # Glide input
         results-chunk_<i>.tar.gz      # produced by the compute-node task
-        extracted/results-chunk_<i>/  # untarred locally for ingestion
 """
 
 from __future__ import annotations
@@ -23,7 +22,8 @@ from __future__ import annotations
 import logging
 import os
 import random
-import tarfile
+import shutil
+import subprocess
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Final, Literal
@@ -111,26 +111,31 @@ def _build_dock_command_body(settings: Settings, dock_dir: Path) -> str:
     return "\n".join(lines)
 
 
-def _extract_results(dock_dir: Path) -> Path:
-    """Untar each ``results-chunk_*.tar.gz`` into ``dock_dir/extracted/``."""
-    extract_root = dock_dir / "extracted"
-    extract_root.mkdir(exist_ok=True)
+def _extract_results(dock_dir: Path, scratch_root: str) -> Path:
+    """Untar each ``results-chunk_*.tar.gz`` to scratch in parallel.
+
+    Mirrors legacy ``process_docking_results``: extracts to a fast local
+    drive (``/wrk``) instead of NFS, and cleans up after ingestion.
+    """
+    user = os.environ.get("USER", "spacehasten")
+    extract_root = Path(scratch_root) / user / f"COLLECTdock_{dock_dir.parent.parent.name}_{dock_dir.name}"
+    if extract_root.exists():
+        shutil.rmtree(extract_root)
+    extract_root.mkdir(parents=True, exist_ok=True)
+
     tars = sorted(dock_dir.glob("results-chunk_*.tar.gz"))
     if not tars:
         raise FileNotFoundError(
             f"no results-chunk_*.tar.gz under {dock_dir}; the docking job"
             " produced no output"
         )
-    for tar_path in tars:
-        sub = extract_root / tar_path.name.removesuffix(".tar.gz")
-        sub.mkdir(exist_ok=True)
-        with tarfile.open(tar_path) as tf:
-            # Python 3.12+ requires explicit filter; "data" is the safe
-            # filter that strips ownership/abs-path/symlink hazards.
-            try:
-                tf.extractall(sub, filter="data")
-            except TypeError:  # pragma: no cover - older Python fallback
-                tf.extractall(sub)
+    # Parallel extraction via xargs, like the legacy multiprocessing approach.
+    tar_list = "\n".join(str(t) for t in tars)
+    subprocess.run(
+        f"echo '{tar_list}' | xargs -P $(nproc) -I {{}} tar xzf {{}} -C {extract_root}",
+        shell=True,
+        check=True,
+    )
     return extract_root
 
 
@@ -259,8 +264,9 @@ def dock(
             f"--- tail of task logs ---\n{tail_logs(handle)}"
         )
 
-    extract_root = _extract_results(dock_dir)
+    extract_root = _extract_results(dock_dir, settings.paths.scratch_default or "/wrk")
     title_to_score = _ingest_dock_results(extract_root)
+    shutil.rmtree(extract_root, ignore_errors=True)
     if not title_to_score:
         raise RuntimeError(
             f"docking iter{iteration}: no scores parsed from {extract_root}"
