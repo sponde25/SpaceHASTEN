@@ -184,7 +184,7 @@ def export_poses(
         echo "Done: $OUTPUT"
     """)
 
-    export_dir = workdir.root / "export"
+    export_dir = workdir.export_dir()
     export_dir.mkdir(parents=True, exist_ok=True)
 
     job = ArrayJob(

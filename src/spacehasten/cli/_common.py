@@ -103,19 +103,33 @@ def _resolve_workspace(workspace_arg: Path | None) -> Path:
 
 
 def workdir_from_args(args: argparse.Namespace) -> WorkDir:
-    """Resolve ``-w`` / cwd to a :class:`WorkDir`."""
+    """Resolve ``-w`` / cwd to a :class:`WorkDir`.
+
+    Reads the manifest to recover ``shared_root`` so that dual-root
+    workspaces are reconstructed correctly.  Falls back to single-root
+    (``shared_root = root``) when the manifest has no ``shared_root``
+    field (backward compatibility).
+    """
+    from spacehasten.workspace.manifest import Manifest
+
     root = _resolve_workspace(args.workspace)
-    # Validate that it looks like a workspace (has .dbsh or manifest)
-    manifest = root / "manifest.json"
+    manifest_path = root / "manifest.json"
     has_dbsh = any(root.glob("*.dbsh"))
-    if not manifest.exists() and not has_dbsh:
+    if not manifest_path.exists() and not has_dbsh:
         raise SystemExit(
             f"error: {root} does not look like a SpaceHASTEN workspace "
             "(no .dbsh file or manifest.json found).\n"
             "Hint: run `spacehasten init {root}` to create one, or use -w "
             "to point to an existing workspace."
         )
-    return WorkDir(root=root)
+
+    shared_root: Path | None = None
+    if manifest_path.exists():
+        manifest = Manifest.load(manifest_path)
+        if manifest.shared_root is not None:
+            shared_root = Path(manifest.shared_root)
+
+    return WorkDir(root=root, shared_root=shared_root)
 
 
 def open_db(args: argparse.Namespace) -> Database:

@@ -114,14 +114,15 @@ def test_each_subcommand_parses_minimally(tmp_path) -> None:  # type: ignore[no-
 
 def test_init_creates_workspace(tmp_path) -> None:  # type: ignore[no-untyped-def]
     ws = tmp_path / "ws"
+    shared = tmp_path / "shared"
     dock_in = tmp_path / "dock.in"
     dock_in.write_bytes(b"DOCK_PARAM_CONTENT")
     grid = tmp_path / "grid.zip"
     grid.write_bytes(b"GRID_CONTENT")
-    rc = main(["init", str(ws), "--dock-params", str(dock_in), "--dock-grid", str(grid)])
+    rc = main(["init", str(ws), "--shared-root", str(shared), "--dock-params", str(dock_in), "--dock-grid", str(grid)])
     assert rc == 0
     assert (ws / "manifest.json").exists()
     assert (ws / "logs").is_dir()
-    assert (ws / "models").is_dir()
+    assert (shared / "models").is_dir()
     # .dbsh is created at init with schema and dock blobs
     assert (ws / "ws.dbsh").exists()

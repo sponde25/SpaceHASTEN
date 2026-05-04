@@ -104,8 +104,13 @@ command groups:
 
 def _add_init(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     p = sub.add_parser("init", help="Bootstrap a fresh workspace, create the database, and store docking settings.")
-    p.add_argument("path", type=Path, help="Directory to initialise (will be created if needed).")
+    p.add_argument("path", type=Path, help="Local root directory (should be on fast storage: /wrk or /fastwrk).")
     p.add_argument("--name", default=None, help="Project name (default: directory name).")
+    p.add_argument(
+        "--shared-root", type=Path, default=None,
+        help="NFS directory for stage artefacts visible to compute nodes. "
+        "Default: /data/$USER/SPACEHASTEN/<name>/",
+    )
     p.add_argument("--dock-params", type=Path, required=True, help="Glide .in template.")
     p.add_argument("--dock-grid", type=Path, required=True, help="Glide grid .zip.")
     p.set_defaults(func=_cmd_init)
@@ -286,16 +291,26 @@ def _cmd_init(args: argparse.Namespace) -> int:
 
     root = Path(args.path).resolve()
     name = args.name or root.name
-    workdir = WorkDir.bootstrap(root, name=name)
+    settings = settings_from_args(args)
+
+    shared_root: Path | None = args.shared_root
+    if shared_root is None:
+        shared_root = settings.compute_shared_root(name)
+    shared_root = shared_root.resolve()
+
+    workdir = WorkDir.bootstrap(root, name=name, shared_root=shared_root)
     setup_logging(workdir, args)
+    workdir.warn_if_wrong_disk()
 
     with Database(workdir.dbsh()) as db:
         db.create_schema()
         db.store_dock_param(Path(args.dock_params).read_bytes())
         db.store_dock_grid(Path(args.dock_grid).read_bytes())
 
-    logger.info("Workspace initialised: %s", root)
+    logger.info("Workspace initialised: root=%s  shared=%s", root, shared_root)
     print(f"Initialised workspace at {root}")
+    print(f"  local root (DB + logs): {root}")
+    print(f"  shared root (stages):   {shared_root}")
     return 0
 
 

@@ -71,6 +71,7 @@ class Manifest(BaseModel):
 
     schema_version: int = 1
     name: str
+    shared_root: str | None = None
     created_at: datetime = Field(default_factory=_utcnow)
     stages: dict[str, StageRecord] = Field(default_factory=dict)
     runs: list[RunRecord] = Field(default_factory=list)

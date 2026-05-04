@@ -15,6 +15,7 @@ beyond reading configured INI/TOML files.
 from __future__ import annotations
 
 import configparser
+import os
 import shutil
 import tomllib
 from collections.abc import Mapping
@@ -79,6 +80,7 @@ class PathsSettings(_Section):
     exe_spacelight_default: str = "/data/programs/BiosolveIT/spacelight-2.0.0-Linux-x64/spacelight"
     exe_ftrees_default: str = "/data/programs/BiosolveIT/ftrees-7.0.0-Linux-x64/ftrees"
     scratch_default: str = "/wrk"
+    shared_data_root: str = "/data"
     spaces_dir_default: str = "/data/programs/BiosolveIT/spaces_new"
     spaces_file_default: str = (
         "/data/programs/BiosolveIT/spaces_new/REALSpace_83bn_2025-09.space"
@@ -215,6 +217,14 @@ class Settings(BaseModel):
 
             src_dir = str(Path(_pkg.__file__).resolve().parent)
         return Path(src_dir) / "remote" / f"{name}.py"
+
+    def compute_shared_root(self, name: str) -> Path:
+        """Derive the shared NFS root for a project.
+
+        Returns ``<shared_data_root>/$USER/SPACEHASTEN/<name>/``.
+        """
+        user = os.environ.get("USER", "user")
+        return Path(self.paths.shared_data_root) / user / "SPACEHASTEN" / name
 
     def dump_toml(self, path: Path) -> None:
         payload: dict[str, Any] = {}

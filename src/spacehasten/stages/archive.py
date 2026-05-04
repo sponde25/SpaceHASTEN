@@ -117,7 +117,7 @@ def archive_clean(workdir: WorkDir) -> int:
     """
     n_removed = 0
     for name in _REGENERABLE_DIRS:
-        target = workdir.root / name
+        target = workdir.shared_root / name
         if target.exists():
             shutil.rmtree(target)
             n_removed += 1
