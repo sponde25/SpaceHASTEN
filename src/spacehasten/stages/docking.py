@@ -75,7 +75,16 @@ def _build_dock_command_body(settings: Settings, dock_dir: Path) -> str:
     )
     lines: list[str] = [
         'echo "[task ${TASK_ID}] Starting docking chunk_${TASK_ID}"',
-        '$SCHRODINGER/jsc local-server-start',
+        'check_and_start_jobserver() {',
+        '    status=$($SCHRODINGER/jsc local-server-status 2>&1)',
+        '    if echo \"$status\" | grep -q \"STOPPED\"; then',
+        '        echo \"Job server is not running. Starting it...\"',
+        '        $SCHRODINGER/jsc local-server-start',
+        '    else',
+        '        echo \"Job server is already running.\"',
+        '    fi',
+        '}',
+        'check_and_start_jobserver',
         'curdir=$(pwd)',
         f'scratch_dir="{scratch_path}"',
         'rm -fr "$scratch_dir"',
@@ -250,6 +259,7 @@ def dock(
         array_size=n_chunks,
         max_concurrent=min(n_chunks, cpus),
         cpus_per_task=int(settings.general.cpu_count_dock or 1),
+        export_none=False,
         env_setup=[],
         command_template=body,
     )

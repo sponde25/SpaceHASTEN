@@ -72,6 +72,7 @@ class ArrayJob:
     command_template: str
     gpus: int = 0
     exclusive: bool = False
+    export_none: bool = True
     env_setup: list[str] = field(default_factory=list)
     depends_on: list[ArrayHandle] = field(default_factory=list)
 

@@ -194,6 +194,7 @@ def export_poses(
         max_concurrent=1,
         cpus_per_task=1,  # irrelevant with exclusive
         exclusive=True,
+        export_none=False,
         env_setup=[],
         command_template=command_body,
     )

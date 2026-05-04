@@ -113,7 +113,10 @@ class SlurmScheduler(Scheduler):
         rendered.path.write_text(rendered.text, encoding="utf-8")
         rendered.path.chmod(0o755)
 
-        cmd = ["sbatch", "--parsable", "--export=NONE", str(rendered.path)]
+        cmd = ["sbatch", "--parsable"]
+        if job.export_none:
+            cmd.append("--export=NONE")
+        cmd.append(str(rendered.path))
         logger.debug("submitting slurm job: %s", " ".join(cmd))
         completed = subprocess.run(
             cmd,
