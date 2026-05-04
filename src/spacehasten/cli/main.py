@@ -46,9 +46,35 @@ logger = logging.getLogger(__name__)
 
 
 def _build_parser() -> argparse.ArgumentParser:
+    epilog = """\
+command groups:
+  setup
+    init                Bootstrap workspace, create DB, store docking settings
+    pick-seeds          Sample and canonicalize seeds from a large collection
+
+  workflows (recommended)
+    seed-training       Import seeds → dock → train → cluster
+    screening-cycle     [train] → (search → predict)×3 → dock per round
+    export              Export results (csv, poses)
+
+  manual stages (expert)
+    import-seeds        Import seed compounds into the database (no training)
+    dock                Dock the next batch of compounds
+    train               Train one chemprop model
+    search              Run one simsearch cycle
+    predict             Predict scores for undocked rows
+    cluster             Run sphere-exclusion clustering
+
+  utilities
+    status              Print workspace manifest summary
+    resume              Resume the last interrupted run
+    archive             Archive lifecycle (create/extract/restore/clean)
+    verify              End-to-end smoke test
+"""
     parser = argparse.ArgumentParser(
         prog="spacehasten",
         description=banner() + "\n\nIterative virtual-screening orchestrator.",
+        epilog=epilog,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     add_global_options(parser)
@@ -56,17 +82,18 @@ def _build_parser() -> argparse.ArgumentParser:
         "--quiet", action="store_true",
         help="Suppress the startup banner.",
     )
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
 
     _add_init(sub)
     _add_pick_seeds(sub)
+    _add_seed_training(sub)
+    _add_screening_cycle(sub)
     _add_import_seeds(sub)
     _add_train(sub)
     _add_predict(sub)
     _add_search(sub)
     _add_dock(sub)
     _add_cluster(sub)
-    _add_screen(sub)
     _add_export(sub)
     _add_archive(sub)
     _add_status(sub)
@@ -76,9 +103,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _add_init(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    p = sub.add_parser("init", help="Bootstrap a fresh workspace and create an empty .dbsh.")
+    p = sub.add_parser("init", help="Bootstrap a fresh workspace, create the database, and store docking settings.")
     p.add_argument("path", type=Path, help="Directory to initialise (will be created if needed).")
     p.add_argument("--name", default=None, help="Project name (default: directory name).")
+    p.add_argument("--dock-params", type=Path, required=True, help="Glide .in template.")
+    p.add_argument("--dock-grid", type=Path, required=True, help="Glide grid .zip.")
     p.set_defaults(func=_cmd_init)
 
 
@@ -107,27 +136,32 @@ def _add_pick_seeds(sub: argparse._SubParsersAction[argparse.ArgumentParser]) ->
 
 
 def _add_import_seeds(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    p = sub.add_parser("import-seeds", help="Import seed compounds into a fresh database.")
+    p = sub.add_parser("import-seeds", help="Import seed compounds into the database (no training).")
     grp = p.add_mutually_exclusive_group(required=True)
     grp.add_argument("--smi", type=Path, help="SMI input (undocked seeds).")
     grp.add_argument("--csv", type=Path, help="CSV input (docked seeds).")
-    p.add_argument("--dock-params", type=Path, required=True, help="Glide .in template.")
-    p.add_argument("--dock-grid", type=Path, required=True, help="Glide grid .zip.")
     p.add_argument("--props-toml", type=Path, default=None, help="PropertyRanges TOML override.")
     p.add_argument("--processes", type=int, default=None, help="Worker pool size.")
-    p.add_argument(
-        "--auto-train", action="store_true",
-        help="Run dock→train→cluster after SMI import.",
+    p.set_defaults(func=_cmd_import_seeds)
+
+
+def _add_seed_training(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    p = sub.add_parser(
+        "seed-training",
+        help="Workflow: import seeds → dock → train → cluster.",
     )
-    p.add_argument("--dock-top-n", type=int, default=1000)
+    p.add_argument("--smi", type=Path, required=True, help="SMI input (undocked seeds).")
+    p.add_argument("--props-toml", type=Path, default=None, help="PropertyRanges TOML override.")
+    p.add_argument("--processes", type=int, default=None, help="Worker pool size for hashing.")
+    p.add_argument("--dock-top-n", type=int, default=1000, help="Compounds to dock.")
     p.add_argument(
         "--dock-strategy",
         choices=("greedy", "clustering"),
         default="greedy",
+        help="Query acquisition strategy for docking.",
     )
-    p.add_argument("--dock-cpus", type=int, default=1)
-    p.add_argument("--train-cutoff", type=float, default=10.0)
-    p.set_defaults(func=_cmd_import_seeds)
+    p.add_argument("--dock-cpus", type=int, default=1, help="Concurrent docking tasks.")
+    p.set_defaults(func=_cmd_seed_training)
 
 
 def _add_train(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -140,7 +174,6 @@ def _add_predict(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
     p = sub.add_parser("predict", help="Predict pred_score for every undocked row.")
     p.add_argument("--model-version", type=int, default=None,
                    help="Model version (defaults to latest).")
-    p.add_argument("--chunk-size", type=int, default=12345)
     p.set_defaults(func=_cmd_predict)
 
 
@@ -172,23 +205,19 @@ def _add_cluster(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
     p.set_defaults(func=_cmd_cluster)
 
 
-def _add_screen(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+def _add_screening_cycle(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     p = sub.add_parser(
-        "screen",
-        help="Macro: simsearch(docked)→simsearch(predicted)×2→dock per round.",
+        "screening-cycle",
+        help="Workflow: [train] → (search → predict)×3 → dock per round.",
     )
-    p.add_argument("--rounds", type=int, default=1)
-    p.add_argument("--train-first", action="store_true",
-                   help="Train a model at the start of each round.")
+    p.add_argument("--rounds", type=int, default=1, help="Number of screening rounds.")
     p.add_argument("--strategy", choices=("greedy", "clustering"), default="greedy")
-    p.add_argument("--simsearch-top-n", type=int, default=100)
-    p.add_argument("--simsearch-cpu", type=int, default=1)
-    p.add_argument("--space", type=Path, default=None)
-    p.add_argument("--dock-top-n", type=int, default=1000)
-    p.add_argument("--dock-cpus", type=int, default=1)
-    p.add_argument("--train-cutoff", type=float, default=10.0)
-    p.add_argument("--predict-chunk-size", type=int, default=12345)
-    p.set_defaults(func=_cmd_screen)
+    p.add_argument("--simsearch-top-n", type=int, default=100, help="Queries per simsearch.")
+    p.add_argument("--simsearch-cpu", type=int, default=1, help="CPUs for simsearch.")
+    p.add_argument("--space", type=Path, default=None, help=".space file override.")
+    p.add_argument("--dock-top-n", type=int, default=1000, help="Compounds to dock.")
+    p.add_argument("--dock-cpus", type=int, default=1, help="Concurrent docking tasks.")
+    p.set_defaults(func=_cmd_screening_cycle)
 
 
 def _add_export(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -253,10 +282,18 @@ def _add_verify(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> Non
 
 
 def _cmd_init(args: argparse.Namespace) -> int:
+    from spacehasten.core.db import Database
+
     root = Path(args.path).resolve()
     name = args.name or root.name
     workdir = WorkDir.bootstrap(root, name=name)
     setup_logging(workdir, args)
+
+    with Database(workdir.dbsh()) as db:
+        db.create_schema()
+        db.store_dock_param(Path(args.dock_params).read_bytes())
+        db.store_dock_grid(Path(args.dock_grid).read_bytes())
+
     logger.info("Workspace initialised: %s", root)
     print(f"Initialised workspace at {root}")
     return 0
@@ -284,39 +321,62 @@ def _cmd_pick_seeds(args: argparse.Namespace) -> int:
 
 
 def _cmd_import_seeds(args: argparse.Namespace) -> int:
-    from spacehasten.core.db import Database
-
     workdir = workdir_from_args(args)
     workdir.logs_dir().mkdir(parents=True, exist_ok=True)
     setup_logging(workdir, args)
-    settings = settings_from_args(args)
 
     props = (
         PropertyRanges.from_toml(args.props_toml)
         if args.props_toml is not None
         else PropertyRanges()
     )
-    scheduler = scheduler_from_args(args, settings) if args.auto_train else None
 
-    with Database(workdir.dbsh()) as db:
+    with open_db(args) as db:
         n = seeds.import_seeds(
             db,
-            workdir,
             smi_path=args.smi,
             csv_path=args.csv,
-            dock_params_path=args.dock_params,
-            dock_grid_path=args.dock_grid,
             props=props,
             processes=args.processes,
-            auto_train=args.auto_train,
-            scheduler=scheduler,
-            settings=settings,
-            dock_top_n=args.dock_top_n,
-            dock_strategy=args.dock_strategy,
-            dock_cpus=args.dock_cpus,
-            train_cutoff=args.train_cutoff,
         )
     print(f"Imported {n} seeds")
+    return 0
+
+
+def _cmd_seed_training(args: argparse.Namespace) -> int:
+    workdir = workdir_from_args(args)
+    workdir.logs_dir().mkdir(parents=True, exist_ok=True)
+    setup_logging(workdir, args)
+    settings = settings_from_args(args)
+    scheduler = scheduler_from_args(args, settings)
+
+    props = (
+        PropertyRanges.from_toml(args.props_toml)
+        if args.props_toml is not None
+        else PropertyRanges()
+    )
+
+    strategy: Literal["greedy", "clustering"] = args.dock_strategy
+    with open_db(args) as db:
+        n = seeds.import_seeds(
+            db,
+            smi_path=args.smi,
+            props=props,
+            processes=args.processes,
+        )
+        logger.info("Imported %d seeds; starting dock → train → cluster", n)
+        docking.dock(
+            db, workdir, scheduler, settings,
+            top_n=args.dock_top_n,
+            strategy=strategy,
+            cpus=args.dock_cpus,
+        )
+        training.train(
+            db, workdir, scheduler, settings,
+        )
+        clustering.cluster(db, workdir, scheduler, settings)
+
+    print(f"Seed-training complete ({n} seeds imported, docked, trained, clustered)")
     return 0
 
 
@@ -345,7 +405,6 @@ def _cmd_predict(args: argparse.Namespace) -> int:
         n = prediction.predict_undocked(
             db, workdir, scheduler, settings,
             model_version=version,
-            chunk_size=args.chunk_size,
         )
     print(f"Updated pred_score for {n} rows (model v{version})")
     return 0
@@ -401,7 +460,7 @@ def _cmd_cluster(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_screen(args: argparse.Namespace) -> int:
+def _cmd_screening_cycle(args: argparse.Namespace) -> int:
     workdir = workdir_from_args(args)
     setup_logging(workdir, args)
     settings = settings_from_args(args)
@@ -411,14 +470,26 @@ def _cmd_screen(args: argparse.Namespace) -> int:
     with open_db(args) as db:
         for round_n in range(1, args.rounds + 1):
             logger.info("Screening round %d/%d", round_n, args.rounds)
-            if args.train_first:
-                training.train(db, workdir, scheduler, settings, cutoff=args.train_cutoff)
+
+            # Train if there are newly docked compounds from a previous
+            # screening cycle (i.e. not the very first round ever run).
+            if db.latest_dock_iteration() > 1:
+                logger.info("Training on newly docked data before round %d", round_n)
+                training.train(db, workdir, scheduler, settings)
+
+            # search(docked) → predict
             simsearch.simsearch(
                 db, workdir, scheduler, settings,
                 source="docked", strategy=strategy,
                 top_n=args.simsearch_top_n,
                 space=args.space, cpu=args.simsearch_cpu,
             )
+            prediction.predict_undocked(
+                db, workdir, scheduler, settings,
+                model_version=db.latest_model_version(),
+            )
+
+            # (search(predicted) → predict) × 2
             for _ in range(2):
                 simsearch.simsearch(
                     db, workdir, scheduler, settings,
@@ -426,6 +497,12 @@ def _cmd_screen(args: argparse.Namespace) -> int:
                     top_n=args.simsearch_top_n,
                     space=args.space, cpu=args.simsearch_cpu,
                 )
+                prediction.predict_undocked(
+                    db, workdir, scheduler, settings,
+                    model_version=db.latest_model_version(),
+                )
+
+            # dock
             docking.dock(
                 db, workdir, scheduler, settings,
                 top_n=args.dock_top_n,

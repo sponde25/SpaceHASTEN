@@ -252,14 +252,14 @@ def _check_docking(
     db = Database(db_path)
     sub_workdir = WorkDir.bootstrap(ddir, name="docking")
 
+    db.create_schema()
+    db.store_dock_param(inp.read_bytes())
+    db.store_dock_grid(grid.read_bytes())
+
     n = _seeds.import_seeds(
         db,
-        sub_workdir,
         smi_path=smi,
-        dock_params_path=inp,
-        dock_grid_path=grid,
         props=PropertyRanges(),
-        auto_train=False,
     )
     if n < 1:
         db.close()

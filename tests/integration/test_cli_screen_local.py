@@ -1,8 +1,8 @@
-"""Integration test for the ``spacehasten screen`` macro command.
+"""Integration test for the ``spacehasten screening-cycle`` workflow command.
 
-Verifies the legacy ordering — train? → simsearch(docked) →
-simsearch(predicted) ×2 → dock per round — by monkeypatching each
-stage with a recorder. The CLI is exercised end-to-end (argparse →
+Verifies the ordering — [train] → search(docked) → predict →
+(search(predicted) → predict) ×2 → dock per round — by monkeypatching
+each stage with a recorder. The CLI is exercised end-to-end (argparse →
 ``_common`` → stage dispatch); only the stages themselves are stubbed
 out so the test runs in milliseconds.
 """
@@ -29,7 +29,11 @@ def stub_workspace(tmp_path: Path) -> Path:
 
 
 def _install_stage_stubs(
-    monkeypatch: pytest.MonkeyPatch, calls: list[tuple[str, dict[str, Any]]]
+    monkeypatch: pytest.MonkeyPatch,
+    calls: list[tuple[str, dict[str, Any]]],
+    *,
+    dock_iteration: int = 0,
+    model_version: int = 1,
 ) -> None:
     def _record(name: str):  # type: ignore[no-untyped-def]
         def _fn(db, workdir, scheduler, settings, **kwargs):  # type: ignore[no-untyped-def]
@@ -40,18 +44,29 @@ def _install_stage_stubs(
     monkeypatch.setattr(cli_main.training, "train", _record("train"))
     monkeypatch.setattr(cli_main.simsearch, "simsearch", _record("simsearch"))
     monkeypatch.setattr(cli_main.docking, "dock", _record("dock"))
+    monkeypatch.setattr(cli_main.prediction, "predict_undocked", _record("predict"))
+
+    # Stub DB methods used to decide whether to train.
+    import spacehasten.core.db as db_mod
+    monkeypatch.setattr(
+        db_mod.Database, "latest_dock_iteration", lambda self: dock_iteration,
+    )
+    monkeypatch.setattr(
+        db_mod.Database, "latest_model_version", lambda self: model_version,
+    )
 
 
-def test_screen_order_one_round(
+def test_screening_cycle_first_round_no_train(
     stub_workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """First screening cycle (dock_iteration=1) should NOT train."""
     calls: list[tuple[str, dict[str, Any]]] = []
-    _install_stage_stubs(monkeypatch, calls)
+    _install_stage_stubs(monkeypatch, calls, dock_iteration=1)
 
     rc = cli_main.main([
         "-w", str(stub_workspace),
         "--scheduler", "local",
-        "screen",
+        "screening-cycle",
         "--rounds", "1",
         "--simsearch-top-n", "5",
         "--simsearch-cpu", "2",
@@ -60,8 +75,13 @@ def test_screen_order_one_round(
     ])
     assert rc == 0
     names = [c[0] for c in calls]
-    # No train, then 1 docked + 2 predicted simsearch + 1 dock.
-    assert names == ["simsearch", "simsearch", "simsearch", "dock"]
+    # No train; then search(docked) → predict → (search(predicted) → predict)×2 → dock
+    assert names == [
+        "simsearch", "predict",
+        "simsearch", "predict",
+        "simsearch", "predict",
+        "dock",
+    ]
     sources = [c[1].get("source") for c in calls if c[0] == "simsearch"]
     assert sources == ["docked", "predicted", "predicted"]
     dock_call = next(c for c in calls if c[0] == "dock")
@@ -69,20 +89,26 @@ def test_screen_order_one_round(
     assert dock_call[1]["cpus"] == 2
 
 
-def test_screen_train_first_two_rounds(
+def test_screening_cycle_trains_after_first(
     stub_workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """After first cycle (dock_iteration>1), screening-cycle trains first."""
     calls: list[tuple[str, dict[str, Any]]] = []
-    _install_stage_stubs(monkeypatch, calls)
+    _install_stage_stubs(monkeypatch, calls, dock_iteration=2)
 
     rc = cli_main.main([
         "-w", str(stub_workspace),
         "--scheduler", "local",
-        "screen",
-        "--rounds", "2",
-        "--train-first",
+        "screening-cycle",
+        "--rounds", "1",
     ])
     assert rc == 0
     names = [c[0] for c in calls]
-    one_round = ["train", "simsearch", "simsearch", "simsearch", "dock"]
-    assert names == one_round + one_round
+    # Train first, then the search→predict pipeline
+    assert names == [
+        "train",
+        "simsearch", "predict",
+        "simsearch", "predict",
+        "simsearch", "predict",
+        "dock",
+    ]

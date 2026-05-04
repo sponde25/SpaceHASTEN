@@ -86,7 +86,7 @@ def _find_dbsh(root: Path) -> Path:
         )
     raise SystemExit(
         f"error: no .dbsh file found in {root}\n"
-        "Hint: run `spacehasten import-seeds` to create the database, or "
+        "Hint: run `spacehasten init` to create the workspace and database, or "
         "check that you are in the correct workspace directory."
     )
 

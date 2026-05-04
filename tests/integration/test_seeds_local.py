@@ -33,30 +33,30 @@ def _write_csv(path: Path) -> None:
     )
 
 
-def _make_blobs(tmp_path: Path) -> tuple[Path, Path]:
+def _init_db(tmp_path: Path) -> tuple[WorkDir, Database]:
+    """Bootstrap workspace and create DB with schema + dock blobs."""
+    workdir = WorkDir.bootstrap(tmp_path / "ws", name="seedws")
     dock_param = tmp_path / "test_dock.in"
     dock_param.write_bytes(b"FORCEFIELD OPLS_2005\nPRECISION SP\n")
     dock_grid = tmp_path / "grid.zip"
     dock_grid.write_bytes(b"PK\x05\x06" + b"\x00" * 18)
-    return dock_param, dock_grid
+    db = Database(workdir.dbsh())
+    db.create_schema()
+    db.store_dock_param(dock_param.read_bytes())
+    db.store_dock_grid(dock_grid.read_bytes())
+    return workdir, db
 
 
 def test_import_smi_seeds_undocked(tmp_path: Path) -> None:
-    workdir = WorkDir.bootstrap(tmp_path / "ws", name="seedws")
+    workdir, db = _init_db(tmp_path)
     smi_path = tmp_path / "seeds.smi"
     _write_smi(smi_path)
-    dp, dg = _make_blobs(tmp_path)
 
-    db = Database(workdir.dbsh())
     n = import_seeds(
         db,
-        workdir,
         smi_path=smi_path,
-        dock_params_path=dp,
-        dock_grid_path=dg,
         props=PropertyRanges(),
         processes=1,
-        auto_train=False,
     )
     db.close()
 
@@ -72,9 +72,9 @@ def test_import_smi_seeds_undocked(tmp_path: Path) -> None:
     smilesids = {r[1] for r in rows}
     assert {"ethanol-1", "benzene-1", "toluene-1", "phenol-1"} == smilesids
 
-    # Blobs and properties persisted.
-    assert db2.load_dock_param() == dp.read_bytes()
-    assert db2.load_dock_grid() == dg.read_bytes()
+    # Blobs and properties persisted (stored at init).
+    assert db2.load_dock_param() == b"FORCEFIELD OPLS_2005\nPRECISION SP\n"
+    assert db2.load_dock_grid() == b"PK\x05\x06" + b"\x00" * 18
     props = db2.load_properties()
     assert props is not None
     assert props.mw == ("0.0", "500.0")
@@ -88,21 +88,15 @@ def test_import_smi_seeds_undocked(tmp_path: Path) -> None:
 
 
 def test_import_csv_seeds_docked(tmp_path: Path) -> None:
-    workdir = WorkDir.bootstrap(tmp_path / "ws", name="seedws")
+    workdir, db = _init_db(tmp_path)
     csv_path = tmp_path / "seeds.csv"
     _write_csv(csv_path)
-    dp, dg = _make_blobs(tmp_path)
 
-    db = Database(workdir.dbsh())
     n = import_seeds(
         db,
-        workdir,
         csv_path=csv_path,
-        dock_params_path=dp,
-        dock_grid_path=dg,
         props=PropertyRanges(),
         processes=1,
-        auto_train=False,
     )
     db.close()
 
@@ -121,16 +115,11 @@ def test_import_csv_seeds_docked(tmp_path: Path) -> None:
 
 
 def test_import_seeds_requires_exactly_one_input(tmp_path: Path) -> None:
-    workdir = WorkDir.bootstrap(tmp_path / "ws", name="seedws")
-    dp, dg = _make_blobs(tmp_path)
-    db = Database(workdir.dbsh())
+    _workdir, db = _init_db(tmp_path)
     try:
         with pytest.raises(ValueError, match="exactly one"):
             import_seeds(
                 db,
-                workdir,
-                dock_params_path=dp,
-                dock_grid_path=dg,
                 props=PropertyRanges(),
             )
     finally:
@@ -138,43 +127,16 @@ def test_import_seeds_requires_exactly_one_input(tmp_path: Path) -> None:
 
 
 def test_import_seeds_csv_missing_columns(tmp_path: Path) -> None:
-    workdir = WorkDir.bootstrap(tmp_path / "ws", name="seedws")
+    _workdir, db = _init_db(tmp_path)
     csv_path = tmp_path / "bad.csv"
     csv_path.write_text("foo,bar\n1,2\n")
-    dp, dg = _make_blobs(tmp_path)
-    db = Database(workdir.dbsh())
     try:
         with pytest.raises(ValueError, match="missing columns"):
             import_seeds(
                 db,
-                workdir,
                 csv_path=csv_path,
-                dock_params_path=dp,
-                dock_grid_path=dg,
                 props=PropertyRanges(),
                 processes=1,
-            )
-    finally:
-        db.close()
-
-
-def test_import_seeds_smi_auto_train_requires_scheduler(tmp_path: Path) -> None:
-    workdir = WorkDir.bootstrap(tmp_path / "ws", name="seedws")
-    smi = tmp_path / "seeds.smi"
-    smi.write_text("CCO ethanol-1\n")
-    dp, dg = _make_blobs(tmp_path)
-    db = Database(workdir.dbsh())
-    try:
-        with pytest.raises(ValueError, match="scheduler"):
-            import_seeds(
-                db,
-                workdir,
-                smi_path=smi,
-                dock_params_path=dp,
-                dock_grid_path=dg,
-                props=PropertyRanges(),
-                processes=1,
-                auto_train=True,
             )
     finally:
         db.close()

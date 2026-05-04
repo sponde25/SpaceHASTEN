@@ -24,12 +24,13 @@ def test_top_level_help_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
     [
         ["init"],
         ["import-seeds"],
+        ["seed-training"],
         ["train"],
         ["predict"],
         ["search"],
         ["dock"],
         ["cluster"],
-        ["screen"],
+        ["screening-cycle"],
         ["export"],
         ["export", "csv"],
         ["export", "poses"],
@@ -53,7 +54,9 @@ def test_subcommand_help_exits_zero(subcommand: list[str]) -> None:
     "argv",
     [
         # Missing required args.
+        ["init", "/tmp/ws"],  # missing --dock-params and --dock-grid
         ["import-seeds"],
+        ["seed-training"],  # missing --smi
         ["search"],
         ["dock"],
         ["export", "csv"],
@@ -86,16 +89,15 @@ def test_each_subcommand_parses_minimally(tmp_path) -> None:  # type: ignore[no-
     archive_path.write_bytes(b"")
 
     samples: list[list[str]] = [
-        ["init", str(ws)],
-        ["-w", str(ws), "import-seeds",
-         "--smi", str(smi), "--dock-params", str(dock_in),
-         "--dock-grid", str(grid)],
+        ["init", str(ws), "--dock-params", str(dock_in), "--dock-grid", str(grid)],
+        ["-w", str(ws), "import-seeds", "--smi", str(smi)],
+        ["-w", str(ws), "seed-training", "--smi", str(smi)],
         ["-w", str(ws), "train"],
         ["-w", str(ws), "predict"],
         ["-w", str(ws), "search", "--source", "docked", "--top-n", "10"],
         ["-w", str(ws), "dock", "--top-n", "10"],
         ["-w", str(ws), "cluster"],
-        ["-w", str(ws), "screen"],
+        ["-w", str(ws), "screening-cycle"],
         ["-w", str(ws), "export", "csv", "--cutoff", "-7", "--output", "out.csv"],
         ["-w", str(ws), "export", "poses", "--cutoff", "-7", "--output", "out.mae"],
         ["-w", str(ws), "archive", "create"],
@@ -112,10 +114,14 @@ def test_each_subcommand_parses_minimally(tmp_path) -> None:  # type: ignore[no-
 
 def test_init_creates_workspace(tmp_path) -> None:  # type: ignore[no-untyped-def]
     ws = tmp_path / "ws"
-    rc = main(["init", str(ws)])
+    dock_in = tmp_path / "dock.in"
+    dock_in.write_bytes(b"DOCK_PARAM_CONTENT")
+    grid = tmp_path / "grid.zip"
+    grid.write_bytes(b"GRID_CONTENT")
+    rc = main(["init", str(ws), "--dock-params", str(dock_in), "--dock-grid", str(grid)])
     assert rc == 0
     assert (ws / "manifest.json").exists()
     assert (ws / "logs").is_dir()
     assert (ws / "models").is_dir()
-    # .dbsh is NOT created until import-seeds
-    assert not (ws / "ws.dbsh").exists()
+    # .dbsh is created at init with schema and dock blobs
+    assert (ws / "ws.dbsh").exists()

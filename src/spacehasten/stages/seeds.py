@@ -3,18 +3,15 @@
 Replaces legacy ``importseeds_functions.import_seeds``. Mirrors the legacy
 flow:
 
-    1. Create the schema (via :meth:`Database.create_schema`).
-    2. Store the Glide ``.in`` and grid blobs.
-    3. Write property ranges (legacy TEXT format).
-    4. Read seeds from a ``.smi`` (undocked) or ``.csv`` (docked) file.
-    5. Compute tautomer hashes in parallel via ``mp.Pool`` over
+    1. Store property ranges (legacy TEXT format).
+    2. Read seeds from a ``.smi`` (undocked) or ``.csv`` (docked) file.
+    3. Compute tautomer hashes in parallel via ``mp.Pool`` over
        :func:`core.molecules.tautomer_hash`.
-    6. Insert rows via ``db.insert_seed_*``.
-    7. *(SMILES path only)* optionally dock → train → cluster.
+    4. Insert rows via ``db.insert_seed_*``.
 
-The CSV path inserts pre-docked rows (``dock_iteration = 0``) and skips
-the auto-dock-then-train cascade. The SMILES path triggers the cascade
-when ``auto_train=True`` (default).
+The database and schema are created at ``init`` time. Docking parameters
+(Glide ``.in`` template and grid ``.zip``) are stored at ``init`` and are
+**not** required here.
 """
 
 from __future__ import annotations
@@ -23,15 +20,11 @@ import logging
 import multiprocessing as mp
 from collections.abc import Iterable, Iterator
 from pathlib import Path
-from typing import Literal
 
 from spacehasten.config.properties import PropertyRanges as TypedPropertyRanges
-from spacehasten.config.settings import Settings
 from spacehasten.core.db import Database
 from spacehasten.core.db import PropertyRanges as DbPropertyRanges
 from spacehasten.core.molecules import tautomer_hash
-from spacehasten.scheduler.base import Scheduler
-from spacehasten.workspace.layout import WorkDir
 
 logger = logging.getLogger(__name__)
 
@@ -132,45 +125,30 @@ def _hash_in_parallel(
 
 def import_seeds(
     db: Database,
-    workdir: WorkDir,
     *,
     smi_path: Path | None = None,
     csv_path: Path | None = None,
-    dock_params_path: Path,
-    dock_grid_path: Path,
     props: TypedPropertyRanges,
     smiles_col: str = "SMILES",
     title_col: str = "title",
     score_col: str = "r_i_docking_score",
     processes: int | None = None,
-    auto_train: bool = True,
-    scheduler: Scheduler | None = None,
-    settings: Settings | None = None,
-    dock_top_n: int = 1000,
-    dock_strategy: Literal["greedy", "clustering"] = "greedy",
-    dock_cpus: int = 1,
-    train_cutoff: float = 10.0,
 ) -> int:
-    """Import seeds into a fresh database.
+    """Import seeds into an existing database.
 
     Exactly one of ``smi_path`` or ``csv_path`` must be provided. The CSV
     path is the *docked seeds* mode (legacy: pre-existing dock scores);
-    the SMI path is the *undocked seeds* mode and triggers the
-    auto-dock-then-train cascade when ``auto_train`` is true.
+    the SMI path is the *undocked seeds* mode.
 
-    :param dock_params_path: path to the Glide ``.in`` template (stored as
-        a BLOB in ``docking_param``).
-    :param dock_grid_path: path to the Glide grid ``.zip`` (stored as a
-        BLOB in ``docking_grid``).
+    The database, schema, and docking parameters (Glide ``.in`` and grid
+    ``.zip``) must already exist — created by ``spacehasten init``.
+
     :param props: property-filter ranges to write into the ``properties``
         table.
     :param smiles_col, title_col, score_col: CSV column names (defaults
         match legacy ``cfg.FIELD_*_DEFAULT``).
     :param processes: worker pool size for tautomer hashing. ``None``
         defaults to ``mp.cpu_count()``.
-    :param auto_train: only relevant for the SMI path; runs dock → train
-        → cluster after the import. Requires ``scheduler`` and
-        ``settings``.
     :returns: number of rows successfully inserted.
     :raises ValueError: on bad/missing arguments or if no seeds could be
         parsed.
@@ -182,17 +160,10 @@ def import_seeds(
     assert seed_path is not None  # for type checker
     is_csv = csv_path is not None
 
-    # 1. Schema (idempotent — DROP IF EXISTS for properties/clusters).
-    db.create_schema()
-
-    # 2. dock_param + dock_grid blobs.
-    db.store_dock_param(Path(dock_params_path).read_bytes())
-    db.store_dock_grid(Path(dock_grid_path).read_bytes())
-
-    # 3. Properties.
+    # 1. Properties.
     db.replace_properties(_typed_to_db_props(props))
 
-    # 4. Read seeds.
+    # 2. Read seeds.
     if is_csv:
         rows: Iterable[SeedRow] = _read_csv(
             seed_path,
@@ -203,14 +174,14 @@ def import_seeds(
     else:
         rows = _read_smi(seed_path)
 
-    # 5. Parallel hash.
+    # 3. Parallel hash.
     n_workers = processes if processes is not None else mp.cpu_count()
     hashed = _hash_in_parallel(rows, processes=max(1, n_workers))
     if not hashed:
         db.commit()
         raise ValueError(f"no parseable seeds in {seed_path}")
 
-    # 6. Insert (skip duplicates by reghash).
+    # 4. Insert (skip duplicates by reghash).
     n_inserted = 0
     n_skipped = 0
     for reghash, smiles, smilesid, score in hashed:
@@ -232,27 +203,6 @@ def import_seeds(
     if n_skipped:
         logger.info("Skipped %d seeds already in database", n_skipped)
     logger.info("Imported %d seed rows from %s", n_inserted, seed_path)
-
-    # 7. Auto-dock-then-train cascade (SMI path only).
-    if not is_csv and auto_train:
-        if scheduler is None or settings is None:
-            raise ValueError(
-                "auto_train=True with smi_path requires scheduler and settings"
-            )
-        # Local import avoids circular references between sibling stages.
-        from spacehasten.stages import clustering as _clustering
-        from spacehasten.stages import docking as _docking
-        from spacehasten.stages import training as _training
-
-        logger.info("Auto-cascade: dock → train → cluster")
-        _docking.dock(
-            db, workdir, scheduler, settings,
-            top_n=dock_top_n, strategy=dock_strategy, cpus=dock_cpus,
-        )
-        _training.train(
-            db, workdir, scheduler, settings, cutoff=train_cutoff,
-        )
-        _clustering.cluster(db, workdir, scheduler, settings)
 
     return n_inserted
 
