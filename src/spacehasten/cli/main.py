@@ -574,14 +574,12 @@ def _cmd_export_poses(args: argparse.Namespace) -> int:
     workdir = workdir_from_args(args)
     setup_logging(workdir, args)
     settings = settings_from_args(args)
-    scheduler = scheduler_from_args(args, settings)
     with open_db(args) as db:
         out = export.export_poses(
             db, workdir, args.output,
             cutoff=args.cutoff,
             iteration=args.iteration,
             settings=settings,
-            scheduler=scheduler,
         )
     print(f"Wrote poses to {out}")
     return 0

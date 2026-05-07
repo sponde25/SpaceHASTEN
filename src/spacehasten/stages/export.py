@@ -5,22 +5,24 @@ Replaces legacy ``export_functions.export_results`` and
 
 The CSV exporter is pure-Python: it pulls rows via
 :meth:`Database.select_export_rows` and writes them to the requested
-output path. Pose export submits an exclusive-node SLURM job that
-untars docking results on local scratch, runs ``$SCHRODINGER/run
-export_poses.py`` in parallel (all cores), concatenates the output,
-compresses with pigz, and copies the final ``.maegz`` back to NFS.
+output path. Pose export writes a self-contained bash script and
+executes it locally in a clean shell (``env -i bash``) so that
+``$SCHRODINGER/run`` works correctly. The script untars docking results
+on local scratch, runs ``export_poses.py`` in parallel, concatenates the
+output, compresses with pigz, and produces the final ``.maegz``.
 """
 
 from __future__ import annotations
 
 import csv
 import logging
+import os
+import subprocess
 import textwrap
 from pathlib import Path
 
 from spacehasten.config.settings import Settings
 from spacehasten.core.db import Database
-from spacehasten.scheduler.base import ArrayJob, Scheduler
 from spacehasten.workspace.layout import WorkDir
 
 logger = logging.getLogger(__name__)
@@ -83,31 +85,29 @@ def export_poses(
     cutoff: float,
     iteration: int | None = None,
     settings: Settings | None = None,
-    scheduler: Scheduler | None = None,
+    scheduler: None = None,  # kept for API compat; unused
 ) -> Path:
-    """Export poses via an exclusive-node SLURM job.
+    """Export poses by running a script locally in a clean shell.
 
-    The job runs on a single compute node using all cores:
+    The script uses a clean environment (``env -i bash``) so that
+    ``$SCHRODINGER/run`` works correctly without interference from the
+    current conda environment.
+
+    Steps performed by the script:
       1. Untars all ``results-*.tar.gz`` in parallel on local scratch.
       2. Runs ``$SCHRODINGER/run export_poses.py`` in parallel for each
          ``*_pv.maegz``.
       3. Concatenates all ``spacehasten_virtual_hits_*.mae`` on scratch.
       4. Compresses with ``pigz`` → ``.maegz``.
-      5. Copies the final file back to NFS ``output``.
-
-    All heavy I/O happens on the compute node's fast local ``/wrk``
-    scratch — no intermediate data crosses NFS.
+      5. Moves the final file to ``output``.
 
     :param iteration: if given, export only that iteration; otherwise
         exports all iterations.
     :param settings: required for paths (schrodinger, scratch, script).
-    :param scheduler: the scheduler to submit the job to.
     :returns: path to the output ``.maegz`` file.
     """
     if settings is None:
         raise ValueError("export_poses requires Settings")
-    if scheduler is None:
-        raise ValueError("export_poses requires a Scheduler")
     script = (
         settings.paths.export_poses_script
         or str(settings.remote_script_path("export_poses"))
@@ -148,8 +148,9 @@ def export_poses(
         else f"iter1-{iterations[-1]}"
     )
 
-    # Build a self-contained bash script that runs on the compute node.
-    command_body = textwrap.dedent(f"""\
+    # Build a self-contained bash script.
+    script_content = textwrap.dedent(f"""\
+        #!/bin/bash
         set -e
         SCRATCH="{scratch_root}/$USER/COLLECT_{workdir.name}_{iter_label}"
         DOCK_DIRS=({dock_dirs_str})
@@ -164,21 +165,25 @@ def export_poses(
 
         echo "Decompressing results to $SCRATCH ..."
         for DOCK_DIR in "${{DOCK_DIRS[@]}}"; do
-            ls "$DOCK_DIR"/results-*.tar.gz 2>/dev/null
-        done | xargs -P $(nproc) -I {{}} tar xzf {{}} -C "$SCRATCH"
+            ITER_SUBDIR="$SCRATCH/$(basename "$DOCK_DIR")"
+            mkdir -p "$ITER_SUBDIR"
+            for TAR in "$DOCK_DIR"/results-*.tar.gz; do
+                [ -f "$TAR" ] && echo "$TAR $ITER_SUBDIR"
+            done
+        done | xargs -P $(nproc) -I {{}} bash -c 'TAR="${{0%% *}}"; DIR="${{0#* }}"; tar xzf "$TAR" -C "$DIR"' {{}}
 
         echo "Extracting poses ..."
         find "$SCRATCH" -name '*_pv.maegz' | xargs -P $(nproc) -I {{}} \\
             $SCHRODINGER_RUN "$EXPORT_SCRIPT" {{}} $CUTOFF "$DBSH"
 
         echo "Concatenating results ..."
-        cat "$SCRATCH"/spacehasten_virtual_hits_*.mae > "$SCRATCH/all_hits.mae"
+        find "$SCRATCH" -name 'spacehasten_virtual_hits_*.mae' | sort | xargs cat > "$SCRATCH/all_hits.mae"
 
         echo "Compressing with pigz ..."
         pigz -c "$SCRATCH/all_hits.mae" > "$SCRATCH/all_hits.maegz"
 
-        echo "Copying to output ..."
-        cp "$SCRATCH/all_hits.maegz" "$OUTPUT"
+        echo "Moving to output ..."
+        mv "$SCRATCH/all_hits.maegz" "$OUTPUT"
 
         rm -fr "$SCRATCH"
         echo "Done: $OUTPUT"
@@ -186,30 +191,31 @@ def export_poses(
 
     export_dir = workdir.export_dir()
     export_dir.mkdir(parents=True, exist_ok=True)
+    script_path = export_dir / f"export_poses_{iter_label}.sh"
+    script_path.write_text(script_content, encoding="utf-8")
+    os.chmod(script_path, 0o755)
 
-    job = ArrayJob(
-        name=f"export_poses_{iter_label}",
-        workdir=export_dir,
-        array_size=1,
-        max_concurrent=1,
-        cpus_per_task=1,  # irrelevant with exclusive
-        exclusive=True,
-        export_none=False,
-        env_setup=[],
-        command_template=command_body,
-    )
-    handle = scheduler.submit_array(job)
-    logger.info(
-        "Submitted export_poses job %s (%s, cutoff %s)",
-        handle.job_id, iter_label, cutoff,
-    )
-    result = scheduler.wait(handle)
-    if not result.success:
-        from spacehasten.scheduler.diagnostics import tail_logs
+    logger.info("Running export_poses script: %s", script_path)
 
+    # Build environment stripped of conda/virtualenv vars so $SCHRODINGER/run
+    # works correctly, but keep system PATH, HOME, SCHRODINGER, etc.
+    clean_env = {
+        k: v for k, v in os.environ.items()
+        if not k.startswith("CONDA_")
+        and k not in ("VIRTUAL_ENV", "CONDA_DEFAULT_ENV", "CONDA_PREFIX")
+    }
+
+    result = subprocess.run(
+        ["bash", str(script_path)],
+        cwd=str(export_dir),
+        env=clean_env,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        logger.error("export_poses stderr:\n%s", result.stderr)
         raise RuntimeError(
-            f"export_poses job {handle.job_id} failed\n"
-            f"--- tail of task logs ---\n{tail_logs(handle)}"
+            f"export_poses script failed (rc={result.returncode}):\n{result.stderr}"
         )
 
     logger.info("Pose export complete: %s", output)
