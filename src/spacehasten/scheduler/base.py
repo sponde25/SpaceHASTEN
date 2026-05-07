@@ -173,10 +173,25 @@ class Scheduler(ABC):
     ) -> ArrayResult:
         """Poll :meth:`status` with exponential backoff until terminal."""
         interval = self.initial_poll_interval
+        start_time = time.time()
+        prev_completed = -1
         while True:
             snap = self.status(handle)
             if on_progress is not None:
                 on_progress(snap)
+            # Log progress when completed count changes.
+            if snap.completed_count != prev_completed:
+                elapsed = time.time() - start_time
+                mins, secs = divmod(int(elapsed), 60)
+                logger.info(
+                    "[%s] %d/%d tasks completed (elapsed: %dm %02ds)",
+                    handle.name,
+                    snap.completed_count,
+                    handle.array_size,
+                    mins,
+                    secs,
+                )
+                prev_completed = snap.completed_count
             if snap.all_terminal:
                 result = ArrayResult(
                     handle=handle,
@@ -184,10 +199,13 @@ class Scheduler(ABC):
                     failed_indices=snap.failed_indices,
                 )
                 if result.success:
+                    elapsed = time.time() - start_time
+                    mins, secs = divmod(int(elapsed), 60)
                     logger.info(
-                        "Job %s (%s) completed successfully (%d/%d tasks)",
+                        "Job %s (%s) completed successfully (%d/%d tasks, %dm %02ds)",
                         handle.job_id, handle.name,
                         snap.completed_count, handle.array_size,
+                        mins, secs,
                     )
                 else:
                     logger.warning(

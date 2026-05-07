@@ -14,8 +14,3 @@ source /data/programs/oce/actoce
 conda activate chemprop-2.1.2
 
 python3 -m spacehasten.remote.train data.csv model_v1
-
-# Backward-compat completion sentinel (legacy poller used jobdone-* files).
-# The real signal is sacct; this is kept while stages migrate.
-cd "/WORKDIR"
-touch "jobdone-train-CPU${SLURM_ARRAY_TASK_ID}"

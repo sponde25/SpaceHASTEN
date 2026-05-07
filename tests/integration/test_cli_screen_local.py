@@ -1,7 +1,7 @@
 """Integration test for the ``spacehasten screening-cycle`` workflow command.
 
-Verifies the ordering — [train] → search(docked) → predict →
-(search(predicted) → predict) ×2 → dock per round — by monkeypatching
+Verifies the ordering — [train] → search(docked) →
+search(predicted) ×2 → dock per round — by monkeypatching
 each stage with a recorder. The CLI is exercised end-to-end (argparse →
 ``_common`` → stage dispatch); only the stages themselves are stubbed
 out so the test runs in milliseconds.
@@ -69,17 +69,17 @@ def test_screening_cycle_first_round_no_train(
         "screening-cycle",
         "--rounds", "1",
         "--simsearch-top-n", "5",
-        "--simsearch-cpu", "2",
+        "--simsearch-jobs", "2",
         "--dock-top-n", "10",
         "--dock-cpus", "2",
     ])
     assert rc == 0
     names = [c[0] for c in calls]
-    # No train; then search(docked) → predict → (search(predicted) → predict)×2 → dock
+    # No train; then search(docked) → search(predicted) ×2 → dock
     assert names == [
-        "simsearch", "predict",
-        "simsearch", "predict",
-        "simsearch", "predict",
+        "simsearch",
+        "simsearch",
+        "simsearch",
         "dock",
     ]
     sources = [c[1].get("source") for c in calls if c[0] == "simsearch"]
@@ -101,14 +101,18 @@ def test_screening_cycle_trains_after_first(
         "--scheduler", "local",
         "screening-cycle",
         "--rounds", "1",
+        "--simsearch-top-n", "5",
+        "--simsearch-jobs", "2",
+        "--dock-top-n", "10",
+        "--dock-cpus", "2",
     ])
     assert rc == 0
     names = [c[0] for c in calls]
-    # Train first, then the search→predict pipeline
+    # Train first, then the search pipeline
     assert names == [
         "train",
-        "simsearch", "predict",
-        "simsearch", "predict",
-        "simsearch", "predict",
+        "simsearch",
+        "simsearch",
+        "simsearch",
         "dock",
     ]

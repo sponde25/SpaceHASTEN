@@ -12,8 +12,3 @@ source /data/programs/oce/actoce
 conda activate chemprop-2.1.2
 
 echo "task ${SLURM_ARRAY_TASK_ID}" > out_${SLURM_ARRAY_TASK_ID}.txt
-
-# Backward-compat completion sentinel (legacy poller used jobdone-* files).
-# The real signal is sacct; this is kept while stages migrate.
-cd "/WORKDIR"
-touch "jobdone-search-CPU${SLURM_ARRAY_TASK_ID}"

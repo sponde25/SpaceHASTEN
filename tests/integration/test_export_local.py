@@ -55,14 +55,15 @@ def test_export_csv_filters_and_formats(tmp_path: Path) -> None:
     assert body[0][6] == "0"  # dock_iteration
 
 
-def test_export_poses_requires_settings_with_script(tmp_path: Path) -> None:
+def test_export_poses_requires_docking_dir(tmp_path: Path) -> None:
     workdir = WorkDir.bootstrap(tmp_path / "ws", name="exp")
     db = Database(workdir.dbsh())
     _seed_db(db)
 
-    settings = Settings()  # script unset
+    settings = Settings()
+    settings.paths.export_poses_script = "/nonexistent/export_poses.py"
     try:
-        with pytest.raises(ValueError, match="export_poses_script"):
+        with pytest.raises(FileNotFoundError, match="no docking iteration"):
             export_poses(
                 db, workdir, tmp_path / "out.mae",
                 cutoff=0.0, iteration=1, settings=settings,

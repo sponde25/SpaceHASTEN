@@ -38,7 +38,6 @@ from __future__ import annotations
 import csv
 import gzip
 import logging
-import shutil
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Final, Literal
@@ -524,19 +523,15 @@ def simsearch(
 
     _write_control_param(control_dir / "control.param", db)
 
-    # Materialise the latest model under control_dir so the predict step
-    # finds it via a relative path inside the task's CWD.
+    # Resolve the model path. Use the absolute path so the control script
+    # can reference it directly without copying into CONTROL/.
     model_version = db.latest_model_version()
     if model_version is None:
         raise RuntimeError(
             "no trained model available; train one before running simsearch"
         )
     bin_path = db.load_model_path(model_version, workdir)
-    src_model_dir = bin_path.parent.parent  # <model_dir>/model_0/pytorch_model.bin
-    local_model_dir = control_dir / src_model_dir.name
-    if local_model_dir.exists():
-        shutil.rmtree(local_model_dir)
-    shutil.copytree(src_model_dir, local_model_dir)
+    model_dir = bin_path.parent.parent  # <model_dir>/model_0/pytorch_model.bin
 
     pf_prefix = (
         prop_filter_command_prefix
@@ -553,7 +548,7 @@ def simsearch(
         if control_command_template is not None
         else _build_control_command(
             control_dir=control_dir,
-            model_dir=Path(local_model_dir.name),
+            model_dir=model_dir,
             settings=settings,
             prop_filter_prefix=pf_prefix,
             predict_prefix=pred_prefix,

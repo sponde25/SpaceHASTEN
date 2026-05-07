@@ -24,8 +24,3 @@ export TASK_ID="${SLURM_ARRAY_TASK_ID}"
 {%- endfor %}
 
 {{ command_body }}
-
-# Backward-compat completion sentinel (legacy poller used jobdone-* files).
-# The real signal is sacct; this is kept while stages migrate.
-cd "{{ workdir }}"
-touch "jobdone-{{ name }}-CPU${SLURM_ARRAY_TASK_ID}"

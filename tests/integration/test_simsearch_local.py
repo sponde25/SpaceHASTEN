@@ -260,8 +260,8 @@ def test_simsearch_writes_control_artefacts(tmp_path: Path) -> None:
     with gzip.open(chunks[0], "rt") as fh:
         first = fh.readline()
     assert "§" in first
-    # The model checkpoint was copied into CONTROL/v1/model_0/.
-    assert (control_dir / "v1" / "model_0" / "pytorch_model.bin").exists()
+    # The model is NOT copied; the control command uses the absolute path.
+    assert not (control_dir / "v1").exists()
     # Predicted files exist for each chunk.
     preds = sorted(control_dir.glob("predicted_propoutput_control_*.csv"))
     assert len(preds) == len(chunks)
