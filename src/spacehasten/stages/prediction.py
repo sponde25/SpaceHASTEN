@@ -113,6 +113,8 @@ def _build_predict_command(
     cmd = " ".join(parts)
     return (
         f'echo "[task ${{TASK_ID}}] Predicting chunk ${{TASK_ID}}"\n'
+        f'export CUDA_VISIBLE_DEVICES=""\n'
+        f'export OMP_NUM_THREADS=1\n'
         f'{cmd}\n'
         f'echo "[task ${{TASK_ID}}] Prediction done"'
     )

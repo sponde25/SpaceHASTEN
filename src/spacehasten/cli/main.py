@@ -232,8 +232,8 @@ def _add_screening_cycle(sub: argparse._SubParsersAction[argparse.ArgumentParser
     )
     p.add_argument("--simsearch-top-n", type=int, required=True,
                    help="Number of simsearch queries. Recommendation: 1000.")
-    p.add_argument("--simsearch-cpu", type=int, required=True,
-                   help="Number of CPUs for simsearch tasks. Recommendation: max 250.")
+    p.add_argument("--simsearch-jobs", type=int, required=True,
+                   help="Number of simsearch jobs (2 CPUs per job). Recommendation: max 250.")
     p.add_argument("--dock-top-n", type=int, required=True,
                    help="Number of compounds to dock per round. Recommendation: 1000000 (1M).")
     p.add_argument("--dock-cpus", type=int, required=True,
@@ -532,29 +532,21 @@ def _cmd_screening_cycle(args: argparse.Namespace) -> int:
                 logger.info("Training on newly docked data before round %d", round_n)
                 training.train(db, workdir, scheduler, settings)
 
-            # search(docked) → predict
+            # search(docked) — CONTROL phase handles prop filter + predict
             simsearch.simsearch(
                 db, workdir, scheduler, settings,
                 source="docked", strategy=strategy,
                 top_n=args.simsearch_top_n,
-                space=args.space, cpu=args.simsearch_cpu,
-            )
-            prediction.predict_undocked(
-                db, workdir, scheduler, settings,
-                model_version=db.latest_model_version(),
+                space=args.space, cpu=args.simsearch_jobs,
             )
 
-            # (search(predicted) → predict) × 2
+            # search(predicted) × 2 — new hits get pred_score via CONTROL
             for _ in range(2):
                 simsearch.simsearch(
                     db, workdir, scheduler, settings,
                     source="predicted", strategy=strategy,
                     top_n=args.simsearch_top_n,
-                    space=args.space, cpu=args.simsearch_cpu,
-                )
-                prediction.predict_undocked(
-                    db, workdir, scheduler, settings,
-                    model_version=db.latest_model_version(),
+                    space=args.space, cpu=args.simsearch_jobs,
                 )
 
             # dock

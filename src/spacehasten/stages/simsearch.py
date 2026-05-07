@@ -284,6 +284,8 @@ def _build_control_command(
         f'echo "[task ${{TASK_ID}}] Property filter"\n'
         f'{pf_cmd}\n'
         f'echo "[task ${{TASK_ID}}] Predicting"\n'
+        f'export CUDA_VISIBLE_DEVICES=""\n'
+        f'export OMP_NUM_THREADS=1\n'
         f'{pred_cmd}\n'
         f'echo "[task ${{TASK_ID}}] Done"\n'
     )

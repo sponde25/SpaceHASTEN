@@ -73,7 +73,9 @@ def predict(
     )
 
     logger.info("Loading model from %s", model_file)
-    model = chemprop_models.MPNN.load_from_checkpoint(str(model_file), weights_only=False)
+    model = chemprop_models.MPNN.load_from_checkpoint(
+        str(model_file), map_location="cpu", weights_only=False
+    )
     model.eval()
     has_unscale_transform = isinstance(
         getattr(model.predictor, "output_transform", None),

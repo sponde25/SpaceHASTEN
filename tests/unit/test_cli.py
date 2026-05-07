@@ -97,7 +97,7 @@ def test_each_subcommand_parses_minimally(tmp_path) -> None:  # type: ignore[no-
         ["-w", str(ws), "search", "--source", "docked", "--top-n", "10", "--cpus", "4"],
         ["-w", str(ws), "dock", "--top-n", "10", "--cpus", "4"],
         ["-w", str(ws), "cluster"],
-        ["-w", str(ws), "screening-cycle", "--simsearch-top-n", "100", "--simsearch-cpu", "4", "--dock-top-n", "1000", "--dock-cpus", "4"],
+        ["-w", str(ws), "screening-cycle", "--simsearch-top-n", "100", "--simsearch-jobs", "4", "--dock-top-n", "1000", "--dock-cpus", "4"],
         ["-w", str(ws), "export", "csv", "--cutoff", "-7", "--output", "out.csv"],
         ["-w", str(ws), "export", "poses", "--cutoff", "-7", "--output", "out.mae"],
         ["-w", str(ws), "archive", "create"],
