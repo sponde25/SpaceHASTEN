@@ -296,7 +296,9 @@ def _add_archive(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
 
 
 def _add_status(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    p = sub.add_parser("status", help="Print workspace manifest summary.")
+    p = sub.add_parser("status", help="Print workspace status summary.")
+    p.add_argument("--actives", type=float, default=None, metavar="THRESHOLD",
+                   help="Show count of docked compounds with dock_score < THRESHOLD.")
     p.set_defaults(func=_cmd_status)
 
 
@@ -618,24 +620,38 @@ def _cmd_archive_clean(args: argparse.Namespace) -> int:
 def _cmd_status(args: argparse.Namespace) -> int:
     workdir = workdir_from_args(args)
     setup_logging(workdir, args)
-    manifest_path = workdir.manifest_path()
-    if not manifest_path.exists():
-        raise SystemExit(f"error: no manifest at {manifest_path}")
-    from spacehasten.workspace.manifest import Manifest
 
-    manifest = Manifest.load(manifest_path)
-    payload = manifest.model_dump(mode="json")
-    if args.json:
-        json.dump(payload, sys.stdout, indent=2, default=str)
-        sys.stdout.write("\n")
-    else:
-        print(f"Workspace: {manifest.name}")
-        print(f"Created:   {manifest.created_at}")
-        print(f"Stages ({len(manifest.stages)}):")
-        for name, stage in manifest.stages.items():
-            print(f"  {name}: {stage.status}")
-        print(f"Runs:      {len(manifest.runs)}")
-        print(f"Models:    {len(manifest.models)}")
+    with open_db(args) as db:
+        cycles = db.latest_simsearch_cycle()
+        iterations = db.latest_dock_iteration() or 0
+        model_ver = db.latest_model_version()
+        total_compounds = db.count_total()
+        total_docked = db.count_docked()
+
+        if args.json:
+            payload = {
+                "workspace": workdir.name,
+                "simsearch_cycles": cycles,
+                "dock_iterations": iterations,
+                "model_versions": model_ver or 0,
+                "total_compounds": total_compounds,
+                "docked_compounds": total_docked,
+            }
+            if args.actives is not None:
+                payload["actives_threshold"] = args.actives
+                payload["actives_count"] = db.count_actives(args.actives)
+            json.dump(payload, sys.stdout, indent=2)
+            sys.stdout.write("\n")
+        else:
+            print(f"Workspace:               {workdir.name}")
+            print(f"Similarity search cycles: {cycles}")
+            print(f"Docking iterations:       {iterations}")
+            print(f"Model versions:           {model_ver or 0}")
+            print(f"Total compounds:          {total_compounds}")
+            print(f"Docked compounds:         {total_docked}")
+            if args.actives is not None:
+                n = db.count_actives(args.actives)
+                print(f"Actives (dock_score < {args.actives}): {n}")
     return 0
 
 

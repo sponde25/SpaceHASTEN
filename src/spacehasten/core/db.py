@@ -333,6 +333,28 @@ class Database:
         row = self._conn.execute("SELECT MAX(dock_iteration) FROM data").fetchone()
         return int(row[0]) if row and row[0] is not None else None
 
+    # ----- counts -----
+
+    def count_total(self) -> int:
+        """Total number of compounds in the database."""
+        row = self._conn.execute("SELECT COUNT(*) FROM data").fetchone()
+        return int(row[0])
+
+    def count_docked(self) -> int:
+        """Number of compounds with a dock_score."""
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM data WHERE dock_score IS NOT NULL"
+        ).fetchone()
+        return int(row[0])
+
+    def count_actives(self, threshold: float) -> int:
+        """Number of docked compounds with dock_score < threshold."""
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM data WHERE dock_score IS NOT NULL AND dock_score < ?",
+            (threshold,),
+        ).fetchone()
+        return int(row[0])
+
     # ----- model blob storage -----
 
     def store_model_blob(self, version: int, blob: bytes) -> None:
