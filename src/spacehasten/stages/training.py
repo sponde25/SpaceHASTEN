@@ -128,7 +128,8 @@ def train(
             "run docking before training"
         )
 
-    next_version = db.latest_model_version() + 1
+    latest = db.latest_model_version()
+    next_version = 0 if latest is None else latest + 1
     model_dir = workdir.model_dir(next_version)
     model_dir.mkdir(parents=True, exist_ok=True)
 

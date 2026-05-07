@@ -319,17 +319,19 @@ class Database:
 
     # ----- maxima -----
 
-    def latest_model_version(self) -> int:
+    def latest_model_version(self) -> int | None:
+        """Return the highest model version, or None if no models exist."""
         row = self._conn.execute("SELECT MAX(model_version) FROM models").fetchone()
-        return int(row[0]) if row and row[0] is not None else 0
+        return int(row[0]) if row and row[0] is not None else None
 
     def latest_simsearch_cycle(self) -> int:
         row = self._conn.execute("SELECT MAX(simsearch_cycle) FROM data").fetchone()
         return int(row[0]) if row and row[0] is not None else 0
 
-    def latest_dock_iteration(self) -> int:
+    def latest_dock_iteration(self) -> int | None:
+        """Return the highest dock_iteration, or None if no rows have been docked."""
         row = self._conn.execute("SELECT MAX(dock_iteration) FROM data").fetchone()
-        return int(row[0]) if row and row[0] is not None else 0
+        return int(row[0]) if row and row[0] is not None else None
 
     # ----- model blob storage -----
 

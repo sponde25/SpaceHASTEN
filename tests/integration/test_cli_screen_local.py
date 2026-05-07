@@ -59,9 +59,9 @@ def _install_stage_stubs(
 def test_screening_cycle_first_round_no_train(
     stub_workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """First screening cycle (dock_iteration=1) should NOT train."""
+    """First screening cycle (dock_iteration=0) should NOT train."""
     calls: list[tuple[str, dict[str, Any]]] = []
-    _install_stage_stubs(monkeypatch, calls, dock_iteration=1)
+    _install_stage_stubs(monkeypatch, calls, dock_iteration=0)
 
     rc = cli_main.main([
         "-w", str(stub_workspace),
@@ -92,9 +92,9 @@ def test_screening_cycle_first_round_no_train(
 def test_screening_cycle_trains_after_first(
     stub_workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """After first cycle (dock_iteration>1), screening-cycle trains first."""
+    """After first cycle (dock_iteration>0), screening-cycle trains first."""
     calls: list[tuple[str, dict[str, Any]]] = []
-    _install_stage_stubs(monkeypatch, calls, dock_iteration=2)
+    _install_stage_stubs(monkeypatch, calls, dock_iteration=1)
 
     rc = cli_main.main([
         "-w", str(stub_workspace),

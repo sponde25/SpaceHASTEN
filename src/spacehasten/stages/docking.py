@@ -223,7 +223,8 @@ def dock(
     chunks = _chunked(shuffled, chunk_size)
     n_chunks = len(chunks)
 
-    iteration = db.latest_dock_iteration() + 1
+    latest = db.latest_dock_iteration()
+    iteration = 0 if latest is None else latest + 1
     dock_dir = workdir.docking_dir(iteration)
     dock_dir.mkdir(parents=True, exist_ok=True)
     logger.info(

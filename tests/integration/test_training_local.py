@@ -85,11 +85,11 @@ def test_training_stage_local(tmp_path: Path) -> None:
     )
     db.close()
 
-    # New version is 1 (no prior models).
-    assert version == 1
+    # New version is 0 (no prior models).
+    assert version == 0
 
     # On-disk artefacts.
-    model_dir = workdir.model_dir(1)
+    model_dir = workdir.model_dir(0)
     assert (model_dir / "train.csv").exists(), "training CSV must be written"
     bin_path = model_dir / "model_0" / "pytorch_model.bin"
     assert bin_path.exists(), "stub must produce pytorch_model.bin"
@@ -101,17 +101,17 @@ def test_training_stage_local(tmp_path: Path) -> None:
 
     # Compatibility shim: legacy ``models`` table got an empty BLOB.
     db2 = Database(db_path)
-    assert db2.latest_model_version() == 1
-    assert db2.load_model_blob(1) == b""
+    assert db2.latest_model_version() == 0
+    assert db2.load_model_blob(0) == b""
 
     # On-disk path resolution prefers the new layout.
-    resolved = db2.load_model_path(1, workdir)
+    resolved = db2.load_model_path(0, workdir)
     assert resolved == bin_path
     db2.close()
 
     # Manifest is the source of truth and records the model.
     manifest = Manifest.load(workdir.manifest_path())
-    record = manifest.get_model(1)
+    record = manifest.get_model(0)
     assert record is not None
     assert Path(record.model_dir) == model_dir
 

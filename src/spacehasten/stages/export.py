@@ -118,9 +118,9 @@ def export_poses(
         iterations = [iteration]
     else:
         latest = db.latest_dock_iteration()
-        if latest < 1:
+        if latest is None:
             raise ValueError("no dock iterations recorded; nothing to export")
-        iterations = list(range(1, latest + 1))
+        iterations = list(range(0, latest + 1))
 
     # Collect all docking directories.
     dock_dirs: list[Path] = []

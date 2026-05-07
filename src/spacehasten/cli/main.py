@@ -415,7 +415,7 @@ def _cmd_predict(args: argparse.Namespace) -> int:
         version = args.model_version
         if version is None:
             version = db.latest_model_version()
-            if version == 0:
+            if version is None:
                 raise SystemExit("error: no trained model; run `spacehasten train` first")
         n = prediction.predict_undocked(
             db, workdir, scheduler, settings,
@@ -488,7 +488,7 @@ def _cmd_screening_cycle(args: argparse.Namespace) -> int:
 
             # Train if there are newly docked compounds from a previous
             # screening cycle (i.e. not the very first round ever run).
-            if db.latest_dock_iteration() > 1:
+            if db.latest_dock_iteration() is not None and db.latest_dock_iteration() > 0:
                 logger.info("Training on newly docked data before round %d", round_n)
                 training.train(db, workdir, scheduler, settings)
 

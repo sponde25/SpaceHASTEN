@@ -525,7 +525,7 @@ def simsearch(
     # Materialise the latest model under control_dir so the predict step
     # finds it via a relative path inside the task's CWD.
     model_version = db.latest_model_version()
-    if model_version == 0:
+    if model_version is None:
         raise RuntimeError(
             "no trained model available; train one before running simsearch"
         )
