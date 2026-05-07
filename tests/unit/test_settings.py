@@ -123,12 +123,13 @@ def test_validate_install_returns_errors_not_raises() -> None:
     # we only assert the call succeeds.
 
 
-def test_remote_script_path_raises_when_unset() -> None:
-    """``remote_script_path`` must fail clearly if ``spacehasten_src_dir`` is empty."""
+def test_remote_script_path_autodetects_when_unset() -> None:
+    """``remote_script_path`` auto-detects from package location when src_dir is unset."""
     s = Settings()
     assert s.paths.spacehasten_src_dir is None
-    with pytest.raises(ValueError, match="spacehasten_src_dir"):
-        s.remote_script_path("train")
+    result = s.remote_script_path("train")
+    assert result.name == "train.py"
+    assert result.parent.name == "remote"
 
 
 def test_remote_script_path_returns_expected_path(tmp_path: Path) -> None:

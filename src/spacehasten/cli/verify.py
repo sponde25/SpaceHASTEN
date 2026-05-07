@@ -70,35 +70,36 @@ def add_verify_arguments(parser: argparse.ArgumentParser) -> None:
         "--workdir",
         type=Path,
         default=None,
-        help="Workspace root for the verify run "
-        "(default: $HOME/SPACEHASTEN/VERIFY-<version>).",
+        help="Optional. Workspace root for verify run. "
+        "Default: $HOME/SPACEHASTEN/VERIFY-<version>.",
     )
     parser.add_argument(
         "--fixtures-dir",
         type=Path,
         default=None,
-        help="Directory containing examples.smi, example.smi, example.csv, "
-        "test_dock.in and grid-test_dock.zip (default: this package's "
-        "install root).",
+        help="Optional. Input files directory for verification tests. "
+        "Default: package install root.",
     )
     parser.add_argument(
         "--only",
         nargs="+",
         choices=CHECK_NAMES,
         default=None,
-        help="Run only these checks.",
+        help="Optional. Run only these checks. "
+        "Choices: pigz, scheduler, clustering, docking, training, biosolveit.",
     )
     parser.add_argument(
         "--skip",
         nargs="+",
         choices=CHECK_NAMES,
         default=(),
-        help="Skip these checks.",
+        help="Optional. Skip these checks. "
+        "Choices: pigz, scheduler, clustering, docking, training, biosolveit. Default: none.",
     )
     parser.add_argument(
         "--keep-workdir",
         action="store_true",
-        help="Do not delete the verify workdir on success.",
+        help="Optional. Keep the verify workdir after success.",
     )
 
 

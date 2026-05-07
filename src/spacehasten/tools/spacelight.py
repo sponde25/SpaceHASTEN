@@ -31,7 +31,7 @@ class SpacelightAdapter:
         *,
         max_results: int,
         similarity: float,
-        threads: int = 1,
+        threads: int = 2,
     ) -> list[str]:
         """Return the argv list for one SpaceLight invocation.
 
@@ -40,7 +40,7 @@ class SpacelightAdapter:
         :param output: path for the result CSV (passed to ``-o``).
         :param max_results: ``--max-nof-results`` value.
         :param similarity: ``--min-similarity-threshold`` value.
-        :param threads: ``--thread-count`` value (legacy default 1; 0
+        :param threads: ``--thread-count`` value (default 2; 0
             means use all cores).
         """
         return [

@@ -25,7 +25,7 @@ class FTreesAdapter:
         *,
         max_results: int,
         similarity: float,
-        threads: int = 1,
+        threads: int = 2,
     ) -> list[str]:
         """Return the argv list for one FTrees invocation."""
         return [

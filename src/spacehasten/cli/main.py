@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Literal
@@ -80,7 +81,7 @@ command groups:
     add_global_options(parser)
     parser.add_argument(
         "--quiet", action="store_true",
-        help="Suppress the startup banner.",
+        help="Optional. Suppress the startup banner.",
     )
     sub = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
 
@@ -105,14 +106,17 @@ command groups:
 def _add_init(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     p = sub.add_parser("init", help="Bootstrap a fresh workspace, create the database, and store docking settings.")
     p.add_argument("path", type=Path, help="Local root directory (should be on fast storage: /wrk or /fastwrk).")
-    p.add_argument("--name", default=None, help="Project name (default: directory name).")
+    p.add_argument("--name", default=None,
+                   help="Optional. Project name. Default: directory name.")
     p.add_argument(
         "--shared-root", type=Path, default=None,
-        help="NFS directory for stage artefacts visible to compute nodes. "
-        "Default: /data/$USER/SPACEHASTEN/<name>/",
+        help="Optional. NFS directory for stage artefacts visible to compute nodes. "
+        "Default: /data/$USER/SPACEHASTEN/<name>/.",
     )
-    p.add_argument("--dock-params", type=Path, required=True, help="Glide .in template.")
-    p.add_argument("--dock-grid", type=Path, required=True, help="Glide grid .zip.")
+    p.add_argument("--dock-params", type=Path, required=True,
+                   help="Glide docking parameter .in file.")
+    p.add_argument("--dock-grid", type=Path, required=True,
+                   help="Glide grid .zip file.")
     p.set_defaults(func=_cmd_init)
 
 
@@ -123,19 +127,19 @@ def _add_pick_seeds(sub: argparse._SubParsersAction[argparse.ArgumentParser]) ->
     )
     p.add_argument(
         "--seeds-file", type=Path, default=None,
-        help="Path to seed collection (bz2/tsv). Default from settings.",
+        help="Optional. Path to seed collection (bz2/tsv). Default: from config.",
     )
     p.add_argument(
         "--output", "-o", type=Path, required=True,
         help="Output .smi file path.",
     )
     p.add_argument(
-        "--n-seeds", type=int, default=None,
-        help="Number of seeds to sample (default: from settings, typically 1000000).",
+        "--n-seeds", type=int, required=True,
+        help="Number of seeds to sample.",
     )
     p.add_argument(
         "--cores", type=int, default=None,
-        help="Number of local cores for RDKit canonicalization (default: from settings).",
+        help="Optional. Local cores for RDKit canonicalization. Default: all available CPUs.",
     )
     p.set_defaults(func=_cmd_pick_seeds)
 
@@ -143,10 +147,12 @@ def _add_pick_seeds(sub: argparse._SubParsersAction[argparse.ArgumentParser]) ->
 def _add_import_seeds(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     p = sub.add_parser("import-seeds", help="Import seed compounds into the database (no training).")
     grp = p.add_mutually_exclusive_group(required=True)
-    grp.add_argument("--smi", type=Path, help="SMI input (undocked seeds).")
-    grp.add_argument("--csv", type=Path, help="CSV input (docked seeds).")
-    p.add_argument("--props-toml", type=Path, default=None, help="PropertyRanges TOML override.")
-    p.add_argument("--processes", type=int, default=None, help="Worker pool size.")
+    grp.add_argument("--smi", type=Path, help="SMI file with undocked seed compounds.")
+    grp.add_argument("--csv", type=Path, help="CSV file with pre-docked seed compounds.")
+    p.add_argument("--props-toml", type=Path, default=None,
+                   help="Optional. PropertyRanges TOML override. Default: built-in ranges.")
+    p.add_argument("--processes", type=int, default=None,
+                   help="Optional. Worker pool size for hashing. Default: all available CPUs.")
     p.set_defaults(func=_cmd_import_seeds)
 
 
@@ -155,53 +161,62 @@ def _add_seed_training(sub: argparse._SubParsersAction[argparse.ArgumentParser])
         "seed-training",
         help="Workflow: import seeds → dock → train → cluster.",
     )
-    p.add_argument("--smi", type=Path, required=True, help="SMI input (undocked seeds).")
-    p.add_argument("--props-toml", type=Path, default=None, help="PropertyRanges TOML override.")
-    p.add_argument("--processes", type=int, default=None, help="Worker pool size for hashing.")
-    p.add_argument("--dock-top-n", type=int, default=1000, help="Compounds to dock.")
-    p.add_argument(
-        "--dock-strategy",
-        choices=("greedy", "clustering"),
-        default="greedy",
-        help="Query acquisition strategy for docking.",
-    )
-    p.add_argument("--dock-cpus", type=int, default=1, help="Concurrent docking tasks.")
+    p.add_argument("--smi", type=Path, required=True, help="SMI file with undocked seed compounds.")
+    p.add_argument("--dock-cpus", type=int, required=True, help="Number of concurrent docking tasks.")
+    p.add_argument("--props-toml", type=Path, default=None,
+                   help="Optional. PropertyRanges TOML override. Default: built-in ranges.")
+    p.add_argument("--processes", type=int, default=None,
+                   help="Optional. Worker pool size for hashing. Default: all available CPUs.")
     p.set_defaults(func=_cmd_seed_training)
 
 
 def _add_train(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     p = sub.add_parser("train", help="Run one chemprop training round.")
-    p.add_argument("--cutoff", type=float, default=10.0)
+    p.add_argument("--cutoff", type=float, default=10.0,
+                   help="Optional. Docking score cutoff for including compounds in the training set. Default: 10.0.")
     p.set_defaults(func=_cmd_train)
 
 
 def _add_predict(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     p = sub.add_parser("predict", help="Predict pred_score for every undocked row.")
     p.add_argument("--model-version", type=int, default=None,
-                   help="Model version (defaults to latest).")
+                   help="Optional. Model version to use. Default: latest.")
     p.set_defaults(func=_cmd_predict)
 
 
 def _add_search(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     p = sub.add_parser("search", help="Run one simsearch cycle.")
-    p.add_argument("--source", choices=("docked", "predicted"), required=True)
-    p.add_argument("--strategy", choices=("greedy", "clustering"), default="greedy")
-    p.add_argument("--top-n", type=int, required=True)
-    p.add_argument("--space", type=Path, default=None)
-    p.add_argument("--nnn", type=int, default=None)
-    p.add_argument("--sim-spacelight", type=float, default=None)
-    p.add_argument("--sim-ftrees", type=float, default=None)
-    p.add_argument("--cpu", type=int, default=1)
-    p.add_argument("--threads-per-task", type=int, default=1)
-    p.add_argument("--cluster-after", action="store_true")
+    p.add_argument("--source", choices=("docked", "predicted"), required=True,
+                   help="Source compound pool: docked or predicted.")
+    p.add_argument("--top-n", type=int, required=True,
+                   help="Number of query compounds.")
+    p.add_argument("--cpus", type=int, required=True,
+                   help="Number of CPUs for simsearch tasks. Recommendation: max 250.")
+    p.add_argument("--strategy", choices=("greedy", "clustering"), default="greedy",
+                   help="Optional. Query acquisition strategy. Default: greedy.")
+    p.add_argument("--space", type=Path, default=None,
+                   help="Optional. BioSolveIT .space file override. Default: from config.")
+    p.add_argument("--nnn", type=int, default=None,
+                   help="Optional. Max results per query from chemical space. Default: from config (10000).")
+    p.add_argument("--sim-spacelight", type=float, default=None,
+                   help="Optional. SpaceLight similarity threshold. Default: from config.")
+    p.add_argument("--sim-ftrees", type=float, default=None,
+                   help="Optional. FTrees similarity threshold. Default: from config.")
+    p.add_argument("--threads-per-task", type=int, default=2,
+                   help="Optional. Threads per simsearch task. Default: 2.")
+    p.add_argument("--cluster-after", action="store_true",
+                   help="Optional. Run clustering after search completes.")
     p.set_defaults(func=_cmd_search)
 
 
 def _add_dock(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     p = sub.add_parser("dock", help="Dock the next batch of compounds.")
-    p.add_argument("--top-n", type=int, required=True)
-    p.add_argument("--strategy", choices=("greedy", "clustering"), default="greedy")
-    p.add_argument("--cpus", type=int, default=1)
+    p.add_argument("--top-n", type=int, required=True,
+                   help="Number of compounds to dock.")
+    p.add_argument("--cpus", type=int, required=True,
+                   help="Number of CPUs for docking tasks. Recommendation: max 250.")
+    p.add_argument("--strategy", choices=("greedy", "clustering"), default="greedy",
+                   help="Optional. Acquisition strategy for choosing which compounds to dock. Default: greedy.")
     p.set_defaults(func=_cmd_dock)
 
 
@@ -215,13 +230,20 @@ def _add_screening_cycle(sub: argparse._SubParsersAction[argparse.ArgumentParser
         "screening-cycle",
         help="Workflow: [train] → (search → predict)×3 → dock per round.",
     )
-    p.add_argument("--rounds", type=int, default=1, help="Number of screening rounds.")
-    p.add_argument("--strategy", choices=("greedy", "clustering"), default="greedy")
-    p.add_argument("--simsearch-top-n", type=int, default=100, help="Queries per simsearch.")
-    p.add_argument("--simsearch-cpu", type=int, default=1, help="CPUs for simsearch.")
-    p.add_argument("--space", type=Path, default=None, help=".space file override.")
-    p.add_argument("--dock-top-n", type=int, default=1000, help="Compounds to dock.")
-    p.add_argument("--dock-cpus", type=int, default=1, help="Concurrent docking tasks.")
+    p.add_argument("--simsearch-top-n", type=int, required=True,
+                   help="Number of simsearch queries. Recommendation: 1000.")
+    p.add_argument("--simsearch-cpu", type=int, required=True,
+                   help="Number of CPUs for simsearch tasks. Recommendation: max 250.")
+    p.add_argument("--dock-top-n", type=int, required=True,
+                   help="Number of compounds to dock per round. Recommendation: 1000000 (1M).")
+    p.add_argument("--dock-cpus", type=int, required=True,
+                   help="Number of CPUs for docking tasks. Recommendation: max 250.")
+    p.add_argument("--rounds", type=int, default=1,
+                   help="Optional. Number of screening cycle rounds. Default: 1.")
+    p.add_argument("--strategy", choices=("greedy", "clustering"), default="greedy",
+                   help="Optional. Acquisition strategy for choosing which compounds to dock. Default: greedy.")
+    p.add_argument("--space", type=Path, default=None,
+                   help="Optional. BioSolveIT .space file override. Default: from config.")
     p.set_defaults(func=_cmd_screening_cycle)
 
 
@@ -230,14 +252,19 @@ def _add_export(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> Non
     sub2 = p.add_subparsers(dest="export_kind", required=True)
 
     csv_p = sub2.add_parser("csv", help="Export docking results as CSV.")
-    csv_p.add_argument("--cutoff", type=float, required=True)
-    csv_p.add_argument("--output", type=Path, required=True)
+    csv_p.add_argument("--cutoff", type=float, required=True,
+                       help="Docking score cutoff for export.")
+    csv_p.add_argument("--output", type=Path, required=True,
+                       help="Output CSV file path.")
     csv_p.set_defaults(func=_cmd_export_csv)
 
     poses_p = sub2.add_parser("poses", help="Export Maestro pose file.")
-    poses_p.add_argument("--cutoff", type=float, required=True)
-    poses_p.add_argument("--output", type=Path, required=True)
-    poses_p.add_argument("--iteration", type=int, default=None)
+    poses_p.add_argument("--cutoff", type=float, required=True,
+                         help="Docking score cutoff for export.")
+    poses_p.add_argument("--output", type=Path, required=True,
+                         help="Output Maestro .mae file path.")
+    poses_p.add_argument("--iteration", type=int, default=None,
+                         help="Optional. Limit to a specific docking iteration. Default: all iterations.")
     poses_p.set_defaults(func=_cmd_export_poses)
 
 
@@ -246,17 +273,22 @@ def _add_archive(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
     sub2 = p.add_subparsers(dest="archive_op", required=True)
 
     cre = sub2.add_parser("create", help="Tar the workspace root.")
-    cre.add_argument("--bundle", action="store_true", help="Produce a .tgz bundle.")
+    cre.add_argument("--bundle", action="store_true",
+                     help="Optional. Produce a single .tgz bundle.")
     cre.set_defaults(func=_cmd_archive_create)
 
     ext = sub2.add_parser("extract", help="Inverse of `archive create --bundle`.")
-    ext.add_argument("--archive", type=Path, required=True)
-    ext.add_argument("--target", type=Path, required=True)
+    ext.add_argument("--archive", type=Path, required=True,
+                     help="Path to the .tgz bundle to extract.")
+    ext.add_argument("--target", type=Path, required=True,
+                     help="Target directory for extraction.")
     ext.set_defaults(func=_cmd_archive_extract)
 
     res = sub2.add_parser("restore", help="Inverse of `archive create` (.archived-spacehasten).")
-    res.add_argument("--archive", type=Path, required=True)
-    res.add_argument("--target", type=Path, required=True)
+    res.add_argument("--archive", type=Path, required=True,
+                     help="Path to .archived-spacehasten directory.")
+    res.add_argument("--target", type=Path, required=True,
+                     help="Target workspace directory.")
     res.set_defaults(func=_cmd_archive_restore)
 
     clean = sub2.add_parser("clean", help="Remove regenerable scratch dirs.")
@@ -298,6 +330,15 @@ def _cmd_init(args: argparse.Namespace) -> int:
         shared_root = settings.compute_shared_root(name)
     shared_root = shared_root.resolve()
 
+    if shared_root.exists():
+        logger.error(
+            "Shared directory already exists: %s\n"
+            "Pick a different project name or specify a different "
+            "--shared-root path.",
+            shared_root,
+        )
+        return 1
+
     workdir = WorkDir.bootstrap(root, name=name, shared_root=shared_root)
     setup_logging(workdir, args)
     workdir.warn_if_wrong_disk()
@@ -322,8 +363,8 @@ def _cmd_pick_seeds(args: argparse.Namespace) -> int:
     settings = settings_from_args(args)
 
     seeds_file = args.seeds_file or Path(settings.paths.seeds_file_default)
-    n_seeds = args.n_seeds or settings.general.seeds_count
-    cores = args.cores or settings.general.seeds_cpu
+    n_seeds = args.n_seeds
+    cores = args.cores or os.cpu_count() or 1
 
     n = pick_seeds(
         seeds_file=seeds_file,
@@ -371,7 +412,6 @@ def _cmd_seed_training(args: argparse.Namespace) -> int:
         else PropertyRanges()
     )
 
-    strategy: Literal["greedy", "clustering"] = args.dock_strategy
     with open_db(args) as db:
         n = seeds.import_seeds(
             db,
@@ -382,8 +422,8 @@ def _cmd_seed_training(args: argparse.Namespace) -> int:
         logger.info("Imported %d seeds; starting dock → train → cluster", n)
         docking.dock(
             db, workdir, scheduler, settings,
-            top_n=args.dock_top_n,
-            strategy=strategy,
+            top_n=n,
+            strategy="greedy",
             cpus=args.dock_cpus,
         )
         training.train(
@@ -440,7 +480,7 @@ def _cmd_search(args: argparse.Namespace) -> int:
             nnn=args.nnn,
             sim_spacelight=args.sim_spacelight,
             sim_ftrees=args.sim_ftrees,
-            cpu=args.cpu,
+            cpu=args.cpus,
             threads_per_task=args.threads_per_task,
             cluster_after=args.cluster_after,
         )

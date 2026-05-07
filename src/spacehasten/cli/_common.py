@@ -27,42 +27,41 @@ def add_global_options(parser: argparse.ArgumentParser) -> None:
         "--workspace",
         type=Path,
         default=None,
-        help="Path to the SpaceHASTEN workspace directory. "
-        "If omitted, the current working directory is used.",
+        help="Optional. Workspace directory. Default: current working directory.",
     )
     parser.add_argument(
         "--config",
         type=Path,
         default=None,
-        help="Path to a TOML or INI config file (auto-detected by suffix).",
+        help="Optional. TOML or INI config file (auto-detected by suffix). Default: none (built-in settings).",
     )
     parser.add_argument(
         "--scheduler",
         choices=("auto", "slurm", "local"),
-        default="auto",
-        help="Scheduler backend (default: auto).",
+        default="slurm",
+        help="Optional. Scheduler backend. Default: slurm.",
     )
     parser.add_argument(
         "--partition",
         default=None,
-        help="SLURM partition (overrides the config file).",
+        help='Optional. SLURM partition (overrides config file). Default: "jobs".',
     )
     parser.add_argument(
         "--scratch",
         type=Path,
         default=None,
-        help="Override the scratch directory (paths.scratch_default).",
+        help='Optional. Scratch directory override. Default: "/wrk".',
     )
     parser.add_argument(
         "--log-level",
         default="INFO",
         choices=("DEBUG", "INFO", "WARNING", "ERROR"),
-        help="Logging verbosity (default: INFO).",
+        help="Optional. Logging verbosity. Default: INFO.",
     )
     parser.add_argument(
         "--json",
         action="store_true",
-        help="Emit machine-readable JSON to stdout where supported.",
+        help="Optional. Emit machine-readable JSON to stdout where supported.",
     )
 
 

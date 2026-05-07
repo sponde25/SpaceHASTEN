@@ -378,7 +378,7 @@ def simsearch(
     sim_spacelight: float | None = None,
     sim_ftrees: float | None = None,
     cpu: int = 1,
-    threads_per_task: int = 1,
+    threads_per_task: int = 2,
     cluster_after: bool = False,
     spacelight_adapter: SpacelightAdapter | None = None,
     ftrees_adapter: FTreesAdapter | None = None,
