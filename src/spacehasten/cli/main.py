@@ -244,6 +244,8 @@ def _add_screening_cycle(sub: argparse._SubParsersAction[argparse.ArgumentParser
                    help="Optional. Acquisition strategy for choosing which compounds to dock. Default: greedy.")
     p.add_argument("--space", type=Path, default=None,
                    help="Optional. BioSolveIT .space file override. Default: from config.")
+    p.add_argument("--nnn", type=int, default=None,
+                   help="Optional. Max results per query from chemical space. Default: from config.")
     p.set_defaults(func=_cmd_screening_cycle)
 
 
@@ -540,6 +542,7 @@ def _cmd_screening_cycle(args: argparse.Namespace) -> int:
                 source="docked", strategy=strategy,
                 top_n=args.simsearch_top_n,
                 space=args.space, cpu=args.simsearch_jobs,
+                nnn=args.nnn,
             )
 
             # search(predicted) × 2 — new hits get pred_score via CONTROL
@@ -549,6 +552,7 @@ def _cmd_screening_cycle(args: argparse.Namespace) -> int:
                     source="predicted", strategy=strategy,
                     top_n=args.simsearch_top_n,
                     space=args.space, cpu=args.simsearch_jobs,
+                    nnn=args.nnn,
                 )
 
             # dock
