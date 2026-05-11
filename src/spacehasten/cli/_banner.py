@@ -14,9 +14,9 @@ from spacehasten import __version__
 
 # Wordmark in figlet "small" font; raw string so the backslashes survive.
 _WORDMARK = r"""
- ___                  _  _   _   ___ _____ ___ _  _
+ ___                   _  _   _   ___ _____ ___ _  _
 / __|_ __  __ _ __ ___| || | /_\ / __|_   _| __| \| |
-\__ \ '_ \/ _` / _/ -_) __ |/ _ \\__ \ | |  | _|| .` |
+\__ \ '_ \/ _` / _/ -_) __ |/ _ \\__ \ | | | _|| .` |
 |___/ .__/\__,_\__\___|_||_/_/ \_\___/ |_| |___|_|\_|
     |_|
 """
@@ -24,18 +24,18 @@ _WORDMARK = r"""
 # Funnel: a billion-compound space narrows through search + docking
 # to a handful of hits.
 _FUNNEL = r"""
-        ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
-         ░░░░░░░░░░░░  10⁹+ molecules  ░░░░░░░░░░░░
-          ▒▒▒▒▒▒▒▒▒  similarity search  ▒▒▒▒▒▒▒▒▒
-            ▓▓▓▓▓▓▓  property filter  ▓▓▓▓▓▓▓
-              ▓▓▓▓▓  chemprop predict  ▓▓▓▓▓
-                ███  Glide docking  ███
-                   █  hits  █
-                    ▀▀
+        ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+         ░░░░░░░░░░   10⁹+ molecules   ░░░░░░░░░░░░
+          ▒▒▒▒▒▒▒▒▒  similarity search ▒▒▒▒▒▒▒▒▒▒
+            ▓▓▓▓▓▓▓  property filter   ▓▓▓▓▓▓▓▓
+              ▓▓▓▓▓  chemprop predict  ▓▓▓▓▓▓
+                ███   Glide docking    ████
+                   █      hits         ██
+                    
 """
 
 _TAGLINE = (
-    "Iterative docking-based exploration of nonenumerated chemical libraries"
+    "Iterative docking, similarity search and ML-based exploration of nonenumerated chemical libraries"
 )
 _CREDIT = (
     "Originally written by Tuomo Kalliokoski (Orion Pharma) · "
