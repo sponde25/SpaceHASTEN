@@ -11,10 +11,12 @@ Layout (rooted in the new single-root workspace, replacing
 
     <workdir>/docking/iter<N>/
         glide_grid.zip                # extracted once from docking_grid blob
-        chunk_<i>.smi                 # SMILES + spacehastenid title per line
-        chunk_<i>.inp                 # Phase/LigPrep input
-        glide_chunk_<i>.in            # Glide input
-        results-chunk_<i>.tar.gz      # produced by the compute-node task
+        inputs/
+            chunk_<i>.smi             # SMILES + spacehastenid title per line
+            chunk_<i>.inp             # Phase/LigPrep input
+            glide_chunk_<i>.in        # Glide input
+        results/
+            results-chunk_<i>.tar.gz  # produced by the compute-node task
 """
 
 from __future__ import annotations
@@ -89,9 +91,9 @@ def _build_dock_command_body(settings: Settings, dock_dir: Path) -> str:
         f'scratch_dir="{scratch_path}"',
         'rm -fr "$scratch_dir"',
         'mkdir -p "$scratch_dir"',
-        'cp chunk_${TASK_ID}.smi "$scratch_dir/"',
-        'cp chunk_${TASK_ID}.inp "$scratch_dir/"',
-        'cp glide_chunk_${TASK_ID}.in "$scratch_dir/"',
+        'cp inputs/chunk_${TASK_ID}.smi "$scratch_dir/"',
+        'cp inputs/chunk_${TASK_ID}.inp "$scratch_dir/"',
+        'cp inputs/glide_chunk_${TASK_ID}.in "$scratch_dir/"',
         'cp glide_grid.zip "$scratch_dir/"',
         'cd "$scratch_dir"',
     ]
@@ -112,7 +114,8 @@ def _build_dock_command_body(settings: Settings, dock_dir: Path) -> str:
         'rm -f glide_grid.zip',
         'tar --exclude=results-chunk_${TASK_ID}.tar.gz'
         ' -czf results-chunk_${TASK_ID}.tar.gz .',
-        'mv results-chunk_${TASK_ID}.tar.gz "$curdir/"',
+        'mkdir -p "$curdir/results"',
+        'mv results-chunk_${TASK_ID}.tar.gz "$curdir/results/"',
         'cd "$curdir"',
         'rm -fr "$scratch_dir"',
         'echo "[task ${TASK_ID}] Done"',
@@ -132,7 +135,7 @@ def _extract_results(dock_dir: Path, scratch_root: str) -> Path:
         shutil.rmtree(extract_root)
     extract_root.mkdir(parents=True, exist_ok=True)
 
-    tars = sorted(dock_dir.glob("results-chunk_*.tar.gz"))
+    tars = sorted((dock_dir / "results").glob("results-chunk_*.tar.gz"))
     if not tars:
         raise FileNotFoundError(
             f"no results-chunk_*.tar.gz under {dock_dir}; the docking job"
@@ -238,12 +241,14 @@ def dock(
     dock_param_blob = db.load_dock_param()
 
     # Per-chunk files.
+    inputs_dir = dock_dir / "inputs"
+    inputs_dir.mkdir(parents=True, exist_ok=True)
     for i, chunk in enumerate(chunks, start=1):
         stem = f"chunk_{i}"
-        _write_chunk_smi(dock_dir / f"{stem}.smi", chunk)
-        write_phase_inp(dock_dir / f"{stem}.inp")
+        _write_chunk_smi(inputs_dir / f"{stem}.smi", chunk)
+        write_phase_inp(inputs_dir / f"{stem}.inp")
         write_glide_in(
-            dock_dir / f"glide_{stem}.in",
+            inputs_dir / f"glide_{stem}.in",
             dock_param_blob,
             ligand_stem=stem,
         )

@@ -167,7 +167,7 @@ def export_poses(
         for DOCK_DIR in "${{DOCK_DIRS[@]}}"; do
             ITER_SUBDIR="$SCRATCH/$(basename "$DOCK_DIR")"
             mkdir -p "$ITER_SUBDIR"
-            for TAR in "$DOCK_DIR"/results-*.tar.gz; do
+            for TAR in "$DOCK_DIR"/results/results-*.tar.gz; do
                 [ -f "$TAR" ] && echo "$TAR $ITER_SUBDIR"
             done
         done | xargs -P $(nproc) -I {{}} bash -c 'TAR="${{0%% *}}"; DIR="${{0#* }}"; tar xzf "$TAR" -C "$DIR"' {{}}

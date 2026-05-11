@@ -96,15 +96,16 @@ def _materialise_fake_model(workdir: WorkDir, version: int) -> Path:
 # exercise per-method dedup-by-SMILES with max similarity).
 _SEARCH_STUB = dedent(r"""
     set -eu
+    mkdir -p results
     case "${TASK_ID}" in
       1)
-        cat > "spacelightresult_${TASK_ID}.csv" <<EOF
+        cat > "results/spacelightresult_${TASK_ID}.csv" <<EOF
     #result-smiles,result-name,fingerprint-similarity
     CCN,enamine-1,0.91
     CCC,enamine-2,0.80
     CC(=O)O,enamine-dup,0.70
     EOF
-        cat > "ftreesresult_${TASK_ID}.csv" <<EOF
+        cat > "results/ftreesresult_${TASK_ID}.csv" <<EOF
     #result-smiles,result-name,pharmacophore-similarity
     CCN,enamine-1,0.95
     CCC,enamine-2,0.85
@@ -112,12 +113,12 @@ _SEARCH_STUB = dedent(r"""
     EOF
         ;;
       2)
-        cat > "spacelightresult_${TASK_ID}.csv" <<EOF
+        cat > "results/spacelightresult_${TASK_ID}.csv" <<EOF
     #result-smiles,result-name,fingerprint-similarity
     CCN,enamine-1,0.55
     CCO,extra-1,0.50
     EOF
-        cat > "ftreesresult_${TASK_ID}.csv" <<EOF
+        cat > "results/ftreesresult_${TASK_ID}.csv" <<EOF
     #result-smiles,result-name,pharmacophore-similarity
     CCN,enamine-1,0.50
     CCO,extra-1,0.40
@@ -133,17 +134,18 @@ def _build_control_stub(prop_filter_argv: list[str]) -> str:
     pf = " ".join(prop_filter_argv)
     return dedent(rf"""
         set -eu
-        # 1) Real prop_filter: produces propoutput_control_${{TASK_ID}}.csv.
-        {pf} control_${{TASK_ID}}.smi.gz control.param \
-            --output propoutput_control_${{TASK_ID}}.csv
+        mkdir -p results_propfilter results_prediction
+        # 1) Real prop_filter: produces results_propfilter/propoutput_control_${{TASK_ID}}.csv.
+        {pf} inputs/control_${{TASK_ID}}.smi.gz inputs/control.param \
+            --output results_propfilter/propoutput_control_${{TASK_ID}}.csv
 
         # 2) Fake predict: write a constant docking_score per row,
         #    keeping the smilesid column verbatim so the ingest step can
         #    recover (reghash, smiles, title).
-        out="predicted_propoutput_control_${{TASK_ID}}.csv"
+        out="results_prediction/predicted_propoutput_control_${{TASK_ID}}.csv"
         echo "smilesid,docking_score" > "$out"
         # Skip CSV header.
-        tail -n +2 "propoutput_control_${{TASK_ID}}.csv" \
+        tail -n +2 "results_propfilter/propoutput_control_${{TASK_ID}}.csv" \
             | while IFS=, read -r smi sid; do
                 printf '%s,%s\n' "$sid" "-7.0" >> "$out"
             done
@@ -253,8 +255,8 @@ def test_simsearch_writes_control_artefacts(tmp_path: Path) -> None:
     assert queries.exists()
     assert len(queries.read_text().strip().splitlines()) == 2
     control_dir = cycle_dir / "CONTROL"
-    assert (control_dir / "control.param").exists()
-    chunks = sorted(control_dir.glob("control_*.smi.gz"))
+    assert (control_dir / "inputs" / "control.param").exists()
+    chunks = sorted((control_dir / "inputs").glob("control_*.smi.gz"))
     assert chunks, "no control chunks written"
     # Each chunk is a real gzip we can read back.
     with gzip.open(chunks[0], "rt") as fh:
@@ -263,7 +265,7 @@ def test_simsearch_writes_control_artefacts(tmp_path: Path) -> None:
     # The model is NOT copied; the control command uses the absolute path.
     assert not (control_dir / "v1").exists()
     # Predicted files exist for each chunk.
-    preds = sorted(control_dir.glob("predicted_propoutput_control_*.csv"))
+    preds = sorted((control_dir / "results_prediction").glob("predicted_propoutput_control_*.csv"))
     assert len(preds) == len(chunks)
     rows = list(csv.DictReader(preds[0].open()))
     assert rows and rows[0]["docking_score"] == "-7.0"

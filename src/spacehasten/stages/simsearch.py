@@ -23,14 +23,17 @@ Layout::
 
     <workdir>/simsearch/cycle<N>/
         queries_<name>.smi                  # one query per line
-        spacelightresult_<task>.csv         # per-task search output
-        ftreesresult_<task>.csv
+        results/
+            spacelightresult_<task>.csv     # per-task search output
+            ftreesresult_<task>.csv
         CONTROL/
-            control.param                   # 12-line property bounds
-            control_<i>.smi.gz              # one chunk per task
-            propoutput_control_<i>.csv      # post-prop-filter
-            predicted_propoutput_control_<i>.csv  # post-chemprop predict
-            v<N>/model_0/pytorch_model.bin  # materialised model
+            inputs/
+                control.param              # 12-line property bounds
+                control_<i>.smi.gz         # one chunk per task
+            results_propfilter/
+                propoutput_control_<i>.csv      # post-prop-filter
+            results_prediction/
+                predicted_propoutput_control_<i>.csv  # post-chemprop predict
 """
 
 from __future__ import annotations
@@ -110,11 +113,12 @@ def _build_search_command(
     scheduler runs in-place; SLURM users can prepend their own
     scratch lines via ``ArrayJob.env_setup``).
     """
+    results_dir = cycle_dir / "results"
     sl_cmd = " ".join(
         spacelight.command_for(
             "$query",
             space,
-            cycle_dir / "spacelightresult_${TASK_ID}.csv",
+            results_dir / "spacelightresult_${TASK_ID}.csv",
             max_results=nnn,
             similarity=sim_spacelight,
             threads=threads,
@@ -124,7 +128,7 @@ def _build_search_command(
         ftrees.command_for(
             "$query",
             space,
-            cycle_dir / "ftreesresult_${TASK_ID}.csv",
+            results_dir / "ftreesresult_${TASK_ID}.csv",
             max_results=nnn,
             similarity=sim_ftrees,
             threads=threads,
@@ -133,6 +137,7 @@ def _build_search_command(
     # Note: $query is a bash variable; it is intentionally NOT formatted
     # by python here so the local scheduler / sbatch sees the literal.
     return (
+        f'mkdir -p {results_dir}\n'
         f'query=$(sed -n "${{TASK_ID}}p" {queries_file} | awk \'{{print $1}}\')\n'
         f'echo "[task ${{TASK_ID}}] query: $query"\n'
         f'{sl_cmd}\n'
@@ -161,13 +166,14 @@ def _aggregate_search_results(
     similarity per SMILES across multiple result rows / pagination
     files (legacy behaviour: groupby SMILES, max).
     """
+    results_dir = cycle_dir / "results"
     raw_mols: dict[str, str] = {}
     sims: dict[str, dict[str, float]] = {m: {} for m in _SIM_METHODS}
     for method in _SIM_METHODS:
         sim_field = field_spacelight if method == "spacelight" else field_ftrees
         # Match either ``<m>result_<task>.csv`` or legacy paginated
         # ``<m>result_<task>_<page>.csv``.
-        for resfile in sorted(cycle_dir.glob(f"{method}result_*.csv")):
+        for resfile in sorted(results_dir.glob(f"{method}result_*.csv")):
             with resfile.open("rt", encoding="utf-8", newline="") as fh:
                 reader = csv.DictReader(fh)
                 fields = reader.fieldnames or []
@@ -204,8 +210,9 @@ def _write_control_chunks(
     Returns the number of chunks actually written (may be less than
     ``n_chunks`` when ``len(raw_mols) < n_chunks``).
     """
-    control_dir.mkdir(parents=True, exist_ok=True)
-    for stale in control_dir.glob("control_*.smi.gz"):
+    inputs_dir = control_dir / "inputs"
+    inputs_dir.mkdir(parents=True, exist_ok=True)
+    for stale in inputs_dir.glob("control_*.smi.gz"):
         stale.unlink()
     items = list(raw_mols.values())
     if not items:
@@ -217,7 +224,7 @@ def _write_control_chunks(
         slice_ = items[i * chunk_size : (i + 1) * chunk_size]
         if not slice_:
             break
-        path = control_dir / f"control_{i + 1}.smi.gz"
+        path = inputs_dir / f"control_{i + 1}.smi.gz"
         with gzip.open(path, "wt", encoding="utf-8") as w:
             for line in slice_:
                 w.write(line + "\n")
@@ -258,16 +265,16 @@ def _build_control_command(
 
     Each task receives ``${TASK_ID}`` and:
 
-    1. Runs ``prop_filter`` on ``control_${TASK_ID}.smi.gz``, producing
-       ``propoutput_control_${TASK_ID}.csv`` next to the input.
+    1. Runs ``prop_filter`` on ``inputs/control_${TASK_ID}.smi.gz``, producing
+       ``results_propfilter/propoutput_control_${TASK_ID}.csv``.
     2. Runs ``predict`` on that CSV, producing
-       ``predicted_propoutput_control_${TASK_ID}.csv``.
+       ``results_prediction/predicted_propoutput_control_${TASK_ID}.csv``.
     """
     g = settings.general
-    in_smi = "control_${TASK_ID}.smi.gz"
-    propout = "propoutput_control_${TASK_ID}.csv"
-    predout = "predicted_propoutput_control_${TASK_ID}.csv"
-    param = "control.param"
+    in_smi = "inputs/control_${TASK_ID}.smi.gz"
+    propout = "results_propfilter/propoutput_control_${TASK_ID}.csv"
+    predout = "results_prediction/predicted_propoutput_control_${TASK_ID}.csv"
+    param = "inputs/control.param"
 
     pf_parts = [*prop_filter_prefix, in_smi, param, "--output", propout]
     pred_parts = [
@@ -280,6 +287,7 @@ def _build_control_command(
     pf_cmd = " ".join(pf_parts)
     pred_cmd = " ".join(pred_parts)
     return (
+        f'mkdir -p results_propfilter results_prediction\n'
         f'echo "[task ${{TASK_ID}}] Property filter"\n'
         f'{pf_cmd}\n'
         f'echo "[task ${{TASK_ID}}] Predicting"\n'
@@ -298,17 +306,18 @@ def _build_control_command(
 def _ingest_predictions(
     control_dir: Path,
 ) -> tuple[list[tuple[str, str, str]], dict[str, float]]:
-    """Read ``predicted_propoutput_control_*.csv`` files.
+    """Read ``results_prediction/predicted_propoutput_control_*.csv`` files.
 
     :returns: ``(rows, scores)`` where ``rows`` is a list of
         ``(reghash, smiles, title)`` triples in first-seen order
         (deduplicated by reghash with min-score retention) and
         ``scores`` is ``{reghash: min_predicted_score}``.
     """
-    files = sorted(control_dir.glob("predicted_propoutput_control_*.csv"))
+    pred_dir = control_dir / "results_prediction"
+    files = sorted(pred_dir.glob("predicted_propoutput_control_*.csv"))
     if not files:
         raise FileNotFoundError(
-            f"no predicted_propoutput_control_*.csv under {control_dir}"
+            f"no predicted_propoutput_control_*.csv under {pred_dir}"
         )
     scores: dict[str, float] = {}
     rows: list[tuple[str, str, str]] = []
@@ -521,7 +530,7 @@ def simsearch(
     n_chunks = _write_control_chunks(raw_mols, control_dir, cpu)
     logger.info("Wrote %d control chunks to %s", n_chunks, control_dir)
 
-    _write_control_param(control_dir / "control.param", db)
+    _write_control_param(control_dir / "inputs" / "control.param", db)
 
     # Resolve the model path. Use the absolute path so the control script
     # can reference it directly without copying into CONTROL/.

@@ -58,8 +58,8 @@ explores chemical space:
 
 1. **Dock seed molecules** — a small set of seed compounds is docked with
    Schrödinger Glide to produce initial docking scores.
-2. **Train a surrogate model** — a chemprop D-MPNN regressor is trained on
-   the docking scores to predict binding affinity from SMILES alone.
+2. **Train a surrogate model** — a chemprop D-MPNN regressor is trained 
+   to predict docking scores directly from smiles.
 3. **Similarity search** — top-scoring compounds serve as queries for
    SpaceLight and FTrees searches against the BioSolveIT `.space` file,
    retrieving structurally related molecules from billions of candidates.

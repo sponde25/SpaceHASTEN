@@ -109,12 +109,14 @@ def test_export_poses_invokes_script_per_pv(tmp_path: Path) -> None:
     # Build a fake docking dir with a tar containing two *_pv.maegz files.
     dock_dir = workdir.docking_dir(1)
     dock_dir.mkdir(parents=True, exist_ok=True)
+    results_dir = dock_dir / "results"
+    results_dir.mkdir(parents=True, exist_ok=True)
     pv_a = tmp_path / "stage" / "chunk_1_pv.maegz"
     pv_b = tmp_path / "stage" / "chunk_2_pv.maegz"
     pv_a.parent.mkdir(parents=True, exist_ok=True)
     pv_a.write_bytes(b"FAKE-A")
     pv_b.write_bytes(b"FAKE-B")
-    tar_path = dock_dir / "results-chunk_1.tar.gz"
+    tar_path = results_dir / "results-chunk_1.tar.gz"
     with tarfile.open(tar_path, "w:gz") as tf:
         tf.add(pv_a, arcname="chunk_1_pv.maegz")
         tf.add(pv_b, arcname="chunk_2_pv.maegz")

@@ -26,7 +26,7 @@ from spacehasten.workspace.layout import WorkDir
 _STUB_BODY = r"""
 set -eu
 chunk="chunk_${TASK_ID}"
-smi="${chunk}.smi"
+smi="inputs/${chunk}.smi"
 csv="glide_${chunk}.csv"
 echo "title,r_i_docking_score" > "$csv"
 i=0
@@ -38,7 +38,8 @@ while IFS= read -r line; do
   echo "${sid},-8.0" >> "$csv"
   i=$((i+1))
 done < "$smi"
-tar -czf "results-${chunk}.tar.gz" "$csv"
+mkdir -p results
+tar -czf "results/results-${chunk}.tar.gz" "$csv"
 """
 
 
@@ -93,10 +94,11 @@ def test_dock_stage_local_stub(tmp_path: Path) -> None:
     # Per-chunk artefacts exist on disk.
     dock_dir = workdir.docking_dir(1)
     assert (dock_dir / "glide_grid.zip").exists()
-    smi_files = sorted(dock_dir.glob("chunk_*.smi"))
-    inp_files = sorted(dock_dir.glob("chunk_*.inp"))
-    glide_in_files = sorted(dock_dir.glob("glide_chunk_*.in"))
-    tarballs = sorted(dock_dir.glob("results-chunk_*.tar.gz"))
+    inputs_dir = dock_dir / "inputs"
+    smi_files = sorted(inputs_dir.glob("chunk_*.smi"))
+    inp_files = sorted(inputs_dir.glob("chunk_*.inp"))
+    glide_in_files = sorted(inputs_dir.glob("glide_chunk_*.in"))
+    tarballs = sorted((dock_dir / "results").glob("results-chunk_*.tar.gz"))
     assert smi_files, "no chunk SMI files produced"
     assert len(smi_files) == len(inp_files) == len(glide_in_files) == len(tarballs)
     # cpus=4, top_n=10 → chunk_size = round(10/4) = 2 (< 1000), 5 chunks.
@@ -104,7 +106,7 @@ def test_dock_stage_local_stub(tmp_path: Path) -> None:
 
     # The Glide .in files reference the per-chunk LigPrep output and the
     # local grid zip — not the originals from the template blob.
-    sample = (dock_dir / "glide_chunk_1.in").read_text()
+    sample = (inputs_dir / "glide_chunk_1.in").read_text()
     assert sample.startswith("LIGANDFILE   chunk_1_1.maegz\n")
     assert "GRIDFILE     glide_grid.zip\n" in sample
     assert "/old.zip" not in sample and "/old.maegz" not in sample
@@ -224,7 +226,7 @@ def test_dock_stage_persists_a_valid_results_tar(tmp_path: Path) -> None:
     )
     db.close()
 
-    tarballs = sorted((workdir.docking_dir(1)).glob("results-chunk_*.tar.gz"))
+    tarballs = sorted((workdir.docking_dir(1) / "results").glob("results-chunk_*.tar.gz"))
     assert tarballs
     for tar_path in tarballs:
         with tarfile.open(tar_path) as tf:
