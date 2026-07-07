@@ -34,6 +34,7 @@ def test_top_level_help_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
         ["export"],
         ["export", "csv"],
         ["export", "poses"],
+        ["export", "seeds"],
         ["archive"],
         ["archive", "create"],
         ["archive", "extract"],
@@ -61,6 +62,7 @@ def test_subcommand_help_exits_zero(subcommand: list[str]) -> None:
         ["dock"],
         ["export", "csv"],
         ["export", "poses"],
+        ["export", "seeds"],
         ["archive", "extract"],
         ["archive", "restore"],
         # Bad choices.
@@ -100,6 +102,7 @@ def test_each_subcommand_parses_minimally(tmp_path) -> None:  # type: ignore[no-
         ["-w", str(ws), "screening-cycle", "--simsearch-top-n", "100", "--simsearch-jobs", "4", "--dock-top-n", "1000", "--dock-cpus", "4"],
         ["-w", str(ws), "export", "csv", "--cutoff", "-7", "--output", "out.csv"],
         ["-w", str(ws), "export", "poses", "--cutoff", "-7", "--output", "out.mae"],
+        ["-w", str(ws), "export", "seeds", "--output", "seeds.csv"],
         ["-w", str(ws), "archive", "create"],
         ["archive", "extract", "--archive", str(archive_path), "--target", str(tmp_path / "t1")],
         ["archive", "restore", "--archive", str(archive_path), "--target", str(tmp_path / "t2")],

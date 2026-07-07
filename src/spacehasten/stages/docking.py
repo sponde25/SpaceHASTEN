@@ -112,10 +112,8 @@ def _build_dock_command_body(settings: Settings, dock_dir: Path) -> str:
         ' -HOST localhost:1 glide_chunk_${TASK_ID}.in',
         'echo "[task ${TASK_ID}] Packaging results"',
         'rm -f glide_grid.zip',
-        'tar --exclude=results-chunk_${TASK_ID}.tar.gz'
-        ' -czf results-chunk_${TASK_ID}.tar.gz .',
         'mkdir -p "$curdir/results"',
-        'mv results-chunk_${TASK_ID}.tar.gz "$curdir/results/"',
+        'tar -czf "$curdir/results/results-chunk_${TASK_ID}.tar.gz" .',
         'cd "$curdir"',
         'rm -fr "$scratch_dir"',
         'echo "[task ${TASK_ID}] Done"',

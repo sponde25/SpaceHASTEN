@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 # --------------------------------------------------------------------------- #
 
 
-def _typed_to_db_props(props: TypedPropertyRanges) -> DbPropertyRanges:
+def typed_to_db_props(props: TypedPropertyRanges) -> DbPropertyRanges:
     """Convert the typed pydantic :class:`PropertyRanges` to the DB form."""
     return DbPropertyRanges(
         mw=(str(props.mw.min), str(props.mw.max)),
@@ -43,6 +43,14 @@ def _typed_to_db_props(props: TypedPropertyRanges) -> DbPropertyRanges:
         hbd=(str(props.hbd.min), str(props.hbd.max)),
         rotbonds=(str(props.rotbonds.min), str(props.rotbonds.max)),
         tpsa=(str(props.tpsa.min), str(props.tpsa.max)),
+    )
+
+
+def typed_smarts_to_db(props: TypedPropertyRanges) -> list[tuple[str, str]]:
+    """Extract SMARTS include/exclude pairs from a typed :class:`PropertyRanges`."""
+    return (
+        [("include", s) for s in props.smarts_include]
+        + [("exclude", s) for s in props.smarts_exclude]
     )
 
 
@@ -160,8 +168,9 @@ def import_seeds(
     assert seed_path is not None  # for type checker
     is_csv = csv_path is not None
 
-    # 1. Properties.
-    db.replace_properties(_typed_to_db_props(props))
+    # 1. Properties (numerical ranges + SMARTS patterns).
+    db.replace_properties(typed_to_db_props(props))
+    db.replace_smarts_filters(typed_smarts_to_db(props))
 
     # 2. Read seeds.
     if is_csv:
@@ -207,4 +216,4 @@ def import_seeds(
     return n_inserted
 
 
-__all__ = ["import_seeds"]
+__all__ = ["import_seeds", "typed_to_db_props", "typed_smarts_to_db"]

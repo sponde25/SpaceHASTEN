@@ -56,7 +56,7 @@ command groups:
   workflows (recommended)
     seed-training       Import seeds → dock → train → cluster
     screening-cycle     [train] → (search → predict)×3 → dock per round
-    export              Export results (csv, poses)
+    export              Export results (csv, poses, seeds)
 
   manual stages (expert)
     import-seeds        Import seed compounds into the database (no training)
@@ -246,6 +246,8 @@ def _add_screening_cycle(sub: argparse._SubParsersAction[argparse.ArgumentParser
                    help="Optional. BioSolveIT .space file override. Default: from config.")
     p.add_argument("--nnn", type=int, default=None,
                    help="Optional. Max results per query from chemical space. Default: from config.")
+    p.add_argument("--props-toml", type=Path, default=None,
+                   help="Optional. PropertyRanges TOML to update the stored property filter ranges before running. Default: use ranges already in the database.")
     p.set_defaults(func=_cmd_screening_cycle)
 
 
@@ -268,6 +270,14 @@ def _add_export(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> Non
     poses_p.add_argument("--iteration", type=int, default=None,
                          help="Optional. Limit to a specific docking iteration. Default: all iterations.")
     poses_p.set_defaults(func=_cmd_export_poses)
+
+    seeds_p = sub2.add_parser(
+        "seeds",
+        help="Export the original seed batch as a CSV (for `import-seeds --csv`).",
+    )
+    seeds_p.add_argument("--output", type=Path, required=True,
+                         help="Output CSV file path.")
+    seeds_p.set_defaults(func=_cmd_export_seeds)
 
 
 def _add_archive(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -352,10 +362,13 @@ def _cmd_init(args: argparse.Namespace) -> int:
         db.store_dock_param(Path(args.dock_params).read_bytes())
         db.store_dock_grid(Path(args.dock_grid).read_bytes())
 
+    PropertyRanges().to_toml(workdir.props_path())
+
     logger.info("Workspace initialised: root=%s  shared=%s", root, shared_root)
     print(f"Initialised workspace at {root}")
     print(f"  local root (DB + logs): {root}")
     print(f"  shared root (stages):   {shared_root}")
+    print(f"  property filter template: {workdir.props_path()} (edit before running seed-training or screening-cycle)")
     return 0
 
 
@@ -527,6 +540,11 @@ def _cmd_screening_cycle(args: argparse.Namespace) -> int:
 
     strategy: Literal["greedy", "clustering"] = args.strategy
     with open_db(args) as db:
+        if args.props_toml is not None:
+            props = PropertyRanges.from_toml(args.props_toml)
+            db.replace_properties(seeds.typed_to_db_props(props))
+            db.replace_smarts_filters(seeds.typed_smarts_to_db(props))
+            logger.info("Updated property filter ranges from %s", args.props_toml)
         for round_n in range(1, args.rounds + 1):
             logger.info("Screening round %d/%d", round_n, args.rounds)
 
@@ -586,6 +604,14 @@ def _cmd_export_poses(args: argparse.Namespace) -> int:
             settings=settings,
         )
     print(f"Wrote poses to {out}")
+    return 0
+
+
+def _cmd_export_seeds(args: argparse.Namespace) -> int:
+    setup_logging(workdir_from_args(args), args)
+    with open_db(args) as db:
+        n = export.export_seeds(db, args.output)
+    print(f"Exported {n} seed rows to {args.output}")
     return 0
 
 

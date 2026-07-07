@@ -211,6 +211,11 @@ class Database:
         " WHERE data.spacehastenid = clusters.spacehastenid AND dock_score <= ?\n"
         " ORDER BY dock_score"
     )
+    _SQL_SELECT_SEEDS: Final[str] = (
+        "SELECT smiles, smilesid, dock_score FROM data\n"
+        " WHERE dock_iteration = 0\n"
+        " ORDER BY spacehastenid"
+    )
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
@@ -501,7 +506,34 @@ class Database:
             tpsa=index["tpsa"],
         )
 
-    # ----- acquisition selects (§A.6 verbatim) -----
+    # ----- smarts filters -----
+
+    def replace_smarts_filters(self, patterns: list[tuple[str, str]]) -> None:
+        """Persist SMARTS include/exclude patterns.
+
+        ``patterns`` is a list of ``(mode, smarts)`` pairs where *mode* is
+        either ``'include'`` or ``'exclude'``.  Calling with an empty list
+        clears any previously stored patterns.
+        """
+        c = self._conn.cursor()
+        c.execute("DROP TABLE IF EXISTS smarts_filters")
+        c.execute("CREATE TABLE smarts_filters (mode TEXT, pattern TEXT)")
+        if patterns:
+            c.executemany(
+                "INSERT INTO smarts_filters (mode, pattern) VALUES (?, ?)",
+                patterns,
+            )
+
+    def load_smarts_filters(self) -> list[tuple[str, str]]:
+        """Return stored ``(mode, smarts)`` pairs, or ``[]`` if none stored."""
+        try:
+            rows = self._conn.execute(
+                "SELECT mode, pattern FROM smarts_filters"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return []
+        return [(str(r[0]), str(r[1])) for r in rows]
+
 
     def select_queries_for_simsearch(
         self,
@@ -568,6 +600,22 @@ class Database:
                 clusterid=row[8],
             )
             for row in self._conn.execute(self._SQL_SELECT_EXPORT, (cutoff,)).fetchall()
+        ]
+
+    def select_seed_rows(self) -> list[tuple[str, str, float]]:
+        """Docked rows from the original seed batch (``dock_iteration == 0``).
+
+        ``dock_iteration == 0`` uniquely identifies the seed round: it is
+        set on pre-docked CSV seed imports (:meth:`insert_seed_docked`) and
+        is also the iteration number assigned to the first ever ``dock``
+        call (which docks previously-undocked ``.smi`` seeds). Every later
+        ``dock`` call gets ``iteration = latest + 1 >= 1``, so compounds
+        discovered in subsequent screening cycles never carry
+        ``dock_iteration == 0``.
+        """
+        return [
+            (row[0], row[1], row[2])
+            for row in self._conn.execute(self._SQL_SELECT_SEEDS).fetchall()
         ]
 
     # ----- bulk applies (used by stages, not specified above but useful) -----

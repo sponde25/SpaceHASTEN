@@ -41,9 +41,19 @@ class IntRange(BaseModel):
 
 
 class PropertyRanges(BaseModel):
-    """Property-filter ranges for ligand acquisition.
+    """Property-filter ranges and optional SMARTS patterns for ligand acquisition.
 
     Defaults match the legacy ``cfg.SpaceHASTENConfiguration`` defaults.
+    SMARTS filtering is opt-in: both lists are empty by default (no filtering).
+
+    ``smarts_include``: molecule must match **at least one** pattern (scaffold
+    requirement).  Empty list = no include constraint.
+
+    ``smarts_exclude``: molecule must match **none** of the patterns (structural
+    alert / PAINS removal).  Empty list = no exclude constraint.
+
+    Invalid SMARTS strings are detected at filtering time (compute-node side)
+    and will abort the prop-filter task with an error.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -54,6 +64,8 @@ class PropertyRanges(BaseModel):
     hbd: IntRange = Field(default_factory=lambda: IntRange(min=0, max=5))
     rotbonds: IntRange = Field(default_factory=lambda: IntRange(min=0, max=10))
     tpsa: FloatRange = Field(default_factory=lambda: FloatRange(min=0.0, max=140.0))
+    smarts_include: list[str] = Field(default_factory=list)
+    smarts_exclude: list[str] = Field(default_factory=list)
 
     @classmethod
     def from_toml(cls, path: Path) -> PropertyRanges:

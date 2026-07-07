@@ -11,7 +11,7 @@ import pytest
 
 from spacehasten.config.settings import Settings
 from spacehasten.core.db import ClusterRow, Database
-from spacehasten.stages.export import export_csv, export_poses
+from spacehasten.stages.export import export_csv, export_poses, export_seeds
 from spacehasten.workspace.layout import WorkDir
 
 
@@ -53,6 +53,65 @@ def test_export_csv_filters_and_formats(tmp_path: Path) -> None:
     assert body[0][1] == "ethanol-1/1"
     assert float(body[0][2]) == -8.5
     assert body[0][6] == "0"  # dock_iteration
+
+
+def test_export_seeds_formats_for_reimport(tmp_path: Path) -> None:
+    workdir = WorkDir.bootstrap(tmp_path / "ws", name="exp")
+    db = Database(workdir.dbsh())
+    _seed_db(db)
+    out = tmp_path / "seeds.csv"
+
+    n = export_seeds(db, out)
+
+    # All 3 seed rows — seeds are not filtered by dock_score.
+    assert n == 3
+    with out.open("rt", encoding="utf-8") as fh:
+        rows = list(csv.reader(fh))
+    assert rows[0] == ["SMILES", "title", "r_i_docking_score"]
+    body = rows[1:]
+    assert len(body) == 3
+    # Ordered by insertion (spacehastenid), not by score.
+    assert body[0] == ["CCO", "ethanol-1", "-8.5"]
+    assert body[1] == ["c1ccccc1", "benzene-1", "-7.0"]
+    assert body[2] == ["Cc1ccccc1", "toluene-1", "1.0"]
+
+    # Round-trips through import_seeds using the default CSV column names.
+    from spacehasten.config.properties import PropertyRanges
+    from spacehasten.stages.seeds import import_seeds
+
+    workdir2 = WorkDir.bootstrap(tmp_path / "ws2", name="exp2")
+    db2 = Database(workdir2.dbsh())
+    db2.create_schema()
+    n_imported = import_seeds(db2, csv_path=out, props=PropertyRanges())
+    db2.close()
+    db.close()
+
+    assert n_imported == 3
+
+
+def test_export_seeds_excludes_later_screening_cycles(tmp_path: Path) -> None:
+    """Compounds docked in later screening cycles (``dock_iteration >= 1``)
+    must not appear in the seed export, even if their score would pass a
+    typical cutoff."""
+    workdir = WorkDir.bootstrap(tmp_path / "ws", name="exp")
+    db = Database(workdir.dbsh())
+    _seed_db(db)  # 3 seed rows at dock_iteration == 0
+
+    # Simulate a compound discovered via simsearch and docked in round 1.
+    sid = db.insert_simsearch_hit("h4", "CCN", "later-hit-1", None, None, None, 1)
+    db.apply_dock_scores([(-9.5, 1, sid)])
+    db.commit()
+
+    out = tmp_path / "seeds.csv"
+    n = export_seeds(db, out)
+    db.close()
+
+    assert n == 3
+    with out.open("rt", encoding="utf-8") as fh:
+        rows = list(csv.reader(fh))
+    titles = [r[1] for r in rows[1:]]
+    assert titles == ["ethanol-1", "benzene-1", "toluene-1"]
+    assert "later-hit-1" not in titles
 
 
 def test_export_poses_requires_docking_dir(tmp_path: Path) -> None:

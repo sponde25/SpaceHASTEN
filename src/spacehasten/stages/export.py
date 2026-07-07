@@ -39,6 +39,9 @@ _EXPORT_HEADER: tuple[str, ...] = (
     "clusterid",
 )
 
+# Matches ``seeds.import_seeds`` CSV defaults (smiles_col, title_col, score_col).
+_SEEDS_HEADER: tuple[str, ...] = ("SMILES", "title", "r_i_docking_score")
+
 
 def export_csv(db: Database, output: Path, *, cutoff: float) -> int:
     """Export ``data ⨝ clusters`` rows with ``dock_score <= cutoff``.
@@ -74,6 +77,41 @@ def export_csv(db: Database, output: Path, *, cutoff: float) -> int:
                 r.clusterid,
             ])
     logger.info("Exported %d rows to %s", len(rows), output)
+    return len(rows)
+
+
+def export_seeds(db: Database, output: Path) -> int:
+    """Export the original seed batch (``dock_iteration == 0``) as a CSV,
+    ready to feed straight back into ``spacehasten import-seeds --csv``
+    (e.g. to seed a new workspace)::
+
+        SMILES,title,r_i_docking_score
+
+    These are exactly the column names/defaults ``seeds.import_seeds``
+    expects, so no ``--smiles-col``/``--title-col``/``--score-col``
+    overrides are needed on import.
+
+    Unlike :func:`export_csv`, seeds are identified structurally by
+    ``dock_iteration == 0`` rather than by a docking-score cutoff — a
+    compound is either part of the original seed batch or it isn't,
+    regardless of its score. Compounds discovered in later screening
+    cycles (``dock_iteration >= 1``) are never included.
+
+    :returns: number of rows written.
+    """
+    output = Path(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    rows = db.select_seed_rows()
+    with output.open("wt", encoding="utf-8", newline="") as fh:
+        writer = csv.writer(fh, lineterminator="\n")
+        writer.writerow(_SEEDS_HEADER)
+        for smiles, smilesid, dock_score in rows:
+            writer.writerow([
+                (smiles or "").strip(),
+                (smilesid or "").strip(),
+                dock_score,
+            ])
+    logger.info("Exported %d seed rows to %s", len(rows), output)
     return len(rows)
 
 
@@ -222,4 +260,4 @@ def export_poses(
     return output
 
 
-__all__ = ["export_csv", "export_poses"]
+__all__ = ["export_csv", "export_poses", "export_seeds"]
