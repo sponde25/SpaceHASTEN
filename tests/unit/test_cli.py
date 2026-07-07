@@ -42,6 +42,8 @@ def test_top_level_help_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
         ["archive", "clean"],
         ["status"],
         ["resume"],
+        ["undo"],
+        ["undo", "search"],
         ["verify"],
     ],
 )
@@ -65,6 +67,7 @@ def test_subcommand_help_exits_zero(subcommand: list[str]) -> None:
         ["export", "seeds"],
         ["archive", "extract"],
         ["archive", "restore"],
+        ["undo"],  # missing undo_kind subcommand
         # Bad choices.
         ["search", "--source", "bogus", "--top-n", "1"],
         ["dock", "--top-n", "1", "--strategy", "bogus"],

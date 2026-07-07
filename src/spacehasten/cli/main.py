@@ -70,6 +70,7 @@ command groups:
   utilities
     status              Print workspace manifest summary
     resume              Resume the last interrupted run
+    undo                Revert a failed or unwanted search cycle (manual intervention)
     archive             Archive lifecycle (create/extract/restore/clean)
     verify              End-to-end smoke test
 """
@@ -100,6 +101,7 @@ command groups:
     _add_archive(sub)
     _add_status(sub)
     _add_resume(sub)
+    _add_undo(sub)
     _add_verify(sub)
     return parser
 
@@ -321,6 +323,27 @@ def _add_status(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> Non
 def _add_resume(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     p = sub.add_parser("resume", help="Resume the last interrupted run (alias of status).")
     p.set_defaults(func=_cmd_resume)
+
+
+def _add_undo(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    p = sub.add_parser(
+        "undo",
+        help="Revert a failed or unwanted operation. Manual-intervention only.",
+    )
+    sub2 = p.add_subparsers(dest="undo_kind", required=True)
+
+    search_p = sub2.add_parser(
+        "search",
+        help="Revert the latest simsearch cycle: delete its hit compounds and "
+             "release its query marks so those compounds can be selected as "
+             "queries again.",
+    )
+    search_p.add_argument(
+        "--yes", "-y", action="store_true",
+        help="Optional. Skip the confirmation prompt. Required when stdin is "
+             "not a terminal (e.g. scripted use).",
+    )
+    search_p.set_defaults(func=_cmd_undo_search)
 
 
 def _add_verify(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -698,6 +721,67 @@ def _cmd_status(args: argparse.Namespace) -> int:
 def _cmd_resume(args: argparse.Namespace) -> int:
     # Resume semantics are not yet defined beyond status; mirror status.
     return _cmd_status(args)
+
+
+def _cmd_undo_search(args: argparse.Namespace) -> int:
+    """Revert the latest simsearch cycle (see :meth:`Database.undo_simsearch_cycle`).
+
+    Always targets the most recent search *attempt* (successful or
+    failed) — there is no ``--cycle`` argument, since a cycle whose hits
+    were already used as later queries can never be the latest attempt
+    (see :meth:`Database.latest_search_attempt_cycle`). This is
+    deliberately interactive: it is meant for the rare, manual-
+    intervention case where a search cycle failed after marking queries,
+    stranding those compounds behind ``query IS NOT NULL``.
+    """
+    workdir = workdir_from_args(args)
+    setup_logging(workdir, args)
+
+    with open_db(args) as db:
+        cycle = db.latest_search_attempt_cycle()
+        if cycle is None:
+            print("No simsearch cycles found; nothing to undo.")
+            return 0
+
+        stats = db.simsearch_cycle_stats(cycle)
+        outcome = "completed" if stats.n_hits > 0 else "failed or incomplete"
+        print(f"Latest search attempt: cycle {cycle} ({outcome})")
+        print(f"  hit compounds discovered  : {stats.n_hits}")
+        print(f"  compounds marked as query : {stats.n_queries}")
+
+        if not args.yes:
+            if not sys.stdin.isatty():
+                logger.error(
+                    "refusing to undo simsearch cycle %d non-interactively without --yes",
+                    cycle,
+                )
+                print(
+                    "error: `undo search` requires manual confirmation; "
+                    "re-run with --yes to confirm non-interactively, or run "
+                    "interactively to confirm at the prompt.",
+                    file=sys.stderr,
+                )
+                return 1
+            answer = input(
+                f"Undo simsearch cycle {cycle}? This deletes {stats.n_hits} hit "
+                f"compound(s) and releases {stats.n_queries} query mark(s). [y/N] "
+            )
+            if answer.strip().lower() not in ("y", "yes"):
+                print("Aborted; no changes made.")
+                return 1
+
+        try:
+            n_hits, n_queries = db.undo_simsearch_cycle(cycle)
+        except ValueError as exc:
+            logger.error("%s", exc)
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+
+    print(
+        f"Reverted cycle {cycle}: removed {n_hits} hit compound(s), "
+        f"released {n_queries} query mark(s)."
+    )
+    return 0
 
 
 def _cmd_verify(args: argparse.Namespace) -> int:
