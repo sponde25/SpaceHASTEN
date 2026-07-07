@@ -192,7 +192,7 @@ spacehasten init /wrk/$USER/myscreen \
     --dock-grid grid.zip \
     --config spacehasten.ini
 
-# Import seeds, dock them, train the first model, and cluster
+# Import seeds, dock them, and train the first model
 spacehasten seed-training \
     --smi seeds.smi \
     --dock-cpus 250 \
@@ -283,7 +283,7 @@ spacehasten pick-seeds \
 
 #### `spacehasten seed-training`
 
-Full bootstrap workflow: import seeds → dock → train → cluster.
+Full bootstrap workflow: import seeds → dock → train.
 
 ```
 spacehasten seed-training \
@@ -335,9 +335,14 @@ These give fine-grained control over individual pipeline stages:
 | `import-seeds --smi FILE` or `--csv FILE` | Import seed compounds (no training) |
 | `train [--cutoff 10.0]` | Train one chemprop model |
 | `predict [--model-version N]` | Predict scores for undocked rows |
-| `search --source docked\|predicted --top-n N --cpus N` | Run one similarity search cycle |
+| `search --source docked\|predicted --top-n N --cpus N [--strategy greedy\|clustering]` | Run one similarity search cycle |
 | `dock --top-n N --cpus N [--strategy greedy\|clustering]` | Dock the next batch of compounds |
 | `cluster` | Run sphere-exclusion clustering |
+
+`--strategy clustering` on `search`/`dock` requires cluster assignments to
+already exist — run `cluster` first (these manual stages never cluster
+automatically; that only happens inside `screening-cycle --strategy
+clustering`, which re-clusters before each search/dock step).
 
 ### Utility Commands
 

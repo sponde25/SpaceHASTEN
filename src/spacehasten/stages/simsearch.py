@@ -410,7 +410,6 @@ def simsearch(
     sim_ftrees: float | None = None,
     cpu: int = 1,
     threads_per_task: int = 2,
-    cluster_after: bool = False,
     spacelight_adapter: SpacelightAdapter | None = None,
     ftrees_adapter: FTreesAdapter | None = None,
     search_command_template: str | None = None,
@@ -423,7 +422,10 @@ def simsearch(
     :param source: ``docked`` or ``predicted`` — which score column to
         ORDER BY when picking queries.
     :param strategy: ``greedy`` or ``clustering`` — query acquisition
-        strategy.
+        strategy. ``clustering`` requires cluster assignments to already
+        exist (run ``spacehasten cluster`` first, or use
+        ``screening-cycle --strategy clustering``, which clusters
+        automatically before each round).
     :param top_n: number of queries (and hence search-array size).
     :param space: SpaceLight/FTrees ``.space`` file. Defaults to
         ``settings.paths.spaces_file_default``.
@@ -435,8 +437,6 @@ def simsearch(
         ``settings.general.sim_ftrees_default``.
     :param cpu: max concurrent control tasks (also chunk count cap).
     :param threads_per_task: ``--thread-count`` for the search tools.
-    :param cluster_after: re-run the clustering stage after ingestion
-        (mirrors legacy auto-trigger).
     :param search_command_template: override the canonical search body
         (used by tests with stub binaries).
     :param control_command_template: override the canonical control
@@ -449,6 +449,12 @@ def simsearch(
         raise ValueError(f"top_n must be >= 1, got {top_n}")
     if cpu < 1:
         raise ValueError(f"cpu must be >= 1, got {cpu}")
+    if strategy == "clustering" and not db.has_clusters():
+        raise ValueError(
+            "strategy='clustering' requires cluster assignments, but none exist yet;"
+            " run `spacehasten cluster` first (or use"
+            " `screening-cycle --strategy clustering`, which clusters automatically)"
+        )
 
     # --- Resolve defaults from settings ---------------------------------- #
     sp_exe = settings.paths.exe_spacelight_default
@@ -643,11 +649,6 @@ def simsearch(
         "Inserted %d new compounds (deduped %d existing reghashes) into cycle %d",
         inserted, len(rows) - inserted, cycle,
     )
-
-    if cluster_after:
-        from spacehasten.stages.clustering import cluster as _cluster
-
-        _cluster(db, workdir, scheduler, settings)
 
     return cycle
 

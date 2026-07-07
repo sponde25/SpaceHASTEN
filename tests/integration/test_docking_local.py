@@ -204,6 +204,35 @@ def test_dock_stage_no_candidates_raises(tmp_path: Path) -> None:
         db.close()
 
 
+def test_dock_stage_clustering_without_clusters_raises(tmp_path: Path) -> None:
+    """``strategy='clustering'`` must fail fast with a clear message when
+    ``spacehasten cluster`` has never been run (``clusters`` is empty)."""
+    workdir = WorkDir.bootstrap(tmp_path / "ws", name="noclu")
+    db = Database(workdir.dbsh())
+    _seed_db(db, n_predicted=6)
+
+    settings = Settings()
+    settings.paths.scratch_default = str(tmp_path / "scratch")
+    scheduler = LocalScheduler()
+    try:
+        dock(
+            db,
+            workdir,
+            scheduler,
+            settings,
+            top_n=5,
+            strategy="clustering",
+            cpus=1,
+            dock_command_template="exit 0",
+        )
+    except ValueError as exc:
+        assert "cluster" in str(exc).lower()
+    else:  # pragma: no cover
+        raise AssertionError("expected ValueError")
+    finally:
+        db.close()
+
+
 def test_dock_stage_persists_a_valid_results_tar(tmp_path: Path) -> None:
     """Smoke check: the stub produces a tar that ``tarfile`` can re-open."""
     workdir = WorkDir.bootstrap(tmp_path / "ws", name="tarcheck")

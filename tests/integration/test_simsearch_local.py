@@ -299,6 +299,32 @@ def test_simsearch_no_queries_raises(tmp_path: Path) -> None:
     db.close()
 
 
+def test_simsearch_clustering_without_clusters_raises(tmp_path: Path) -> None:
+    """``strategy='clustering'`` must fail fast with a clear message when
+    ``spacehasten cluster`` has never been run (``clusters`` is empty)."""
+    workdir = WorkDir.bootstrap(tmp_path / "ws", name="noclu")
+    db = Database(workdir.dbsh())
+    _seed_db(db)
+    db.commit()
+
+    settings = Settings()
+    scheduler = LocalScheduler()
+    with pytest.raises(ValueError, match="(?i)cluster"):
+        simsearch(
+            db,
+            workdir,
+            scheduler,
+            settings,
+            source="docked",
+            strategy="clustering",
+            top_n=2,
+            cpu=1,
+            search_command_template="exit 0",
+            control_command_template="exit 0",
+        )
+    db.close()
+
+
 def test_simsearch_requires_trained_model(tmp_path: Path) -> None:
     workdir = WorkDir.bootstrap(tmp_path / "ws", name="nomodel")
     db = Database(workdir.dbsh())

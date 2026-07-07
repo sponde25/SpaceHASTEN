@@ -570,6 +570,10 @@ class Database:
         )
         return [(s, i) for s, i in self._conn.execute(sql, (limit,)).fetchall()]
 
+    def has_clusters(self) -> bool:
+        """Whether ``clusters`` has any rows (i.e. ``cluster`` has run)."""
+        return self._conn.execute("SELECT 1 FROM clusters LIMIT 1").fetchone() is not None
+
     def select_undocked_for_prediction(
         self, batch_size: int = 10000
     ) -> Iterator[tuple[str, int]]:

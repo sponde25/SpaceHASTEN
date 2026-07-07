@@ -191,7 +191,10 @@ def dock(
 
     :param top_n: number of candidates to acquire from the DB.
     :param strategy: acquisition strategy passed straight to
-        :meth:`Database.select_compounds_to_dock`.
+        :meth:`Database.select_compounds_to_dock`. ``clustering`` requires
+        cluster assignments to already exist (run ``spacehasten cluster``
+        first, or use ``screening-cycle --strategy clustering``, which
+        clusters automatically before each round).
     :param cpus: maximum concurrent docking tasks (also the chunk-count
         cap — chunks scale down toward the CPU count when N is small).
     :param dock_command_template: per-task bash body. If ``None``, the
@@ -200,12 +203,19 @@ def dock(
     :param seed: optional RNG seed for the pre-chunk shuffle (tests).
     :returns: the new ``dock_iteration`` value.
     :raises RuntimeError: on scheduler failure or empty results.
-    :raises ValueError: when no compounds match the acquisition query.
+    :raises ValueError: when no compounds match the acquisition query, or
+        when ``strategy='clustering'`` but no cluster assignments exist.
     """
     if top_n < 1:
         raise ValueError(f"top_n must be >= 1, got {top_n}")
     if cpus < 1:
         raise ValueError(f"cpus must be >= 1, got {cpus}")
+    if strategy == "clustering" and not db.has_clusters():
+        raise ValueError(
+            "strategy='clustering' requires cluster assignments, but none exist yet;"
+            " run `spacehasten cluster` first (or use"
+            " `screening-cycle --strategy clustering`, which clusters automatically)"
+        )
 
     rows = db.select_compounds_to_dock(strategy, top_n)
     if not rows:

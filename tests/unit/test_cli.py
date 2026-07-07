@@ -129,3 +129,66 @@ def test_init_creates_workspace(tmp_path) -> None:  # type: ignore[no-untyped-de
     assert (shared / "models").is_dir()
     # .dbsh is created at init with schema and dock blobs
     assert (ws / "ws.dbsh").exists()
+
+
+def _init_workspace(tmp_path) -> "Path":  # type: ignore[no-untyped-def]
+    from pathlib import Path
+
+    ws = tmp_path / "ws"
+    shared = tmp_path / "shared"
+    dock_in = tmp_path / "dock.in"
+    dock_in.write_bytes(b"DOCK_PARAM_CONTENT")
+    grid = tmp_path / "grid.zip"
+    grid.write_bytes(b"GRID_CONTENT")
+    rc = main([
+        "init", str(ws), "--shared-root", str(shared),
+        "--dock-params", str(dock_in), "--dock-grid", str(grid),
+    ])
+    assert rc == 0
+    return Path(ws)
+
+
+def test_screening_cycle_clustering_strategy_autoclusters(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """``--strategy clustering`` must re-cluster before each of the 3
+    search steps and before the dock step, every round (4x per round)."""
+    from spacehasten.stages import clustering, docking, simsearch, training
+
+    ws = _init_workspace(tmp_path)
+
+    cluster_calls: list[int] = []
+    monkeypatch.setattr(clustering, "cluster", lambda *a, **k: cluster_calls.append(1) or 0)
+    monkeypatch.setattr(simsearch, "simsearch", lambda *a, **k: 1)
+    monkeypatch.setattr(docking, "dock", lambda *a, **k: 1)
+    monkeypatch.setattr(training, "train", lambda *a, **k: 1)
+
+    rc = main([
+        "-w", str(ws), "screening-cycle",
+        "--simsearch-top-n", "10", "--simsearch-jobs", "1",
+        "--dock-top-n", "10", "--dock-cpus", "1",
+        "--rounds", "2", "--strategy", "clustering",
+    ])
+    assert rc == 0
+    # 3 search steps + 1 dock step = 4 cluster calls per round.
+    assert len(cluster_calls) == 4 * 2
+
+
+def test_screening_cycle_greedy_strategy_never_clusters(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """``--strategy greedy`` must never invoke clustering."""
+    from spacehasten.stages import clustering, docking, simsearch, training
+
+    ws = _init_workspace(tmp_path)
+
+    cluster_calls: list[int] = []
+    monkeypatch.setattr(clustering, "cluster", lambda *a, **k: cluster_calls.append(1) or 0)
+    monkeypatch.setattr(simsearch, "simsearch", lambda *a, **k: 1)
+    monkeypatch.setattr(docking, "dock", lambda *a, **k: 1)
+    monkeypatch.setattr(training, "train", lambda *a, **k: 1)
+
+    rc = main([
+        "-w", str(ws), "screening-cycle",
+        "--simsearch-top-n", "10", "--simsearch-jobs", "1",
+        "--dock-top-n", "10", "--dock-cpus", "1",
+        "--rounds", "2", "--strategy", "greedy",
+    ])
+    assert rc == 0
+    assert cluster_calls == []

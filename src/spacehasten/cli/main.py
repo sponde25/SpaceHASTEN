@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Literal
 
 from spacehasten.config.properties import PropertyRanges
+from spacehasten.core.db import Database
 from spacehasten.stages import (
     archive,
     clustering,
@@ -54,7 +55,7 @@ command groups:
     pick-seeds          Sample and canonicalize seeds from a large collection
 
   workflows (recommended)
-    seed-training       Import seeds → dock → train → cluster
+    seed-training       Import seeds → dock → train
     screening-cycle     [train] → (search → predict)×3 → dock per round
     export              Export results (csv, poses, seeds)
 
@@ -159,7 +160,7 @@ def _add_import_seeds(sub: argparse._SubParsersAction[argparse.ArgumentParser]) 
 def _add_seed_training(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     p = sub.add_parser(
         "seed-training",
-        help="Workflow: import seeds → dock → train → cluster.",
+        help="Workflow: import seeds → dock → train.",
     )
     p.add_argument("--smi", type=Path, required=True, help="SMI file with undocked seed compounds.")
     p.add_argument("--dock-cpus", type=int, required=True, help="Number of concurrent docking tasks.")
@@ -193,7 +194,9 @@ def _add_search(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> Non
     p.add_argument("--cpus", type=int, required=True,
                    help="Number of CPUs for simsearch tasks. Recommendation: max 250.")
     p.add_argument("--strategy", choices=("greedy", "clustering"), default="greedy",
-                   help="Optional. Query acquisition strategy. Default: greedy.")
+                   help="Optional. Query acquisition strategy. Default: greedy."
+                        " 'clustering' requires cluster assignments to already exist"
+                        " (run `spacehasten cluster` first).")
     p.add_argument("--space", type=Path, default=None,
                    help="Optional. BioSolveIT .space file override. Default: from config.")
     p.add_argument("--nnn", type=int, default=None,
@@ -204,8 +207,6 @@ def _add_search(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> Non
                    help="Optional. FTrees similarity threshold. Default: from config.")
     p.add_argument("--threads-per-task", type=int, default=2,
                    help="Optional. Threads per simsearch task. Default: 2.")
-    p.add_argument("--cluster-after", action="store_true",
-                   help="Optional. Run clustering after search completes.")
     p.set_defaults(func=_cmd_search)
 
 
@@ -216,7 +217,9 @@ def _add_dock(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     p.add_argument("--cpus", type=int, required=True,
                    help="Number of CPUs for docking tasks. Recommendation: max 250.")
     p.add_argument("--strategy", choices=("greedy", "clustering"), default="greedy",
-                   help="Optional. Acquisition strategy for choosing which compounds to dock. Default: greedy.")
+                   help="Optional. Acquisition strategy for choosing which compounds to dock. Default: greedy."
+                        " 'clustering' requires cluster assignments to already exist"
+                        " (run `spacehasten cluster` first).")
     p.set_defaults(func=_cmd_dock)
 
 
@@ -241,7 +244,8 @@ def _add_screening_cycle(sub: argparse._SubParsersAction[argparse.ArgumentParser
     p.add_argument("--rounds", type=int, default=1,
                    help="Optional. Number of screening cycle rounds. Default: 1.")
     p.add_argument("--strategy", choices=("greedy", "clustering"), default="greedy",
-                   help="Optional. Acquisition strategy for choosing which compounds to dock. Default: greedy.")
+                   help="Optional. Acquisition strategy for choosing which compounds to dock. Default: greedy."
+                        " 'clustering' auto-clusters before each search/dock step in every round.")
     p.add_argument("--space", type=Path, default=None,
                    help="Optional. BioSolveIT .space file override. Default: from config.")
     p.add_argument("--nnn", type=int, default=None,
@@ -333,8 +337,6 @@ def _add_verify(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> Non
 
 
 def _cmd_init(args: argparse.Namespace) -> int:
-    from spacehasten.core.db import Database
-
     root = Path(args.path).resolve()
     name = args.name or root.name
     settings = settings_from_args(args)
@@ -436,7 +438,7 @@ def _cmd_seed_training(args: argparse.Namespace) -> int:
             props=props,
             processes=args.processes,
         )
-        logger.info("Imported %d seeds; starting dock → train → cluster", n)
+        logger.info("Imported %d seeds; starting dock → train", n)
         docking.dock(
             db, workdir, scheduler, settings,
             top_n=n,
@@ -446,9 +448,8 @@ def _cmd_seed_training(args: argparse.Namespace) -> int:
         training.train(
             db, workdir, scheduler, settings,
         )
-        clustering.cluster(db, workdir, scheduler, settings)
 
-    print(f"Seed-training complete ({n} seeds imported, docked, trained, clustered)")
+    print(f"Seed-training complete ({n} seeds imported, docked, trained)")
     return 0
 
 
@@ -499,7 +500,6 @@ def _cmd_search(args: argparse.Namespace) -> int:
             sim_ftrees=args.sim_ftrees,
             cpu=args.cpus,
             threads_per_task=args.threads_per_task,
-            cluster_after=args.cluster_after,
         )
     print(f"Simsearch cycle {cycle} complete")
     return 0
@@ -539,6 +539,15 @@ def _cmd_screening_cycle(args: argparse.Namespace) -> int:
     scheduler = scheduler_from_args(args, settings)
 
     strategy: Literal["greedy", "clustering"] = args.strategy
+
+    def _maybe_cluster(db: Database) -> None:
+        """Re-cluster before each search/dock step when using the
+        ``clustering`` acquisition strategy, so query/dock selection sees
+        up-to-date cluster assignments (including compounds ingested
+        earlier in this same round). No-op for ``greedy``."""
+        if strategy == "clustering":
+            clustering.cluster(db, workdir, scheduler, settings)
+
     with open_db(args) as db:
         if args.props_toml is not None:
             props = PropertyRanges.from_toml(args.props_toml)
@@ -555,6 +564,7 @@ def _cmd_screening_cycle(args: argparse.Namespace) -> int:
                 training.train(db, workdir, scheduler, settings)
 
             # search(docked) — CONTROL phase handles prop filter + predict
+            _maybe_cluster(db)
             simsearch.simsearch(
                 db, workdir, scheduler, settings,
                 source="docked", strategy=strategy,
@@ -565,6 +575,7 @@ def _cmd_screening_cycle(args: argparse.Namespace) -> int:
 
             # search(predicted) × 2 — new hits get pred_score via CONTROL
             for _ in range(2):
+                _maybe_cluster(db)
                 simsearch.simsearch(
                     db, workdir, scheduler, settings,
                     source="predicted", strategy=strategy,
@@ -574,6 +585,7 @@ def _cmd_screening_cycle(args: argparse.Namespace) -> int:
                 )
 
             # dock
+            _maybe_cluster(db)
             docking.dock(
                 db, workdir, scheduler, settings,
                 top_n=args.dock_top_n,
