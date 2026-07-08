@@ -1,0 +1,380 @@
+"""Tests for the SVDKL GP head and actual Chemprop integration."""
+
+from __future__ import annotations
+
+import importlib.util
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+
+HAS_GPYTORCH = importlib.util.find_spec("gpytorch") is not None
+HAS_CHEMPROP = importlib.util.find_spec("chemprop") is not None
+HAS_PANDAS = importlib.util.find_spec("pandas") is not None
+
+requires_gpytorch = pytest.mark.skipif(
+    not HAS_GPYTORCH,
+    reason="gpytorch is not installed in this environment",
+)
+requires_chemprop_svdkl = pytest.mark.skipif(
+    not (HAS_GPYTORCH and HAS_CHEMPROP and HAS_PANDAS),
+    reason="chemprop, gpytorch, and pandas are required for Chemprop SVDKL tests",
+)
+
+EXAMPLE_CSV = Path(__file__).resolve().parents[2] / "example.csv"
+
+
+def test_import_without_instantiating_optional_dependencies() -> None:
+    from spacehasten.remote import svdkl
+
+    assert svdkl.SVDKLConfig(input_dim=3, gp_dim=2).grid_size == 128
+
+
+@requires_gpytorch
+def test_svdkl_head_trains_one_step_and_predicts() -> None:
+    import gpytorch
+    import torch
+
+    from spacehasten.remote.svdkl import SVDKLConfig, SVDKLHead, predictive_mean_std
+
+    torch.manual_seed(0)
+    embeddings = torch.randn(12, 5)
+    target = torch.sin(embeddings[:, 0])
+    head = SVDKLHead(SVDKLConfig(input_dim=5, gp_dim=3, grid_size=16))
+    mll = gpytorch.mlls.PredictiveLogLikelihood(
+        likelihood=head.likelihood,
+        model=head.gp_layer,
+        num_data=embeddings.size(0),
+    )
+    optimizer = torch.optim.Adam(head.parameters(), lr=0.01)
+
+    head.train()
+    head.likelihood.train()
+    optimizer.zero_grad()
+    loss = -mll(head(embeddings), target)
+    loss.backward()
+    optimizer.step()
+
+    mean, std = predictive_mean_std(head, embeddings[:4])
+    assert mean.shape == torch.Size([4])
+    assert std.shape == torch.Size([4])
+    assert torch.isfinite(mean).all()
+    assert torch.isfinite(std).all()
+    assert torch.all(std >= 0)
+
+
+@requires_chemprop_svdkl
+def test_actual_chemprop_wrapper_uses_encoding() -> None:
+    import torch
+
+    model = _build_chemprop_svdkl_model(seed=0)
+    loader, _ = _build_training_loader(_example_rows(4), batch_size=2)
+    batch = next(iter(loader))
+
+    with torch.no_grad():
+        embeddings = model.encode_batch(batch)
+        out = model(batch)
+
+    assert embeddings.shape == torch.Size([2, 16])
+    assert out.event_shape.numel() > 0
+
+
+@requires_chemprop_svdkl
+def test_actual_chemprop_svdkl_training_updates_all_relevant_parameter_groups() -> None:
+    model = _build_chemprop_svdkl_model(seed=0)
+    loader, _ = _build_training_loader(_example_rows(24), batch_size=6)
+
+    before_message_passing = _clone_trainable_parameters(model.mpnn.message_passing)
+    before_projection = _clone_trainable_parameters(model.head.projection)
+    before_gp = _clone_trainable_parameters(model.gp_layer)
+    before_mixing_weights = model.likelihood.mixing_weights.detach().clone()
+    before_base_likelihood = _clone_trainable_parameters(model.likelihood.base_likelihood)
+
+    _train_model(model, loader, num_data=24, epochs=2, seed=0)
+
+    assert _any_parameter_changed(model.mpnn.message_passing, before_message_passing)
+    assert _any_parameter_changed(model.head.projection, before_projection)
+    assert _any_parameter_changed(model.gp_layer, before_gp)
+    assert _any_parameter_changed(model.likelihood.base_likelihood, before_base_likelihood)
+    assert not model.likelihood.mixing_weights.detach().allclose(before_mixing_weights)
+
+
+@requires_gpytorch
+def test_target_scaler_roundtrip() -> None:
+    import torch
+
+    from spacehasten.remote.svdkl import (
+        fit_target_scaler,
+        scale_targets,
+        unscale_mean,
+    )
+
+    y = torch.tensor([-8.0, -7.0, -6.0])
+    scaler = fit_target_scaler(y)
+    restored = unscale_mean(scale_targets(y, scaler), scaler)
+    assert torch.allclose(restored, y)
+
+
+@requires_chemprop_svdkl
+def test_actual_chemprop_svdkl_predictions_use_original_score_units() -> None:
+    import torch
+
+    from spacehasten.remote.svdkl import predictive_mean_std
+
+    model, scaler = _train_actual_chemprop_svdkl(seed=0, rows=24, epochs=1)
+    embeddings = _encode_dataframe(model, _example_rows(6, offset=24), batch_size=3)
+
+    scaled_mean, scaled_std = predictive_mean_std(model.head, embeddings)
+    unscaled_mean, unchanged_std = predictive_mean_std(
+        model.head,
+        embeddings,
+        target_scaler=scaler,
+    )
+    expected_unscaled = torch.as_tensor(
+        scaler.inverse_transform(scaled_mean.detach().numpy().reshape(-1, 1)).reshape(-1),
+        dtype=unscaled_mean.dtype,
+    )
+
+    assert torch.allclose(unscaled_mean, expected_unscaled)
+    assert torch.allclose(unchanged_std, scaled_std)
+    assert not torch.allclose(unscaled_mean, scaled_mean)
+
+
+@requires_chemprop_svdkl
+def test_actual_chemprop_svdkl_training_reproducible_with_seed() -> None:
+    import torch
+
+    first_model, first_scaler = _train_actual_chemprop_svdkl(seed=0, rows=24, epochs=1)
+    second_model, second_scaler = _train_actual_chemprop_svdkl(seed=0, rows=24, epochs=1)
+    pred_rows = _example_rows(8, offset=24)
+
+    first_mean, first_std = _predict_dataframe(first_model, pred_rows, first_scaler, batch_size=4)
+    second_mean, second_std = _predict_dataframe(second_model, pred_rows, second_scaler, batch_size=4)
+
+    assert torch.allclose(first_mean, second_mean, atol=1e-6)
+    assert torch.allclose(first_std, second_std, atol=1e-6)
+
+
+@requires_chemprop_svdkl
+def test_actual_chemprop_svdkl_checkpoint_roundtrip_after_training(tmp_path: Path) -> None:
+    import torch
+
+    from spacehasten.remote.svdkl import load_svdkl_checkpoint, save_svdkl_checkpoint
+
+    model, scaler = _train_actual_chemprop_svdkl(seed=0, rows=24, epochs=1)
+    pred_rows = _example_rows(8, offset=24)
+    embeddings = _encode_dataframe(model, pred_rows, batch_size=4)
+    before_mean, before_std = _predict_embeddings(model.head, embeddings, scaler)
+
+    path = tmp_path / "model_0" / "pytorch_model.bin"
+    save_svdkl_checkpoint(
+        path,
+        head=model.head,
+        target_scaler=scaler,
+        metadata={"embedding_i": -1, "chemprop_embedding_dim": 16},
+    )
+    loaded_head, loaded_scaler, metadata = load_svdkl_checkpoint(path)
+    after_mean, after_std = _predict_embeddings(loaded_head, embeddings, loaded_scaler)
+
+    assert loaded_scaler.mean_.tolist() == scaler.mean_.tolist()
+    assert loaded_scaler.scale_.tolist() == scaler.scale_.tolist()
+    assert metadata == {"embedding_i": -1, "chemprop_embedding_dim": 16}
+    assert torch.allclose(after_mean, before_mean)
+    assert torch.allclose(after_std, before_std)
+
+
+@requires_chemprop_svdkl
+def test_actual_chemprop_svdkl_train_predict_roundtrip_output_schema() -> None:
+    import numpy as np
+    import pandas as pd
+
+    model, scaler = _train_actual_chemprop_svdkl(seed=0, rows=24, epochs=1)
+    pred_rows = _example_rows(10, offset=32)
+    mean, std = _predict_dataframe(model, pred_rows, scaler, batch_size=5)
+    output_df = pd.DataFrame(
+        {
+            "smilesid": pred_rows["smilesid"].tolist(),
+            "docking_score": mean.detach().numpy(),
+            "docking_score_std": std.detach().numpy(),
+        }
+    )
+
+    assert list(output_df.columns) == ["smilesid", "docking_score", "docking_score_std"]
+    assert len(output_df) == len(pred_rows)
+    assert np.isfinite(output_df["docking_score"]).all()
+    assert np.isfinite(output_df["docking_score_std"]).all()
+    assert (output_df["docking_score_std"] >= 0).all()
+
+
+def _example_rows(rows: int, offset: int = 0) -> Any:
+    import pandas as pd
+
+    return pd.read_csv(EXAMPLE_CSV).iloc[offset : offset + rows].reset_index(drop=True)
+
+
+def _build_training_loader(df: Any, batch_size: int) -> tuple[Any, Any]:
+    import numpy as np
+    from chemprop import data, featurizers
+
+    from spacehasten.remote.svdkl import fit_target_scaler, scale_targets
+
+    y = df["docking_score"].astype(float).to_numpy()
+    scaler = fit_target_scaler(y)
+    scaled_y = scale_targets(y, scaler)
+    featurizer = featurizers.SimpleMoleculeMolGraphFeaturizer()
+    datapoints = [
+        data.MoleculeDatapoint.from_smi(
+            smi=smi,
+            y=np.array([target], dtype=float),
+        )
+        for smi, target in zip(df["smiles"].astype(str), scaled_y, strict=False)
+    ]
+    dataset = data.MoleculeDataset(datapoints, featurizer)
+    loader = data.build_dataloader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=0,
+    )
+    return loader, scaler
+
+
+def _build_prediction_loader(df: Any, batch_size: int) -> Any:
+    from chemprop import data, featurizers
+
+    featurizer = featurizers.SimpleMoleculeMolGraphFeaturizer()
+    datapoints = [
+        data.MoleculeDatapoint.from_smi(smi=smi)
+        for smi in df["smiles"].astype(str)
+    ]
+    dataset = data.MoleculeDataset(datapoints, featurizer)
+    return data.build_dataloader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=0,
+    )
+
+
+def _build_chemprop_svdkl_model(seed: int) -> Any:
+    import torch
+    from chemprop import models as chemprop_models
+    from chemprop import nn as chemprop_nn
+
+    from spacehasten.remote.svdkl import ChempropSVDKLModel, SVDKLConfig, SVDKLHead
+
+    torch.manual_seed(seed)
+    d_h = 16
+    mp = chemprop_nn.BondMessagePassing(
+        d_h=d_h,
+        depth=2,
+        dropout=0.0,
+        activation="relu",
+    )
+    agg = chemprop_nn.MeanAggregation()
+    ffn = chemprop_nn.RegressionFFN(
+        input_dim=d_h,
+        hidden_dim=16,
+        n_layers=1,
+        dropout=0.0,
+        activation="relu",
+    )
+    mpnn = chemprop_models.MPNN(
+        message_passing=mp,
+        agg=agg,
+        predictor=ffn,
+        batch_norm=False,
+        warmup_epochs=1,
+        init_lr=1e-4,
+        max_lr=1e-3,
+        final_lr=1e-4,
+    )
+    head = SVDKLHead(SVDKLConfig(input_dim=d_h, gp_dim=2, grid_size=16))
+    return ChempropSVDKLModel(mpnn, head, embedding_i=-1)
+
+
+def _train_actual_chemprop_svdkl(seed: int, rows: int, epochs: int) -> tuple[Any, Any]:
+    df = _example_rows(rows)
+    model = _build_chemprop_svdkl_model(seed)
+    loader, scaler = _build_training_loader(df, batch_size=6)
+    _train_model(model, loader, num_data=len(df), epochs=epochs, seed=seed)
+    return model, scaler
+
+
+def _train_model(model: Any, loader: Any, num_data: int, epochs: int, seed: int) -> None:
+    import gpytorch
+    import torch
+
+    torch.manual_seed(seed)
+    mll = gpytorch.mlls.PredictiveLogLikelihood(
+        likelihood=model.likelihood,
+        model=model.gp_layer,
+        num_data=num_data,
+    )
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+
+    model.train()
+    model.likelihood.train()
+    for _ in range(epochs):
+        for batch in loader:
+            target = _batch_targets(batch)
+            optimizer.zero_grad()
+            loss = -mll(model(batch), target)
+            loss.backward()
+            optimizer.step()
+
+
+def _batch_targets(batch: Any) -> Any:
+    import torch
+
+    for attr in ("Y", "y", "targets"):
+        if hasattr(batch, attr):
+            target = getattr(batch, attr)
+            if target is not None:
+                break
+    else:
+        raise AttributeError("Could not find targets on Chemprop training batch")
+
+    if not torch.is_tensor(target):
+        target = torch.as_tensor(target)
+    return target.float().reshape(target.shape[0], -1)[:, 0]
+
+
+def _encode_dataframe(model: Any, df: Any, batch_size: int) -> Any:
+    import torch
+
+    loader = _build_prediction_loader(df, batch_size=batch_size)
+    embeddings = []
+    model.eval()
+    with torch.no_grad():
+        for batch in loader:
+            embeddings.append(model.encode_batch(batch))
+    return torch.cat(embeddings, dim=0)
+
+
+def _predict_dataframe(model: Any, df: Any, scaler: Any, batch_size: int) -> tuple[Any, Any]:
+    embeddings = _encode_dataframe(model, df, batch_size=batch_size)
+    return _predict_embeddings(model.head, embeddings, scaler)
+
+
+def _predict_embeddings(head: Any, embeddings: Any, scaler: Any) -> tuple[Any, Any]:
+    from spacehasten.remote.svdkl import predictive_mean_std
+
+    mean, std = predictive_mean_std(head, embeddings, target_scaler=scaler)
+    return mean.detach(), std.detach()
+
+
+def _clone_trainable_parameters(module: Any) -> dict[str, Any]:
+    return {
+        name: param.detach().clone()
+        for name, param in module.named_parameters()
+        if param.requires_grad
+    }
+
+
+def _any_parameter_changed(module: Any, before: dict[str, Any]) -> bool:
+    for name, param in module.named_parameters():
+        if name in before and not param.detach().allclose(before[name]):
+            return True
+    return False
