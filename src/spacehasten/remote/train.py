@@ -24,6 +24,7 @@ try:
     from chemprop import data, featurizers
     from chemprop import models as chemprop_models
     from chemprop import nn as chemprop_nn
+    from lightning.pytorch.callbacks import EarlyStopping
     from lightning.pytorch.callbacks import ModelCheckpoint
 except ImportError as e:  # pragma: no cover - import guarded for remote node only
     print(
@@ -54,6 +55,8 @@ def train_model(
     init_lr: float,
     max_lr: float,
     final_lr: float,
+    early_stopping_patience: int,
+    early_stopping_min_delta: float,
 ) -> int:
     save_dir_path = Path(save_dir)
     save_dir_path.mkdir(parents=True, exist_ok=True)
@@ -145,10 +148,20 @@ def train_model(
         monitor="val_loss",
         mode="min",
     )
+    callbacks: list = [ckpt_cb]
+    if early_stopping_patience > 0:
+        callbacks.append(
+            EarlyStopping(
+                monitor="val_loss",
+                mode="min",
+                patience=early_stopping_patience,
+                min_delta=early_stopping_min_delta,
+            )
+        )
 
     trainer = pl.Trainer(
         max_epochs=epochs,
-        callbacks=[ckpt_cb],
+        callbacks=callbacks,
         logger=False,
         enable_progress_bar=True,
         accelerator="auto",
@@ -197,6 +210,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--init-lr", type=float, default=1e-4)
     parser.add_argument("--max-lr", type=float, default=1e-3)
     parser.add_argument("--final-lr", type=float, default=1e-4)
+    parser.add_argument("--early-stopping-patience", type=int, default=5)
+    parser.add_argument("--early-stopping-min-delta", type=float, default=0.0)
     return parser
 
 
@@ -226,6 +241,8 @@ def main(argv: list[str] | None = None) -> int:
         args.init_lr,
         args.max_lr,
         args.final_lr,
+        args.early_stopping_patience,
+        args.early_stopping_min_delta,
     )
 
 

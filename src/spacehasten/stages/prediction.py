@@ -113,7 +113,6 @@ def _build_predict_command(
     cmd = " ".join(parts)
     return (
         f'echo "[task ${{TASK_ID}}] Predicting chunk ${{TASK_ID}}"\n'
-        f'export CUDA_VISIBLE_DEVICES=""\n'
         f'export OMP_NUM_THREADS=1\n'
         f'{cmd}\n'
         f'echo "[task ${{TASK_ID}}] Prediction done"'
@@ -149,7 +148,7 @@ def predict_undocked(
     settings: Settings,
     *,
     model_version: int,
-    chunk_size: int = 12345,
+    chunk_size: int | None = None,
     predict_command_prefix: Sequence[str] | None = None,
 ) -> int:
     """Predict ``pred_score`` for every undocked row and update the DB.
@@ -158,7 +157,7 @@ def predict_undocked(
         :meth:`Database.load_model_path` (BLOB fallback for legacy
         databases).
     :param chunk_size: rows per CSV chunk; one scheduler array task per
-        chunk.
+        chunk. Defaults to ``settings.general.pred_chunk_size``.
     :param predict_command_prefix: command to launch ``remote.predict``.
         Override in tests with a stub script.
     :returns: number of rows whose ``pred_score`` was updated.
@@ -175,6 +174,9 @@ def predict_undocked(
         raise RuntimeError(
             f"model resolution mismatch: {bin_path} not under {model_dir}/model_0/"
         )
+
+    if chunk_size is None:
+        chunk_size = settings.general.pred_chunk_size
 
     predict_dir = workdir.simsearch_dir(cycle) / "PREDICT"
     n_chunks = _write_chunks(db.select_undocked_for_prediction(), predict_dir, chunk_size)
@@ -211,6 +213,7 @@ def predict_undocked(
         array_size=n_chunks,
         max_concurrent=n_chunks,
         cpus_per_task=int(settings.general.cpu_count_predict or 1),
+        gpus=1,
         env_setup=env_setup,
         command_template=command,
     )

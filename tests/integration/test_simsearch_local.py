@@ -181,6 +181,12 @@ def test_simsearch_stage_local(tmp_path: Path) -> None:
     )
     db.close()
 
+    jobs = [local_job.spec for local_job in scheduler._jobs.values()]  # noqa: SLF001
+    control_jobs = [job for job in jobs if job.name.startswith("control_cycle")]
+    assert control_jobs
+    assert control_jobs[0].gpus == 1
+    assert "CUDA_VISIBLE_DEVICES" not in control_jobs[0].command_template
+
     assert new_cycle == 1
 
     # ---- Query bookkeeping --------------------------------------------- #

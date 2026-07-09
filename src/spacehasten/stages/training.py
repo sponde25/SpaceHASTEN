@@ -79,6 +79,8 @@ def _build_train_command(
         "--init-lr", str(g.train_init_lr),
         "--max-lr", str(g.train_max_lr),
         "--final-lr", str(g.train_final_lr),
+        "--early-stopping-patience", str(g.train_early_stopping_patience),
+        "--early-stopping-min-delta", str(g.train_early_stopping_min_delta),
     ]
     cmd = " ".join(parts)
     return (
@@ -158,7 +160,7 @@ def train(
         workdir=model_dir,
         array_size=1,
         max_concurrent=1,
-        cpus_per_task=1,
+        cpus_per_task=max(1, int(settings.general.cpu_count_train or 1)),
         gpus=1,
         exclusive=settings.general.gpu_exclusive == "1",
         env_setup=env_setup,
