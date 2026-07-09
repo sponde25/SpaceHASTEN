@@ -1,13 +1,5 @@
 #!/usr/bin/env python3
-"""Remote chemprop prediction entry point.
-
-Ported verbatim from legacy ``model_runner_predict.py`` (Session 9). This
-module is invoked on the compute node — typically as
-``python3 -m spacehasten.remote.predict <input.csv> <model_dir> <output.csv>``
-— and runs the chemprop 2.x prediction loop. The chemprop API calls are
-intentionally byte-identical to the legacy script; only the argparse
-plumbing is in idiomatic stdlib form.
-"""
+"""Remote Chemprop/SVDKL prediction entry point."""
 
 from __future__ import annotations
 
@@ -21,6 +13,7 @@ import pandas as pd
 
 try:
     import lightning.pytorch as pl
+    import torch
     from chemprop import data, featurizers
     from chemprop import models as chemprop_models
     from chemprop import nn as chemprop_nn
@@ -30,6 +23,19 @@ except ImportError as e:  # pragma: no cover - import guarded for remote node on
         f"Make sure chemprop 2.x is installed: {e}"
     )
     sys.exit(1)
+
+try:  # script path execution on compute nodes does not import the package root
+    from spacehasten.remote.svdkl import (
+        load_chemprop_svdkl_checkpoint,
+        move_batch_to_device,
+        predictive_mean_std,
+    )
+except ImportError:  # pragma: no cover - exercised by file-path remote execution
+    from svdkl import (  # type: ignore[no-redef]
+        load_chemprop_svdkl_checkpoint,
+        move_batch_to_device,
+        predictive_mean_std,
+    )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -61,7 +67,10 @@ def predict(
     out_path = Path(output_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     if len(smiles) == 0:
-        pd.DataFrame(columns=["smilesid", "docking_score"]).to_csv(out_path, index=False)
+        pd.DataFrame(columns=["smilesid", "docking_score", "docking_score_std"]).to_csv(
+            out_path,
+            index=False,
+        )
         logger.info("Saved 0 predictions to %s", out_path)
         return 0
 
@@ -73,6 +82,83 @@ def predict(
     )
 
     logger.info("Loading model from %s", model_file)
+    try:
+        model, target_scaler, _metadata = load_chemprop_svdkl_checkpoint(model_file)
+    except ValueError:
+        return _predict_legacy_chemprop(
+            model_file=model_file,
+            pred_loader=pred_loader,
+            smilesids=smilesids,
+            out_path=out_path,
+            accelerator=accelerator,
+            devices=devices,
+        )
+
+    try:
+        n_devices = int(devices)
+    except ValueError:
+        n_devices = 1
+    device = _select_device(accelerator, n_devices)
+    model.to(device)
+    model.eval()
+    logger.info("Running SVDKL prediction on %s", device)
+
+    embeddings = []
+    with torch.no_grad():
+        for batch in pred_loader:
+            batch = move_batch_to_device(batch, device)
+            embeddings.append(model.encode_batch(batch))
+    if not embeddings:
+        pd.DataFrame(columns=["smilesid", "docking_score", "docking_score_std"]).to_csv(
+            out_path,
+            index=False,
+        )
+        logger.info("Saved 0 predictions to %s", out_path)
+        return 0
+
+    all_embeddings = torch.cat(embeddings, dim=0)
+    mean, std = predictive_mean_std(model.head, all_embeddings, target_scaler=target_scaler)
+    all_preds = mean.detach().cpu().numpy().reshape(-1)
+    all_stds = std.detach().cpu().numpy().reshape(-1)
+
+    if len(all_preds) != len(smilesids):
+        logger.warning(
+            "Prediction count (%d) != input count (%d); "
+            "some SMILES may have been skipped",
+            len(all_preds),
+            len(smilesids),
+        )
+
+    output_df = pd.DataFrame(
+        {
+            "smilesid": smilesids[: len(all_preds)],
+            "docking_score": all_preds,
+            "docking_score_std": all_stds,
+        }
+    )
+
+    output_df.to_csv(out_path, index=False)
+    logger.info("Saved %d SVDKL predictions to %s", len(output_df), out_path)
+    return 0
+
+
+def _select_device(accelerator: str, n_devices: int) -> torch.device:
+    wants_gpu = accelerator.lower() in {"auto", "cuda", "gpu"}
+    if wants_gpu and n_devices > 0 and torch.cuda.is_available():
+        return torch.device("cuda:0")
+    return torch.device("cpu")
+
+
+def _predict_legacy_chemprop(
+    *,
+    model_file: Path,
+    pred_loader,
+    smilesids: list,
+    out_path: Path,
+    accelerator: str,
+    devices: str,
+) -> int:
+    logger.info("Checkpoint is not SVDKL; falling back to legacy Chemprop prediction")
     model = chemprop_models.MPNN.load_from_checkpoint(
         str(model_file), map_location="cpu", weights_only=False
     )

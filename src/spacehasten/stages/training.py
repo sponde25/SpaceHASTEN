@@ -79,8 +79,14 @@ def _build_train_command(
         "--init-lr", str(g.train_init_lr),
         "--max-lr", str(g.train_max_lr),
         "--final-lr", str(g.train_final_lr),
-        "--early-stopping-patience", str(g.train_early_stopping_patience),
+"--early-stopping-patience", str(g.train_early_stopping_patience),
         "--early-stopping-min-delta", str(g.train_early_stopping_min_delta),
+        "--svdkl-gp-dim", str(g.train_svdkl_gp_dim),
+        "--svdkl-grid-size", str(g.train_svdkl_grid_size),
+        "--svdkl-grid-lower", str(g.train_svdkl_grid_lower),
+        "--svdkl-grid-upper", str(g.train_svdkl_grid_upper),
+        "--seed", str(g.train_seed),
+>>>>>>> 32a6621 (Wire SVDKL into SpaceHASTEN workflow)
     ]
     cmd = " ".join(parts)
     return (

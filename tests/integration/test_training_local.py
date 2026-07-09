@@ -124,12 +124,15 @@ def test_training_stage_local(tmp_path: Path) -> None:
     assert flag_pairs["--batch-size"] == str(settings.general.train_batch_size)
     assert flag_pairs["--epochs"] == str(settings.general.train_epochs)
     assert flag_pairs["--final-lr"] == str(settings.general.train_final_lr)
-    assert flag_pairs["--early-stopping-patience"] == str(
+assert flag_pairs["--early-stopping-patience"] == str(
         settings.general.train_early_stopping_patience
     )
     assert flag_pairs["--early-stopping-min-delta"] == str(
         settings.general.train_early_stopping_min_delta
     )
+    assert flag_pairs["--svdkl-gp-dim"] == str(settings.general.train_svdkl_gp_dim)
+    assert flag_pairs["--svdkl-grid-size"] == str(settings.general.train_svdkl_grid_size)
+    assert flag_pairs["--seed"] == str(settings.general.train_seed)
 
     submitted_job = next(iter(scheduler._jobs.values())).spec  # noqa: SLF001
     assert submitted_job.cpus_per_task == int(settings.general.cpu_count_train)

@@ -9,3 +9,5 @@ __pycache__/
 *.pyc
 .env
 opencode.json
+quick_test/*
+!quick_test/test_fast_auto.sh

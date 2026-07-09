@@ -137,7 +137,7 @@ def test_actual_chemprop_svdkl_predictions_use_original_score_units() -> None:
     )
 
     assert torch.allclose(unscaled_mean, expected_unscaled)
-    assert torch.allclose(unchanged_std, scaled_std)
+    assert torch.allclose(unchanged_std, scaled_std * float(scaler.scale_[0]))
     assert not torch.allclose(unscaled_mean, scaled_mean)
 
 
@@ -160,26 +160,43 @@ def test_actual_chemprop_svdkl_training_reproducible_with_seed() -> None:
 def test_actual_chemprop_svdkl_checkpoint_roundtrip_after_training(tmp_path: Path) -> None:
     import torch
 
-    from spacehasten.remote.svdkl import load_svdkl_checkpoint, save_svdkl_checkpoint
+    from spacehasten.remote.svdkl import (
+        ChempropConfig,
+        load_chemprop_svdkl_checkpoint,
+        save_chemprop_svdkl_checkpoint,
+    )
 
     model, scaler = _train_actual_chemprop_svdkl(seed=0, rows=24, epochs=1)
     pred_rows = _example_rows(8, offset=24)
-    embeddings = _encode_dataframe(model, pred_rows, batch_size=4)
-    before_mean, before_std = _predict_embeddings(model.head, embeddings, scaler)
+    before_mean, before_std = _predict_dataframe(model, pred_rows, scaler, batch_size=4)
 
     path = tmp_path / "model_0" / "pytorch_model.bin"
-    save_svdkl_checkpoint(
-        path,
-        head=model.head,
-        target_scaler=scaler,
-        metadata={"embedding_i": -1, "chemprop_embedding_dim": 16},
+    config = ChempropConfig(
+        mp_hidden_size=16,
+        mp_depth=2,
+        ffn_hidden_size=16,
+        ffn_layers=1,
+        dropout=0.0,
+        activation="relu",
+        batch_norm=False,
+        warmup_epochs=1,
+        init_lr=1e-4,
+        max_lr=1e-3,
+        final_lr=1e-4,
     )
-    loaded_head, loaded_scaler, metadata = load_svdkl_checkpoint(path)
-    after_mean, after_std = _predict_embeddings(loaded_head, embeddings, loaded_scaler)
+    save_chemprop_svdkl_checkpoint(
+        path,
+        model=model,
+        target_scaler=scaler,
+        chemprop_config=config,
+        metadata={"source": "unit-test"},
+    )
+    loaded_model, loaded_scaler, metadata = load_chemprop_svdkl_checkpoint(path)
+    after_mean, after_std = _predict_dataframe(loaded_model, pred_rows, loaded_scaler, batch_size=4)
 
     assert loaded_scaler.mean_.tolist() == scaler.mean_.tolist()
     assert loaded_scaler.scale_.tolist() == scaler.scale_.tolist()
-    assert metadata == {"embedding_i": -1, "chemprop_embedding_dim": 16}
+    assert metadata == {"source": "unit-test"}
     assert torch.allclose(after_mean, before_mean)
     assert torch.allclose(after_std, before_std)
 
@@ -205,6 +222,94 @@ def test_actual_chemprop_svdkl_train_predict_roundtrip_output_schema() -> None:
     assert np.isfinite(output_df["docking_score"]).all()
     assert np.isfinite(output_df["docking_score_std"]).all()
     assert (output_df["docking_score_std"] >= 0).all()
+
+
+@requires_chemprop_svdkl
+def test_remote_train_predict_roundtrip_writes_uncertainty(tmp_path: Path) -> None:
+    import numpy as np
+    import pandas as pd
+
+    from spacehasten.remote.predict import predict
+    from spacehasten.remote.train import train_model
+
+    train_csv = tmp_path / "train.csv"
+    pred_csv = tmp_path / "predict.csv"
+    out_csv = tmp_path / "predictions.csv"
+    model_dir = tmp_path / "model"
+    _example_rows(24).to_csv(train_csv, index=False)
+    _example_rows(8, offset=24)[["smiles", "smilesid"]].to_csv(pred_csv, index=False)
+
+    train_rc = train_model(
+        str(train_csv),
+        str(model_dir),
+        batch_size=6,
+        epochs=1,
+        num_workers=0,
+        devices="1",
+        mp_hidden_size=16,
+        mp_depth=2,
+        ffn_hidden_size=16,
+        ffn_layers=1,
+        dropout=0.0,
+        activation="relu",
+        batch_norm=False,
+        warmup_epochs=1,
+        init_lr=1e-4,
+        max_lr=1e-3,
+        final_lr=1e-4,
+        svdkl_gp_dim=2,
+        svdkl_grid_size=16,
+        seed=0,
+    )
+    assert train_rc == 0
+    assert (model_dir / "model_0" / "pytorch_model.bin").exists()
+
+    pred_rc = predict(
+        str(pred_csv),
+        str(model_dir),
+        str(out_csv),
+        batch_size=4,
+        num_workers=0,
+        accelerator="cpu",
+        devices="1",
+    )
+    assert pred_rc == 0
+
+    output_df = pd.read_csv(out_csv)
+    assert list(output_df.columns) == ["smilesid", "docking_score", "docking_score_std"]
+    assert len(output_df) == 8
+    assert np.isfinite(output_df["docking_score"]).all()
+    assert np.isfinite(output_df["docking_score_std"]).all()
+    assert (output_df["docking_score_std"] >= 0).all()
+
+
+@requires_gpytorch
+def test_remote_train_selects_cuda_when_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    import torch
+
+    from spacehasten.remote import train as remote_train
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    assert remote_train._select_device(1) == torch.device("cuda:0")
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    assert remote_train._select_device(1) == torch.device("cpu")
+    assert remote_train._select_device(0) == torch.device("cpu")
+
+
+@requires_gpytorch
+def test_remote_predict_selects_cuda_for_auto_or_gpu(monkeypatch: pytest.MonkeyPatch) -> None:
+    import torch
+
+    from spacehasten.remote import predict as remote_predict
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    assert remote_predict._select_device("auto", 1) == torch.device("cuda:0")
+    assert remote_predict._select_device("gpu", 1) == torch.device("cuda:0")
+    assert remote_predict._select_device("cpu", 1) == torch.device("cpu")
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    assert remote_predict._select_device("auto", 1) == torch.device("cpu")
 
 
 def _example_rows(rows: int, offset: int = 0) -> Any:
@@ -259,37 +364,31 @@ def _build_prediction_loader(df: Any, batch_size: int) -> Any:
 
 def _build_chemprop_svdkl_model(seed: int) -> Any:
     import torch
-    from chemprop import models as chemprop_models
-    from chemprop import nn as chemprop_nn
 
-    from spacehasten.remote.svdkl import ChempropSVDKLModel, SVDKLConfig, SVDKLHead
+    from spacehasten.remote.svdkl import (
+        ChempropConfig,
+        ChempropSVDKLModel,
+        SVDKLConfig,
+        SVDKLHead,
+        build_chemprop_mpnn,
+    )
 
     torch.manual_seed(seed)
     d_h = 16
-    mp = chemprop_nn.BondMessagePassing(
-        d_h=d_h,
-        depth=2,
+    config = ChempropConfig(
+        mp_hidden_size=d_h,
+        mp_depth=2,
+        ffn_hidden_size=16,
+        ffn_layers=1,
         dropout=0.0,
         activation="relu",
-    )
-    agg = chemprop_nn.MeanAggregation()
-    ffn = chemprop_nn.RegressionFFN(
-        input_dim=d_h,
-        hidden_dim=16,
-        n_layers=1,
-        dropout=0.0,
-        activation="relu",
-    )
-    mpnn = chemprop_models.MPNN(
-        message_passing=mp,
-        agg=agg,
-        predictor=ffn,
         batch_norm=False,
         warmup_epochs=1,
         init_lr=1e-4,
         max_lr=1e-3,
         final_lr=1e-4,
     )
+    mpnn = build_chemprop_mpnn(config)
     head = SVDKLHead(SVDKLConfig(input_dim=d_h, gp_dim=2, grid_size=16))
     return ChempropSVDKLModel(mpnn, head, embedding_i=-1)
 

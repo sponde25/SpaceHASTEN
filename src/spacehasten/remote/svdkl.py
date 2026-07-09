@@ -43,6 +43,24 @@ class SVDKLConfig:
     grid_upper: float = 10.0
 
 
+@dataclass(frozen=True)
+class ChempropConfig:
+    """Chemprop MPNN architecture needed to rebuild a saved SVDKL model."""
+
+    mp_hidden_size: int
+    mp_depth: int
+    ffn_hidden_size: int
+    ffn_layers: int
+    dropout: float
+    activation: str
+    batch_norm: bool
+    warmup_epochs: int
+    init_lr: float
+    max_lr: float
+    final_lr: float
+    embedding_i: int = -1
+
+
 def fit_target_scaler(y: Any) -> StandardScaler:
     """Fit a scikit-learn ``StandardScaler`` for 1D regression targets."""
 
@@ -63,6 +81,15 @@ def unscale_mean(mean: Any, scaler: StandardScaler) -> Any:
 
     restored = scaler.inverse_transform(_as_numpy_column(mean)).reshape(-1)
     return _like_input(restored, mean)
+
+
+def unscale_std(std: Any, scaler: StandardScaler) -> Any:
+    """Convert posterior standard deviations to original target units."""
+
+    scale = float(scaler.scale_[0])
+    if torch is not None and isinstance(std, torch.Tensor):
+        return std * scale
+    return np.asarray(std) * scale
 
 
 def _as_numpy_column(values: Any) -> np.ndarray:
@@ -183,6 +210,70 @@ class ChempropSVDKLModel(torch.nn.Module if torch else object):
         return self.head(self.encode_batch(batch))
 
 
+def move_batch_to_device(batch: Any, device: Any) -> Any:
+    """Move Chemprop batch fields to a torch device."""
+
+    _require_torch_gpytorch()
+    if hasattr(batch, "_replace") and hasattr(batch, "_fields"):
+        return batch._replace(
+            **{field: _move_value_to_device(getattr(batch, field), device) for field in batch._fields}
+        )
+    return _move_value_to_device(batch, device)
+
+
+def _move_value_to_device(value: Any, device: Any) -> Any:
+    if value is None:
+        return None
+    if hasattr(value, "to"):
+        moved = value.to(device)
+        return value if moved is None else moved
+    if isinstance(value, dict):
+        return {k: _move_value_to_device(v, device) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_move_value_to_device(v, device) for v in value]
+    if isinstance(value, tuple):
+        return tuple(_move_value_to_device(v, device) for v in value)
+    return value
+
+
+def build_chemprop_mpnn(config: ChempropConfig) -> Any:
+    """Rebuild the Chemprop encoder architecture used by a saved checkpoint."""
+
+    _require_torch_gpytorch()
+    try:
+        from chemprop import models as chemprop_models
+        from chemprop import nn as chemprop_nn
+    except ImportError as e:  # pragma: no cover - remote environment guard
+        raise ImportError(
+            "spacehasten.remote.svdkl requires chemprop to rebuild the encoder"
+        ) from e
+
+    mp = chemprop_nn.BondMessagePassing(
+        d_h=config.mp_hidden_size,
+        depth=config.mp_depth,
+        dropout=config.dropout,
+        activation=config.activation,
+    )
+    agg = chemprop_nn.MeanAggregation()
+    ffn = chemprop_nn.RegressionFFN(
+        input_dim=config.mp_hidden_size,
+        hidden_dim=config.ffn_hidden_size,
+        n_layers=config.ffn_layers,
+        dropout=config.dropout,
+        activation=config.activation,
+    )
+    return chemprop_models.MPNN(
+        message_passing=mp,
+        agg=agg,
+        predictor=ffn,
+        batch_norm=config.batch_norm,
+        warmup_epochs=config.warmup_epochs,
+        init_lr=config.init_lr,
+        max_lr=config.max_lr,
+        final_lr=config.final_lr,
+    )
+
+
 def predictive_mean_std(
     head: SVDKLHead,
     embeddings: Any,
@@ -191,9 +282,8 @@ def predictive_mean_std(
 ) -> tuple[Any, Any]:
     """Return posterior mean and standard deviation for embeddings.
 
-    If ``target_scaler`` is provided, only the posterior mean is inverse-
-    transformed back to docking-score units. The uncertainty is returned in
-    scaled GP units.
+    If ``target_scaler`` is provided, both the posterior mean and standard
+    deviation are transformed back to docking-score units.
     """
 
     _require_torch_gpytorch()
@@ -208,6 +298,7 @@ def predictive_mean_std(
         )
     if target_scaler is not None:
         mean = unscale_mean(mean, target_scaler)
+        std = unscale_std(std, target_scaler)
     return mean, std
 
 
@@ -240,6 +331,29 @@ def save_svdkl_checkpoint(
     torch.save(payload, path)
 
 
+def save_chemprop_svdkl_checkpoint(
+    path: Path,
+    *,
+    model: ChempropSVDKLModel,
+    target_scaler: StandardScaler,
+    chemprop_config: ChempropConfig,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    """Save a full Chemprop encoder + SVDKL head checkpoint."""
+
+    _require_torch_gpytorch()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "model_type": "chemprop_svdkl",
+        "chemprop_config": asdict(chemprop_config),
+        "head_config": asdict(model.head.config),
+        "model_state_dict": model.state_dict(),
+        "target_scaler": target_scaler,
+        "metadata": metadata or {},
+    }
+    torch.save(payload, path)
+
+
 def load_svdkl_checkpoint(
     path: Path,
     *,
@@ -261,16 +375,49 @@ def load_svdkl_checkpoint(
     return head, scaler, metadata
 
 
+def load_chemprop_svdkl_checkpoint(
+    path: Path,
+    *,
+    map_location: str = "cpu",
+) -> tuple[ChempropSVDKLModel, StandardScaler, dict[str, Any]]:
+    """Load a full Chemprop encoder + SVDKL head checkpoint."""
+
+    _require_torch_gpytorch()
+    payload = torch.load(path, map_location=map_location, weights_only=False)
+    if payload.get("model_type") != "chemprop_svdkl":
+        raise ValueError(f"not a Chemprop SVDKL checkpoint: {path}")
+    chemprop_config = ChempropConfig(**payload["chemprop_config"])
+    mpnn = build_chemprop_mpnn(chemprop_config)
+    head = SVDKLHead(SVDKLConfig(**payload["head_config"]))
+    model = ChempropSVDKLModel(
+        mpnn,
+        head,
+        embedding_i=chemprop_config.embedding_i,
+    )
+    model.load_state_dict(payload["model_state_dict"])
+    scaler = payload["target_scaler"]
+    if not isinstance(scaler, StandardScaler):
+        raise ValueError(f"checkpoint has invalid target scaler: {path}")
+    metadata = dict(payload.get("metadata") or {})
+    return model, scaler, metadata
+
+
 __all__ = [
     "GaussianProcessLayer",
+    "ChempropConfig",
     "ChempropSVDKLModel",
     "MixingLikelihood",
     "SVDKLConfig",
     "SVDKLHead",
+    "build_chemprop_mpnn",
     "fit_target_scaler",
+    "load_chemprop_svdkl_checkpoint",
     "load_svdkl_checkpoint",
+    "move_batch_to_device",
     "predictive_mean_std",
+    "save_chemprop_svdkl_checkpoint",
     "save_svdkl_checkpoint",
     "scale_targets",
     "unscale_mean",
+    "unscale_std",
 ]

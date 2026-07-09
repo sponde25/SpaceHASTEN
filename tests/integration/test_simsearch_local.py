@@ -140,15 +140,15 @@ def _build_control_stub(prop_filter_argv: list[str]) -> str:
         {pf} inputs/control_${{TASK_ID}}.smi.gz inputs/control.param \
             --output results_propfilter/propoutput_control_${{TASK_ID}}.csv
 
-        # 2) Fake predict: write a constant docking_score per row,
+        # 2) Fake predict: write a constant docking_score plus uncertainty per row,
         #    keeping the smilesid column verbatim so the ingest step can
         #    recover (reghash, smiles, title).
         out="results_prediction/predicted_propoutput_control_${{TASK_ID}}.csv"
-        echo "smilesid,docking_score" > "$out"
+        echo "smilesid,docking_score,docking_score_std" > "$out"
         # Skip CSV header.
         tail -n +2 "results_propfilter/propoutput_control_${{TASK_ID}}.csv" \
             | while IFS=, read -r smi sid; do
-                printf '%s,%s\n' "$sid" "-7.0" >> "$out"
+                printf '%s,%s,%s\n' "$sid" "-7.0" "0.25" >> "$out"
             done
     """).lstrip()
 
@@ -185,7 +185,8 @@ def test_simsearch_stage_local(tmp_path: Path) -> None:
     jobs = [local_job.spec for local_job in scheduler._jobs.values()]  # noqa: SLF001
     control_jobs = [job for job in jobs if job.name.startswith("control_cycle")]
     assert control_jobs
-    assert control_jobs[0].gpus == 0
+assert control_jobs[0].gpus == 1
+    assert "CUDA_VISIBLE_DEVICES" not in control_jobs[0].command_template
 
     assert new_cycle == 1
 
@@ -275,6 +276,7 @@ def test_simsearch_writes_control_artefacts(tmp_path: Path) -> None:
     assert len(preds) == len(chunks)
     rows = list(csv.DictReader(preds[0].open()))
     assert rows and rows[0]["docking_score"] == "-7.0"
+    assert rows[0]["docking_score_std"] == "0.25"
 
 
 def test_simsearch_control_command_masks_cuda_for_cpu_prediction(tmp_path: Path) -> None:
