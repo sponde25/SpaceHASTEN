@@ -44,7 +44,7 @@ _SEEDS_HEADER: tuple[str, ...] = ("SMILES", "title", "r_i_docking_score")
 
 
 def export_csv(db: Database, output: Path, *, cutoff: float) -> int:
-    """Export ``data ⨝ clusters`` rows with ``dock_score <= cutoff``.
+    """Export ``data`` rows (left-joined with ``clusters``) with ``dock_score <= cutoff``.
 
     Output columns mirror the legacy CSV produced by
     ``export_functions.export_results``::
@@ -55,6 +55,13 @@ def export_csv(db: Database, output: Path, *, cutoff: float) -> int:
     The ``smilesid`` column packs the legacy
     ``<smilesid_stripped>/<spacehastenid>`` form so downstream tooling
     keeps its 1:1 mapping back to the database row.
+
+    ``clusters`` is joined with a ``LEFT JOIN``, not an inner join: rows
+    are exported even if the compound has never been assigned a
+    ``clusterid`` (e.g. the workspace ran with ``--strategy greedy`` and
+    ``spacehasten cluster`` was never invoked, or a hit was discovered
+    after the last clustering pass). ``clusterid`` is empty in that case
+    rather than silently dropping the row.
 
     :param cutoff: ``dock_score <= cutoff`` filter (NULL scores excluded).
     :returns: number of rows written.

@@ -227,6 +227,17 @@ def _add_dock(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
 
 def _add_cluster(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     p = sub.add_parser("cluster", help="Run one sphere-exclusion clustering round.")
+    p.add_argument("--docked", action="store_true",
+                   help="Cluster only compounds that have been docked"
+                        " (dock_score IS NOT NULL), instead of the whole"
+                        " data table. Faster on large libraries when the"
+                        " only goal is populating clusterid for `export csv`."
+                        " Note: this REPLACES the entire clusters table, so"
+                        " any previous full-space clustering is discarded.")
+    p.add_argument("--cutoff", type=float, default=None,
+                   help="Further restrict to docked compounds with"
+                        " dock_score <= CUTOFF (better/smaller score)."
+                        " Requires --docked.")
     p.set_defaults(func=_cmd_cluster)
 
 
@@ -549,8 +560,14 @@ def _cmd_cluster(args: argparse.Namespace) -> int:
     setup_logging(workdir, args)
     settings = settings_from_args(args)
     scheduler = scheduler_from_args(args, settings)
+    if args.cutoff is not None and not args.docked:
+        print("error: --cutoff requires --docked", file=sys.stderr)
+        return 2
     with open_db(args) as db:
-        n = clustering.cluster(db, workdir, scheduler, settings)
+        n = clustering.cluster(
+            db, workdir, scheduler, settings,
+            docked_only=args.docked, cutoff=args.cutoff,
+        )
     print(f"Clustered {n} compounds")
     return 0
 

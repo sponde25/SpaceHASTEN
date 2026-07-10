@@ -123,7 +123,7 @@ class ExportRow:
     spacelight: float | None
     ftrees: float | None
     dock_iteration: int | None
-    clusterid: int
+    clusterid: int | None
 
 
 @dataclass(frozen=True)
@@ -223,8 +223,8 @@ class Database:
     _SQL_SELECT_EXPORT: Final[str] = (
         "SELECT smiles, data.spacehastenid, smilesid, dock_score, pred_score,"
         " spacelight, ftrees, dock_iteration, clusterid\n"
-        " FROM data, clusters\n"
-        " WHERE data.spacehastenid = clusters.spacehastenid AND dock_score <= ?\n"
+        " FROM data LEFT JOIN clusters ON data.spacehastenid = clusters.spacehastenid\n"
+        " WHERE dock_score <= ?\n"
         " ORDER BY dock_score"
     )
     _SQL_SELECT_SEEDS: Final[str] = (

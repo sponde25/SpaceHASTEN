@@ -21,7 +21,9 @@ def _seed_db(db: Database) -> None:
     db.insert_seed_docked("h1", "CCO", "ethanol-1", -8.5)
     db.insert_seed_docked("h2", "c1ccccc1", "benzene-1", -7.0)
     db.insert_seed_docked("h3", "Cc1ccccc1", "toluene-1", 1.0)  # above cutoff
-    # Need cluster rows because export joins data ⨝ clusters.
+    # Populate cluster rows for the happy-path tests (export left-joins
+    # against clusters, so this isn't strictly required, but most tests
+    # want a non-empty clusterid column to assert against).
     db.replace_clusters([
         ClusterRow(spacehastenid=1, clusterid=1),
         ClusterRow(spacehastenid=2, clusterid=2),
@@ -53,6 +55,33 @@ def test_export_csv_filters_and_formats(tmp_path: Path) -> None:
     assert body[0][1] == "ethanol-1/1"
     assert float(body[0][2]) == -8.5
     assert body[0][6] == "0"  # dock_iteration
+
+
+def test_export_csv_includes_rows_without_cluster_assignment(tmp_path: Path) -> None:
+    """Regression test: hits with no ``clusters`` row (e.g. workspace ran
+    with ``--strategy greedy`` and ``spacehasten cluster`` was never
+    invoked, or the compound was docked after the last clustering pass)
+    must still be exported, with an empty ``clusterid`` — not silently
+    dropped by an inner join."""
+    workdir = WorkDir.bootstrap(tmp_path / "ws", name="exp")
+    db = Database(workdir.dbsh())
+    db.create_schema()
+    db.insert_seed_docked("h1", "CCO", "ethanol-1", -8.5)
+    db.insert_seed_docked("h2", "c1ccccc1", "benzene-1", -7.0)
+    # Note: clusters table left empty entirely (no `cluster` run yet).
+    db.commit()
+    out = tmp_path / "results.csv"
+
+    n = export_csv(db, out, cutoff=0.0)
+    db.close()
+
+    assert n == 2
+    with out.open("rt", encoding="utf-8") as fh:
+        rows = list(csv.reader(fh))
+    body = rows[1:]
+    assert len(body) == 2
+    assert body[0][0] == "CCO"
+    assert body[0][7] == ""  # clusterid empty, row still present
 
 
 def test_export_seeds_formats_for_reimport(tmp_path: Path) -> None:
