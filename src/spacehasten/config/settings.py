@@ -43,8 +43,8 @@ class GeneralSettings(_Section):
     cpu_count_train: str = "8"
     cpu_count_search: str = "2"
     cpu_count_dock: str = "1"
-    cpu_count_predict: str = "8"
-    cpu_count_control: str = "8"
+    cpu_count_predict: str = "1"
+    cpu_count_control: str = "1"
     cpu_count_clustering: str = "64"
     schrodinger_feature_flags: str | None = None
     model_spec_path: str | None = None
@@ -66,11 +66,11 @@ class GeneralSettings(_Section):
     train_final_lr: float = 1e-4
     train_early_stopping_patience: int = 5
     train_early_stopping_min_delta: float = 0.0
-    pred_batch_size: int = 1024
-    pred_num_workers: int = 8
-    pred_accelerator: str = "auto"
+    pred_batch_size: int = 32
+    pred_num_workers: int = 0
+    pred_accelerator: str = "cpu"
     pred_devices: str = "1"
-    pred_chunk_size: int = 100000
+    pred_chunk_size: int = 12345
     sim_spacelight_default: float = 0.5
     sim_ftrees_default: float = 0.9
     nnn_default: int = 10000

@@ -291,6 +291,7 @@ def _build_control_command(
         f'echo "[task ${{TASK_ID}}] Property filter"\n'
         f'{pf_cmd}\n'
         f'echo "[task ${{TASK_ID}}] Predicting"\n'
+        f'export CUDA_VISIBLE_DEVICES=""\n'
         f'export OMP_NUM_THREADS=1\n'
         f'{pred_cmd}\n'
         f'echo "[task ${{TASK_ID}}] Done"\n'
@@ -570,7 +571,6 @@ def simsearch(
         array_size=n_chunks,
         max_concurrent=min(n_chunks, cpu),
         cpus_per_task=max(1, control_cpus),
-        gpus=1,
         env_setup=env_setup,
         command_template=control_body,
     )

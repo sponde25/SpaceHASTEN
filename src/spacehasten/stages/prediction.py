@@ -113,6 +113,7 @@ def _build_predict_command(
     cmd = " ".join(parts)
     return (
         f'echo "[task ${{TASK_ID}}] Predicting chunk ${{TASK_ID}}"\n'
+        f'export CUDA_VISIBLE_DEVICES=""\n'
         f'export OMP_NUM_THREADS=1\n'
         f'{cmd}\n'
         f'echo "[task ${{TASK_ID}}] Prediction done"'
@@ -213,7 +214,6 @@ def predict_undocked(
         array_size=n_chunks,
         max_concurrent=n_chunks,
         cpus_per_task=int(settings.general.cpu_count_predict or 1),
-        gpus=1,
         env_setup=env_setup,
         command_template=command,
     )

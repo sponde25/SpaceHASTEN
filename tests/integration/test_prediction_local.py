@@ -122,8 +122,8 @@ def test_prediction_stage_local(tmp_path: Path) -> None:
     db2.close()
 
     submitted_job = next(iter(scheduler._jobs.values())).spec  # noqa: SLF001
-    assert submitted_job.gpus == 1
-    assert "CUDA_VISIBLE_DEVICES" not in submitted_job.command_template
+    assert submitted_job.gpus == 0
+    assert 'CUDA_VISIBLE_DEVICES=""' in submitted_job.command_template
 
 
 def test_prediction_stage_no_undocked_returns_zero(tmp_path: Path) -> None:

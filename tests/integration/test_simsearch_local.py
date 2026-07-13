@@ -35,6 +35,7 @@ from spacehasten.config.settings import Settings
 from spacehasten.core.db import Database, PropertyRanges
 from spacehasten.scheduler import LocalScheduler
 from spacehasten.stages.simsearch import simsearch
+from spacehasten.stages.simsearch import _build_control_command
 from spacehasten.workspace.layout import WorkDir
 
 _PERMISSIVE_PROPS = PropertyRanges(
@@ -184,8 +185,7 @@ def test_simsearch_stage_local(tmp_path: Path) -> None:
     jobs = [local_job.spec for local_job in scheduler._jobs.values()]  # noqa: SLF001
     control_jobs = [job for job in jobs if job.name.startswith("control_cycle")]
     assert control_jobs
-    assert control_jobs[0].gpus == 1
-    assert "CUDA_VISIBLE_DEVICES" not in control_jobs[0].command_template
+    assert control_jobs[0].gpus == 0
 
     assert new_cycle == 1
 
@@ -275,6 +275,20 @@ def test_simsearch_writes_control_artefacts(tmp_path: Path) -> None:
     assert len(preds) == len(chunks)
     rows = list(csv.DictReader(preds[0].open()))
     assert rows and rows[0]["docking_score"] == "-7.0"
+
+
+def test_simsearch_control_command_masks_cuda_for_cpu_prediction(tmp_path: Path) -> None:
+    settings = Settings()
+    body = _build_control_command(
+        tmp_path / "CONTROL",
+        tmp_path / "models" / "v1",
+        settings,
+        prop_filter_prefix=("python3", "prop_filter.py"),
+        predict_prefix=("python3", "predict.py"),
+    )
+
+    assert 'CUDA_VISIBLE_DEVICES=""' in body
+    assert "--accelerator cpu" in body
 
 
 def test_simsearch_no_queries_raises(tmp_path: Path) -> None:

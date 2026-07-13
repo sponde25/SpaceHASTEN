@@ -111,8 +111,8 @@ def _write_ini(path: Path, *, answers: dict[str, str]) -> None:
     lines.append("CPU_COUNT_TRAIN = 8")
     lines.append("CPU_COUNT_SEARCH = 2")
     lines.append("CPU_COUNT_DOCK = 1")
-    lines.append("CPU_COUNT_PREDICT = 8")
-    lines.append("CPU_COUNT_CONTROL = 8")
+    lines.append("CPU_COUNT_PREDICT = 1")
+    lines.append("CPU_COUNT_CONTROL = 1")
     lines.append(f"CPU_COUNT_CLUSTERING = {a['slurm_cpu_clustering']}")
     lines.append("TRAIN_BATCH_SIZE = 1024")
     lines.append("TRAIN_EPOCHS = 50")
@@ -131,11 +131,11 @@ def _write_ini(path: Path, *, answers: dict[str, str]) -> None:
     lines.append("TRAIN_FINAL_LR = 1e-4")
     lines.append("TRAIN_EARLY_STOPPING_PATIENCE = 5")
     lines.append("TRAIN_EARLY_STOPPING_MIN_DELTA = 0.0")
-    lines.append("PRED_BATCH_SIZE = 1024")
-    lines.append("PRED_NUM_WORKERS = 8")
-    lines.append("PRED_ACCELERATOR = auto")
+    lines.append("PRED_BATCH_SIZE = 32")
+    lines.append("PRED_NUM_WORKERS = 0")
+    lines.append("PRED_ACCELERATOR = cpu")
     lines.append("PRED_DEVICES = 1")
-    lines.append("PRED_CHUNK_SIZE = 100000")
+    lines.append("PRED_CHUNK_SIZE = 12345")
     if a["schrodinger_feature_flags"]:
         lines.append(
             f"SCHRODINGER_FEATURE_FLAGS = {a['schrodinger_feature_flags']}"

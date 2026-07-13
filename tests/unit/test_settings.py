@@ -64,12 +64,12 @@ def test_settings_defaults_no_filesystem_access() -> None:
     assert s.general.train_epochs == 50
     assert s.general.train_num_workers == 8
     assert s.general.train_early_stopping_patience == 5
-    assert s.general.pred_accelerator == "auto"
-    assert s.general.pred_batch_size == 1024
-    assert s.general.pred_num_workers == 8
-    assert s.general.pred_chunk_size == 100000
-    assert s.general.cpu_count_predict == "8"
-    assert s.general.cpu_count_control == "8"
+    assert s.general.pred_accelerator == "cpu"
+    assert s.general.pred_batch_size == 32
+    assert s.general.pred_num_workers == 0
+    assert s.general.pred_chunk_size == 12345
+    assert s.general.cpu_count_predict == "1"
+    assert s.general.cpu_count_control == "1"
     assert s.paths.scratch_default == "/wrk"
 
 
