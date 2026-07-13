@@ -39,9 +39,12 @@ _EXPORT_HEADER: tuple[str, ...] = (
     "clusterid",
 )
 
+# Matches ``seeds.import_seeds`` CSV defaults (smiles_col, title_col, score_col).
+_SEEDS_HEADER: tuple[str, ...] = ("SMILES", "title", "r_i_docking_score")
+
 
 def export_csv(db: Database, output: Path, *, cutoff: float) -> int:
-    """Export ``data ⨝ clusters`` rows with ``dock_score <= cutoff``.
+    """Export ``data`` rows (left-joined with ``clusters``) with ``dock_score <= cutoff``.
 
     Output columns mirror the legacy CSV produced by
     ``export_functions.export_results``::
@@ -52,6 +55,13 @@ def export_csv(db: Database, output: Path, *, cutoff: float) -> int:
     The ``smilesid`` column packs the legacy
     ``<smilesid_stripped>/<spacehastenid>`` form so downstream tooling
     keeps its 1:1 mapping back to the database row.
+
+    ``clusters`` is joined with a ``LEFT JOIN``, not an inner join: rows
+    are exported even if the compound has never been assigned a
+    ``clusterid`` (e.g. the workspace ran with ``--strategy greedy`` and
+    ``spacehasten cluster`` was never invoked, or a hit was discovered
+    after the last clustering pass). ``clusterid`` is empty in that case
+    rather than silently dropping the row.
 
     :param cutoff: ``dock_score <= cutoff`` filter (NULL scores excluded).
     :returns: number of rows written.
@@ -74,6 +84,41 @@ def export_csv(db: Database, output: Path, *, cutoff: float) -> int:
                 r.clusterid,
             ])
     logger.info("Exported %d rows to %s", len(rows), output)
+    return len(rows)
+
+
+def export_seeds(db: Database, output: Path) -> int:
+    """Export the original seed batch (``dock_iteration == 0``) as a CSV,
+    ready to feed straight back into ``spacehasten import-seeds --csv``
+    (e.g. to seed a new workspace)::
+
+        SMILES,title,r_i_docking_score
+
+    These are exactly the column names/defaults ``seeds.import_seeds``
+    expects, so no ``--smiles-col``/``--title-col``/``--score-col``
+    overrides are needed on import.
+
+    Unlike :func:`export_csv`, seeds are identified structurally by
+    ``dock_iteration == 0`` rather than by a docking-score cutoff — a
+    compound is either part of the original seed batch or it isn't,
+    regardless of its score. Compounds discovered in later screening
+    cycles (``dock_iteration >= 1``) are never included.
+
+    :returns: number of rows written.
+    """
+    output = Path(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    rows = db.select_seed_rows()
+    with output.open("wt", encoding="utf-8", newline="") as fh:
+        writer = csv.writer(fh, lineterminator="\n")
+        writer.writerow(_SEEDS_HEADER)
+        for smiles, smilesid, dock_score in rows:
+            writer.writerow([
+                (smiles or "").strip(),
+                (smilesid or "").strip(),
+                dock_score,
+            ])
+    logger.info("Exported %d seed rows to %s", len(rows), output)
     return len(rows)
 
 
@@ -222,4 +267,4 @@ def export_poses(
     return output
 
 
-__all__ = ["export_csv", "export_poses"]
+__all__ = ["export_csv", "export_poses", "export_seeds"]

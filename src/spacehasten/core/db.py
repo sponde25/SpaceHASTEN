@@ -98,6 +98,22 @@ class ModelRow:
 
 
 @dataclass(frozen=True)
+class SimsearchCycleStats:
+    """Impact summary for :meth:`Database.undo_simsearch_cycle`.
+
+    ``n_hits_docked`` and ``n_hits_used_as_query`` are the guardrail
+    counts: if either is non-zero, ``undo_simsearch_cycle`` refuses to
+    proceed (see its docstring).
+    """
+
+    cycle: int
+    n_hits: int
+    n_queries: int
+    n_hits_docked: int
+    n_hits_used_as_query: int
+
+
+@dataclass(frozen=True)
 class ExportRow:
     smiles: str
     spacehastenid: int
@@ -107,7 +123,7 @@ class ExportRow:
     spacelight: float | None
     ftrees: float | None
     dock_iteration: int | None
-    clusterid: int
+    clusterid: int | None
 
 
 @dataclass(frozen=True)
@@ -207,9 +223,14 @@ class Database:
     _SQL_SELECT_EXPORT: Final[str] = (
         "SELECT smiles, data.spacehastenid, smilesid, dock_score, pred_score,"
         " spacelight, ftrees, dock_iteration, clusterid\n"
-        " FROM data, clusters\n"
-        " WHERE data.spacehastenid = clusters.spacehastenid AND dock_score <= ?\n"
+        " FROM data LEFT JOIN clusters ON data.spacehastenid = clusters.spacehastenid\n"
+        " WHERE dock_score <= ?\n"
         " ORDER BY dock_score"
+    )
+    _SQL_SELECT_SEEDS: Final[str] = (
+        "SELECT smiles, smilesid, dock_score FROM data\n"
+        " WHERE dock_iteration = 0\n"
+        " ORDER BY spacehastenid"
     )
 
     def __init__(self, path: str | Path) -> None:
@@ -332,6 +353,99 @@ class Database:
         """Return the highest dock_iteration, or None if no rows have been docked."""
         row = self._conn.execute("SELECT MAX(dock_iteration) FROM data").fetchone()
         return int(row[0]) if row and row[0] is not None else None
+
+    def latest_search_attempt_cycle(self) -> int | None:
+        """Return the highest simsearch cycle number *attempted* so far.
+
+        Unlike :meth:`latest_simsearch_cycle` (which only looks at
+        ``simsearch_cycle``, i.e. cycles that actually produced hits),
+        this also considers the ``query`` column. ``simsearch()`` marks
+        and commits queries *before* running the search job, so a cycle
+        whose search job then fails leaves ``query = cycle`` rows but no
+        ``simsearch_cycle = cycle`` rows. Taking the max of both columns
+        recovers that failed attempt as "the latest cycle" so ``undo
+        search`` can target it. Returns ``None`` if no simsearch cycle has
+        ever been attempted.
+        """
+        row = self._conn.execute(
+            "SELECT MAX(x) FROM ("
+            "SELECT MAX(query) AS x FROM data "
+            "UNION ALL SELECT MAX(simsearch_cycle) AS x FROM data"
+            ")"
+        ).fetchone()
+        return int(row[0]) if row and row[0] is not None else None
+
+    def simsearch_cycle_stats(self, cycle: int) -> SimsearchCycleStats:
+        """Return impact counts for reverting ``cycle`` (see :meth:`undo_simsearch_cycle`)."""
+        n_hits = self._conn.execute(
+            "SELECT COUNT(*) FROM data WHERE simsearch_cycle = ?", (cycle,)
+        ).fetchone()[0]
+        n_queries = self._conn.execute(
+            "SELECT COUNT(*) FROM data WHERE query = ?", (cycle,)
+        ).fetchone()[0]
+        n_hits_docked = self._conn.execute(
+            "SELECT COUNT(*) FROM data WHERE simsearch_cycle = ? AND dock_score IS NOT NULL",
+            (cycle,),
+        ).fetchone()[0]
+        n_hits_used_as_query = self._conn.execute(
+            "SELECT COUNT(*) FROM data WHERE simsearch_cycle = ? AND query IS NOT NULL",
+            (cycle,),
+        ).fetchone()[0]
+        return SimsearchCycleStats(
+            cycle=cycle,
+            n_hits=int(n_hits),
+            n_queries=int(n_queries),
+            n_hits_docked=int(n_hits_docked),
+            n_hits_used_as_query=int(n_hits_used_as_query),
+        )
+
+    def undo_simsearch_cycle(self, cycle: int) -> tuple[int, int]:
+        """Revert simsearch ``cycle``: delete its hit compounds, release its query marks.
+
+        Intended for the case where ``simsearch()`` marked queries (and
+        committed) but then failed before inserting any hits, permanently
+        stranding those compounds behind ``query IS NOT NULL``. Deletes
+        every row with ``simsearch_cycle = cycle`` (plus any stale
+        ``clusters`` rows for those ids) and resets ``query = NULL`` for
+        every row with ``query = cycle``, in a single transaction.
+
+        :raises ValueError: if any hit compound from ``cycle`` has
+            already been docked (real docking data is never silently
+            discarded — inspect manually instead), or has already been
+            used as a query for a later cycle (which is structurally
+            impossible if ``cycle`` is genuinely the latest search
+            attempt; if this fires, undo the later cycle first).
+        :returns: ``(hits_removed, queries_released)``.
+        """
+        stats = self.simsearch_cycle_stats(cycle)
+        if stats.n_hits_docked:
+            raise ValueError(
+                f"cannot undo simsearch cycle {cycle}: {stats.n_hits_docked} of its "
+                "hit compound(s) have already been docked; undoing would discard "
+                "real docking results. Inspect the database manually before proceeding."
+            )
+        if stats.n_hits_used_as_query:
+            raise ValueError(
+                f"cannot undo simsearch cycle {cycle}: {stats.n_hits_used_as_query} of "
+                "its hit compound(s) have already been used as queries for a later "
+                f"cycle, so cycle {cycle} is not actually the latest search attempt. "
+                "Undo the later cycle first."
+            )
+        hit_ids = [
+            row[0]
+            for row in self._conn.execute(
+                "SELECT spacehastenid FROM data WHERE simsearch_cycle = ?", (cycle,)
+            ).fetchall()
+        ]
+        if hit_ids:
+            placeholders = ",".join("?" * len(hit_ids))
+            self._conn.execute(
+                f"DELETE FROM clusters WHERE spacehastenid IN ({placeholders})", hit_ids
+            )
+            self._conn.execute("DELETE FROM data WHERE simsearch_cycle = ?", (cycle,))
+        self._conn.execute("UPDATE data SET query = NULL WHERE query = ?", (cycle,))
+        self.commit()
+        return stats.n_hits, stats.n_queries
 
     # ----- counts -----
 
@@ -501,7 +615,34 @@ class Database:
             tpsa=index["tpsa"],
         )
 
-    # ----- acquisition selects (§A.6 verbatim) -----
+    # ----- smarts filters -----
+
+    def replace_smarts_filters(self, patterns: list[tuple[str, str]]) -> None:
+        """Persist SMARTS include/exclude patterns.
+
+        ``patterns`` is a list of ``(mode, smarts)`` pairs where *mode* is
+        either ``'include'`` or ``'exclude'``.  Calling with an empty list
+        clears any previously stored patterns.
+        """
+        c = self._conn.cursor()
+        c.execute("DROP TABLE IF EXISTS smarts_filters")
+        c.execute("CREATE TABLE smarts_filters (mode TEXT, pattern TEXT)")
+        if patterns:
+            c.executemany(
+                "INSERT INTO smarts_filters (mode, pattern) VALUES (?, ?)",
+                patterns,
+            )
+
+    def load_smarts_filters(self) -> list[tuple[str, str]]:
+        """Return stored ``(mode, smarts)`` pairs, or ``[]`` if none stored."""
+        try:
+            rows = self._conn.execute(
+                "SELECT mode, pattern FROM smarts_filters"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return []
+        return [(str(r[0]), str(r[1])) for r in rows]
+
 
     def select_queries_for_simsearch(
         self,
@@ -538,6 +679,10 @@ class Database:
         )
         return [(s, i) for s, i in self._conn.execute(sql, (limit,)).fetchall()]
 
+    def has_clusters(self) -> bool:
+        """Whether ``clusters`` has any rows (i.e. ``cluster`` has run)."""
+        return self._conn.execute("SELECT 1 FROM clusters LIMIT 1").fetchone() is not None
+
     def select_undocked_for_prediction(
         self, batch_size: int = 10000
     ) -> Iterator[tuple[str, int]]:
@@ -547,6 +692,14 @@ class Database:
             if not rows:
                 break
             yield from rows
+
+    def count_undocked_for_prediction(self) -> int:
+        """Number of rows :meth:`select_undocked_for_prediction` would yield."""
+        sql = self._SQL_SELECT_UNDOCKED.replace(
+            "SELECT smiles, spacehastenid", "SELECT COUNT(*)", 1
+        )
+        row = self._conn.execute(sql).fetchone()
+        return int(row[0]) if row else 0
 
     def select_training_data(self, cutoff: float = 10.0) -> list[tuple[str, float]]:
         return [
@@ -570,6 +723,22 @@ class Database:
             for row in self._conn.execute(self._SQL_SELECT_EXPORT, (cutoff,)).fetchall()
         ]
 
+    def select_seed_rows(self) -> list[tuple[str, str, float]]:
+        """Docked rows from the original seed batch (``dock_iteration == 0``).
+
+        ``dock_iteration == 0`` uniquely identifies the seed round: it is
+        set on pre-docked CSV seed imports (:meth:`insert_seed_docked`) and
+        is also the iteration number assigned to the first ever ``dock``
+        call (which docks previously-undocked ``.smi`` seeds). Every later
+        ``dock`` call gets ``iteration = latest + 1 >= 1``, so compounds
+        discovered in subsequent screening cycles never carry
+        ``dock_iteration == 0``.
+        """
+        return [
+            (row[0], row[1], row[2])
+            for row in self._conn.execute(self._SQL_SELECT_SEEDS).fetchall()
+        ]
+
     # ----- bulk applies (used by stages, not specified above but useful) -----
 
     def apply_dock_scores(self, rows: Sequence[tuple[float, int, int]]) -> None:
@@ -590,4 +759,5 @@ __all__ = [
     "PropertyRanges",
     "PropertyRow",
     "SCHEMA_STATEMENTS",
+    "SimsearchCycleStats",
 ]

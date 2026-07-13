@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Literal
 
 from spacehasten.config.properties import PropertyRanges
+from spacehasten.core.db import Database
 from spacehasten.stages import (
     archive,
     clustering,
@@ -54,9 +55,9 @@ command groups:
     pick-seeds          Sample and canonicalize seeds from a large collection
 
   workflows (recommended)
-    seed-training       Import seeds → dock → train → cluster
+    seed-training       Import seeds → dock → train
     screening-cycle     [train] → (search → predict)×3 → dock per round
-    export              Export results (csv, poses)
+    export              Export results (csv, poses, seeds)
 
   manual stages (expert)
     import-seeds        Import seed compounds into the database (no training)
@@ -69,6 +70,7 @@ command groups:
   utilities
     status              Print workspace manifest summary
     resume              Resume the last interrupted run
+    undo                Revert a failed or unwanted search cycle (manual intervention)
     archive             Archive lifecycle (create/extract/restore/clean)
     verify              End-to-end smoke test
 """
@@ -99,6 +101,7 @@ command groups:
     _add_archive(sub)
     _add_status(sub)
     _add_resume(sub)
+    _add_undo(sub)
     _add_verify(sub)
     return parser
 
@@ -159,7 +162,7 @@ def _add_import_seeds(sub: argparse._SubParsersAction[argparse.ArgumentParser]) 
 def _add_seed_training(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     p = sub.add_parser(
         "seed-training",
-        help="Workflow: import seeds → dock → train → cluster.",
+        help="Workflow: import seeds → dock → train.",
     )
     p.add_argument("--smi", type=Path, required=True, help="SMI file with undocked seed compounds.")
     p.add_argument("--dock-cpus", type=int, required=True, help="Number of concurrent docking tasks.")
@@ -181,8 +184,10 @@ def _add_predict(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
     p = sub.add_parser("predict", help="Predict pred_score for every undocked row.")
     p.add_argument("--model-version", type=int, default=None,
                    help="Optional. Model version to use. Default: latest.")
-    p.add_argument("--chunk-size", type=int, default=None,
-                   help="Optional. Rows per prediction chunk. Default: config pred_chunk_size.")
+    p.add_argument("--jobs", type=int, default=None,
+                   help="Optional. Number of scheduler array tasks to spread "
+                        "undocked rows across (implicitly sets chunk size). "
+                        "Default: a fixed chunk size.")
     p.set_defaults(func=_cmd_predict)
 
 
@@ -195,7 +200,9 @@ def _add_search(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> Non
     p.add_argument("--cpus", type=int, required=True,
                    help="Number of CPUs for simsearch tasks. Recommendation: max 250.")
     p.add_argument("--strategy", choices=("greedy", "clustering"), default="greedy",
-                   help="Optional. Query acquisition strategy. Default: greedy.")
+                   help="Optional. Query acquisition strategy. Default: greedy."
+                        " 'clustering' requires cluster assignments to already exist"
+                        " (run `spacehasten cluster` first).")
     p.add_argument("--space", type=Path, default=None,
                    help="Optional. BioSolveIT .space file override. Default: from config.")
     p.add_argument("--nnn", type=int, default=None,
@@ -206,8 +213,6 @@ def _add_search(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> Non
                    help="Optional. FTrees similarity threshold. Default: from config.")
     p.add_argument("--threads-per-task", type=int, default=2,
                    help="Optional. Threads per simsearch task. Default: 2.")
-    p.add_argument("--cluster-after", action="store_true",
-                   help="Optional. Run clustering after search completes.")
     p.set_defaults(func=_cmd_search)
 
 
@@ -218,12 +223,25 @@ def _add_dock(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     p.add_argument("--cpus", type=int, required=True,
                    help="Number of CPUs for docking tasks. Recommendation: max 250.")
     p.add_argument("--strategy", choices=("greedy", "clustering"), default="greedy",
-                   help="Optional. Acquisition strategy for choosing which compounds to dock. Default: greedy.")
+                   help="Optional. Acquisition strategy for choosing which compounds to dock. Default: greedy."
+                        " 'clustering' requires cluster assignments to already exist"
+                        " (run `spacehasten cluster` first).")
     p.set_defaults(func=_cmd_dock)
 
 
 def _add_cluster(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     p = sub.add_parser("cluster", help="Run one sphere-exclusion clustering round.")
+    p.add_argument("--docked", action="store_true",
+                   help="Cluster only compounds that have been docked"
+                        " (dock_score IS NOT NULL), instead of the whole"
+                        " data table. Faster on large libraries when the"
+                        " only goal is populating clusterid for `export csv`."
+                        " Note: this REPLACES the entire clusters table, so"
+                        " any previous full-space clustering is discarded.")
+    p.add_argument("--cutoff", type=float, default=None,
+                   help="Further restrict to docked compounds with"
+                        " dock_score <= CUTOFF (better/smaller score)."
+                        " Requires --docked.")
     p.set_defaults(func=_cmd_cluster)
 
 
@@ -243,11 +261,14 @@ def _add_screening_cycle(sub: argparse._SubParsersAction[argparse.ArgumentParser
     p.add_argument("--rounds", type=int, default=1,
                    help="Optional. Number of screening cycle rounds. Default: 1.")
     p.add_argument("--strategy", choices=("greedy", "clustering"), default="greedy",
-                   help="Optional. Acquisition strategy for choosing which compounds to dock. Default: greedy.")
+                   help="Optional. Acquisition strategy for choosing which compounds to dock. Default: greedy."
+                        " 'clustering' auto-clusters before each search/dock step in every round.")
     p.add_argument("--space", type=Path, default=None,
                    help="Optional. BioSolveIT .space file override. Default: from config.")
     p.add_argument("--nnn", type=int, default=None,
                    help="Optional. Max results per query from chemical space. Default: from config.")
+    p.add_argument("--props-toml", type=Path, default=None,
+                   help="Optional. PropertyRanges TOML to update the stored property filter ranges before running. Default: use ranges already in the database.")
     p.set_defaults(func=_cmd_screening_cycle)
 
 
@@ -270,6 +291,14 @@ def _add_export(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> Non
     poses_p.add_argument("--iteration", type=int, default=None,
                          help="Optional. Limit to a specific docking iteration. Default: all iterations.")
     poses_p.set_defaults(func=_cmd_export_poses)
+
+    seeds_p = sub2.add_parser(
+        "seeds",
+        help="Export the original seed batch as a CSV (for `import-seeds --csv`).",
+    )
+    seeds_p.add_argument("--output", type=Path, required=True,
+                         help="Output CSV file path.")
+    seeds_p.set_defaults(func=_cmd_export_seeds)
 
 
 def _add_archive(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -311,6 +340,27 @@ def _add_resume(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> Non
     p.set_defaults(func=_cmd_resume)
 
 
+def _add_undo(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    p = sub.add_parser(
+        "undo",
+        help="Revert a failed or unwanted operation. Manual-intervention only.",
+    )
+    sub2 = p.add_subparsers(dest="undo_kind", required=True)
+
+    search_p = sub2.add_parser(
+        "search",
+        help="Revert the latest simsearch cycle: delete its hit compounds and "
+             "release its query marks so those compounds can be selected as "
+             "queries again.",
+    )
+    search_p.add_argument(
+        "--yes", "-y", action="store_true",
+        help="Optional. Skip the confirmation prompt. Required when stdin is "
+             "not a terminal (e.g. scripted use).",
+    )
+    search_p.set_defaults(func=_cmd_undo_search)
+
+
 def _add_verify(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     from .verify import add_verify_arguments
 
@@ -325,8 +375,6 @@ def _add_verify(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> Non
 
 
 def _cmd_init(args: argparse.Namespace) -> int:
-    from spacehasten.core.db import Database
-
     root = Path(args.path).resolve()
     name = args.name or root.name
     settings = settings_from_args(args)
@@ -354,10 +402,13 @@ def _cmd_init(args: argparse.Namespace) -> int:
         db.store_dock_param(Path(args.dock_params).read_bytes())
         db.store_dock_grid(Path(args.dock_grid).read_bytes())
 
+    PropertyRanges().to_toml(workdir.props_path())
+
     logger.info("Workspace initialised: root=%s  shared=%s", root, shared_root)
     print(f"Initialised workspace at {root}")
     print(f"  local root (DB + logs): {root}")
     print(f"  shared root (stages):   {shared_root}")
+    print(f"  property filter template: {workdir.props_path()} (edit before running seed-training or screening-cycle)")
     return 0
 
 
@@ -425,7 +476,7 @@ def _cmd_seed_training(args: argparse.Namespace) -> int:
             props=props,
             processes=args.processes,
         )
-        logger.info("Imported %d seeds; starting dock → train → cluster", n)
+        logger.info("Imported %d seeds; starting dock → train", n)
         docking.dock(
             db, workdir, scheduler, settings,
             top_n=n,
@@ -435,9 +486,8 @@ def _cmd_seed_training(args: argparse.Namespace) -> int:
         training.train(
             db, workdir, scheduler, settings,
         )
-        clustering.cluster(db, workdir, scheduler, settings)
 
-    print(f"Seed-training complete ({n} seeds imported, docked, trained, clustered)")
+    print(f"Seed-training complete ({n} seeds imported, docked, trained)")
     return 0
 
 
@@ -466,7 +516,7 @@ def _cmd_predict(args: argparse.Namespace) -> int:
         n = prediction.predict_undocked(
             db, workdir, scheduler, settings,
             model_version=version,
-            chunk_size=args.chunk_size,
+            jobs=args.jobs,
         )
     print(f"Updated pred_score for {n} rows (model v{version})")
     return 0
@@ -489,7 +539,6 @@ def _cmd_search(args: argparse.Namespace) -> int:
             sim_ftrees=args.sim_ftrees,
             cpu=args.cpus,
             threads_per_task=args.threads_per_task,
-            cluster_after=args.cluster_after,
         )
     print(f"Simsearch cycle {cycle} complete")
     return 0
@@ -516,8 +565,14 @@ def _cmd_cluster(args: argparse.Namespace) -> int:
     setup_logging(workdir, args)
     settings = settings_from_args(args)
     scheduler = scheduler_from_args(args, settings)
+    if args.cutoff is not None and not args.docked:
+        print("error: --cutoff requires --docked", file=sys.stderr)
+        return 2
     with open_db(args) as db:
-        n = clustering.cluster(db, workdir, scheduler, settings)
+        n = clustering.cluster(
+            db, workdir, scheduler, settings,
+            docked_only=args.docked, cutoff=args.cutoff,
+        )
     print(f"Clustered {n} compounds")
     return 0
 
@@ -529,7 +584,21 @@ def _cmd_screening_cycle(args: argparse.Namespace) -> int:
     scheduler = scheduler_from_args(args, settings)
 
     strategy: Literal["greedy", "clustering"] = args.strategy
+
+    def _maybe_cluster(db: Database) -> None:
+        """Re-cluster before each search/dock step when using the
+        ``clustering`` acquisition strategy, so query/dock selection sees
+        up-to-date cluster assignments (including compounds ingested
+        earlier in this same round). No-op for ``greedy``."""
+        if strategy == "clustering":
+            clustering.cluster(db, workdir, scheduler, settings)
+
     with open_db(args) as db:
+        if args.props_toml is not None:
+            props = PropertyRanges.from_toml(args.props_toml)
+            db.replace_properties(seeds.typed_to_db_props(props))
+            db.replace_smarts_filters(seeds.typed_smarts_to_db(props))
+            logger.info("Updated property filter ranges from %s", args.props_toml)
         for round_n in range(1, args.rounds + 1):
             logger.info("Screening round %d/%d", round_n, args.rounds)
 
@@ -540,6 +609,7 @@ def _cmd_screening_cycle(args: argparse.Namespace) -> int:
                 training.train(db, workdir, scheduler, settings)
 
             # search(docked) — CONTROL phase handles prop filter + predict
+            _maybe_cluster(db)
             simsearch.simsearch(
                 db, workdir, scheduler, settings,
                 source="docked", strategy=strategy,
@@ -550,6 +620,7 @@ def _cmd_screening_cycle(args: argparse.Namespace) -> int:
 
             # search(predicted) × 2 — new hits get pred_score via CONTROL
             for _ in range(2):
+                _maybe_cluster(db)
                 simsearch.simsearch(
                     db, workdir, scheduler, settings,
                     source="predicted", strategy=strategy,
@@ -559,6 +630,7 @@ def _cmd_screening_cycle(args: argparse.Namespace) -> int:
                 )
 
             # dock
+            _maybe_cluster(db)
             docking.dock(
                 db, workdir, scheduler, settings,
                 top_n=args.dock_top_n,
@@ -589,6 +661,14 @@ def _cmd_export_poses(args: argparse.Namespace) -> int:
             settings=settings,
         )
     print(f"Wrote poses to {out}")
+    return 0
+
+
+def _cmd_export_seeds(args: argparse.Namespace) -> int:
+    setup_logging(workdir_from_args(args), args)
+    with open_db(args) as db:
+        n = export.export_seeds(db, args.output)
+    print(f"Exported {n} seed rows to {args.output}")
     return 0
 
 
@@ -663,6 +743,67 @@ def _cmd_status(args: argparse.Namespace) -> int:
 def _cmd_resume(args: argparse.Namespace) -> int:
     # Resume semantics are not yet defined beyond status; mirror status.
     return _cmd_status(args)
+
+
+def _cmd_undo_search(args: argparse.Namespace) -> int:
+    """Revert the latest simsearch cycle (see :meth:`Database.undo_simsearch_cycle`).
+
+    Always targets the most recent search *attempt* (successful or
+    failed) — there is no ``--cycle`` argument, since a cycle whose hits
+    were already used as later queries can never be the latest attempt
+    (see :meth:`Database.latest_search_attempt_cycle`). This is
+    deliberately interactive: it is meant for the rare, manual-
+    intervention case where a search cycle failed after marking queries,
+    stranding those compounds behind ``query IS NOT NULL``.
+    """
+    workdir = workdir_from_args(args)
+    setup_logging(workdir, args)
+
+    with open_db(args) as db:
+        cycle = db.latest_search_attempt_cycle()
+        if cycle is None:
+            print("No simsearch cycles found; nothing to undo.")
+            return 0
+
+        stats = db.simsearch_cycle_stats(cycle)
+        outcome = "completed" if stats.n_hits > 0 else "failed or incomplete"
+        print(f"Latest search attempt: cycle {cycle} ({outcome})")
+        print(f"  hit compounds discovered  : {stats.n_hits}")
+        print(f"  compounds marked as query : {stats.n_queries}")
+
+        if not args.yes:
+            if not sys.stdin.isatty():
+                logger.error(
+                    "refusing to undo simsearch cycle %d non-interactively without --yes",
+                    cycle,
+                )
+                print(
+                    "error: `undo search` requires manual confirmation; "
+                    "re-run with --yes to confirm non-interactively, or run "
+                    "interactively to confirm at the prompt.",
+                    file=sys.stderr,
+                )
+                return 1
+            answer = input(
+                f"Undo simsearch cycle {cycle}? This deletes {stats.n_hits} hit "
+                f"compound(s) and releases {stats.n_queries} query mark(s). [y/N] "
+            )
+            if answer.strip().lower() not in ("y", "yes"):
+                print("Aborted; no changes made.")
+                return 1
+
+        try:
+            n_hits, n_queries = db.undo_simsearch_cycle(cycle)
+        except ValueError as exc:
+            logger.error("%s", exc)
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+
+    print(
+        f"Reverted cycle {cycle}: removed {n_hits} hit compound(s), "
+        f"released {n_queries} query mark(s)."
+    )
+    return 0
 
 
 def _cmd_verify(args: argparse.Namespace) -> int:

@@ -30,6 +30,15 @@ Property file format (12 lines, mirroring legacy)::
     rotbonds_max
     tpsa_min
     tpsa_max
+
+Optional SMARTS file format (``--smarts``)::
+
+    include:<SMARTS>   # molecule must match at least one include pattern
+    exclude:<SMARTS>   # molecule must not match any exclude pattern
+
+Lines starting with ``#`` are treated as comments and ignored.  If no
+``--smarts`` file is provided (or the file is empty), SMARTS filtering
+is skipped entirely.
 """
 
 from __future__ import annotations
@@ -39,7 +48,7 @@ import csv
 import gzip
 import logging
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, cast
 
@@ -85,6 +94,62 @@ class _Bounds:
         )
 
 
+@dataclass(frozen=True)
+class _SmartsBounds:
+    """Compiled SMARTS patterns for substructure filtering.
+
+    ``include``: molecule must match at least one pattern (empty = no constraint).
+    ``exclude``: molecule must not match any pattern (empty = no constraint).
+    """
+
+    include: list[object] = field(default_factory=list)
+    exclude: list[object] = field(default_factory=list)
+
+    @classmethod
+    def read(cls, path: Path) -> _SmartsBounds:
+        """Load and compile SMARTS from *path*.
+
+        File format: one ``<mode>:<smarts>`` per line.  Lines starting with
+        ``#`` or blank lines are ignored.  Raises ``ValueError`` for
+        unrecognised modes or patterns that RDKit cannot parse.
+        """
+        from rdkit import Chem
+
+        include: list[object] = []
+        exclude: list[object] = []
+        with path.open("rt", encoding="utf-8") as fh:
+            for lineno, raw in enumerate(fh, 1):
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if ":" not in line:
+                    raise ValueError(
+                        f"{path}:{lineno}: expected 'include:<smarts>' or "
+                        f"'exclude:<smarts>', got {line!r}"
+                    )
+                mode, _, pattern = line.partition(":")
+                mode = mode.strip().lower()
+                if mode not in ("include", "exclude"):
+                    raise ValueError(
+                        f"{path}:{lineno}: unknown mode {mode!r} "
+                        "(expected 'include' or 'exclude')"
+                    )
+                mol = Chem.MolFromSmarts(pattern)
+                if mol is None:
+                    raise ValueError(
+                        f"{path}:{lineno}: RDKit could not parse SMARTS {pattern!r}"
+                    )
+                if mode == "include":
+                    include.append(mol)
+                else:
+                    exclude.append(mol)
+        return cls(include=include, exclude=exclude)
+
+    @property
+    def active(self) -> bool:
+        return bool(self.include or self.exclude)
+
+
 def _open_input(path: Path) -> IO[str]:
     if path.suffix == ".gz":
         return cast(IO[str], gzip.open(path, "rt", encoding="utf-8"))
@@ -107,10 +172,14 @@ def filter_smiles(
     input_path: Path,
     bounds: _Bounds,
     output_path: Path,
+    smarts: _SmartsBounds | None = None,
 ) -> int:
-    """Filter the input file by RDKit-computed properties.
+    """Filter the input file by RDKit-computed properties and optional SMARTS.
 
-    :returns: number of rows that passed the filter.
+    Property filtering is applied first; SMARTS filtering is applied only to
+    molecules that pass the property gates (saves SMARTS matching work).
+
+    :returns: number of rows that passed all filters.
     """
     # Imports kept inside the function so the unit test can monkeypatch.
     from rdkit import Chem
@@ -150,6 +219,14 @@ def filter_smiles(
             tpsa = rdMolDescriptors.CalcTPSA(mol)
             if tpsa < bounds.tpsa_min or tpsa > bounds.tpsa_max:
                 continue
+            # SMARTS filtering (only when patterns are configured).
+            if smarts is not None and smarts.active:
+                if smarts.include and not any(
+                    mol.HasSubstructMatch(q) for q in smarts.include
+                ):
+                    continue
+                if any(mol.HasSubstructMatch(q) for q in smarts.exclude):
+                    continue
             reghash = RegistrationHash.GetMolLayers(mol)[
                 RegistrationHash.HashLayer.TAUTOMER_HASH
             ]
@@ -164,8 +241,8 @@ def filter_smiles(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Filter a SMI(.gz) file by RDKit properties; output a CSV with"
-            " columns smiles,smilesid suitable for chemprop prediction."
+            "Filter a SMI(.gz) file by RDKit properties and optional SMARTS;"
+            " output a CSV with columns smiles,smilesid suitable for chemprop prediction."
         )
     )
     parser.add_argument("input", help="Input SMI file (optionally gzipped)")
@@ -176,6 +253,17 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Output CSV path. Defaults to propoutput_<input-stem>.csv next"
             " to the input."
+        ),
+    )
+    parser.add_argument(
+        "--smarts",
+        default=None,
+        metavar="FILE",
+        help=(
+            "Optional SMARTS filter file. Each non-blank, non-comment line "
+            "must be 'include:<SMARTS>' or 'exclude:<SMARTS>'. "
+            "Molecules must match at least one include pattern (if any) and "
+            "must not match any exclude pattern."
         ),
     )
     return parser
@@ -195,7 +283,19 @@ def main(argv: list[str] | None = None) -> int:
         Path(args.output) if args.output is not None else _output_path_for(input_path)
     )
     bounds = _Bounds.read(params_path)
-    n = filter_smiles(input_path, bounds, output_path)
+    smarts: _SmartsBounds | None = None
+    if args.smarts is not None:
+        smarts_path = Path(args.smarts)
+        if smarts_path.exists():
+            smarts = _SmartsBounds.read(smarts_path)
+            if smarts.active:
+                logger.info(
+                    "SMARTS filter: %d include, %d exclude patterns",
+                    len(smarts.include), len(smarts.exclude),
+                )
+        else:
+            logger.debug("--smarts file not found (%s), skipping SMARTS filter", smarts_path)
+    n = filter_smiles(input_path, bounds, output_path, smarts=smarts)
     logger.info("filtered %d rows -> %s", n, output_path)
     return 0
 

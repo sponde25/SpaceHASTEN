@@ -182,14 +182,19 @@ class Scheduler(ABC):
             # Log progress when completed count changes.
             if snap.completed_count != prev_completed:
                 elapsed = time.time() - start_time
-                mins, secs = divmod(int(elapsed), 60)
+                hours, _rem = divmod(int(elapsed), 3600)
+                mins, secs = divmod(_rem, 60)
+                elapsed_str = (
+                    f"{hours}h {mins:02d}m {secs:02d}s"
+                    if hours
+                    else f"{mins}m {secs:02d}s"
+                )
                 logger.info(
-                    "[%s] %d/%d tasks completed (elapsed: %dm %02ds)",
+                    "[%s] %d/%d tasks completed (elapsed: %s)",
                     handle.name,
                     snap.completed_count,
                     handle.array_size,
-                    mins,
-                    secs,
+                    elapsed_str,
                 )
                 prev_completed = snap.completed_count
             if snap.all_terminal:
@@ -200,12 +205,18 @@ class Scheduler(ABC):
                 )
                 if result.success:
                     elapsed = time.time() - start_time
-                    mins, secs = divmod(int(elapsed), 60)
+                    hours, _rem = divmod(int(elapsed), 3600)
+                    mins, secs = divmod(_rem, 60)
+                    elapsed_str = (
+                        f"{hours}h {mins:02d}m {secs:02d}s"
+                        if hours
+                        else f"{mins}m {secs:02d}s"
+                    )
                     logger.info(
-                        "Job %s (%s) completed successfully (%d/%d tasks, %dm %02ds)",
+                        "Job %s (%s) completed successfully (%d/%d tasks, %s)",
                         handle.job_id, handle.name,
                         snap.completed_count, handle.array_size,
-                        mins, secs,
+                        elapsed_str,
                     )
                 else:
                     logger.warning(

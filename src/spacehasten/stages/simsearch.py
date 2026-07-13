@@ -11,9 +11,11 @@ Replaces legacy ``simsearch_functions.simsearch`` /
 2. **Control** (Phase B) — aggregate per-method best similarity per
    SMILES, chunk hits into ``control/control_<i>.smi.gz``, materialise
    the latest model on disk, write ``control.param`` from the DB
-   ``properties`` table, and submit one array task per chunk that
-   filters by RDKit properties (:mod:`spacehasten.remote.prop_filter`)
-   and predicts via chemprop (:mod:`spacehasten.remote.predict`).
+   ``properties`` table, write ``smarts.txt`` from the DB
+   ``smarts_filters`` table, and submit one array task per chunk that
+   filters by RDKit properties and optional SMARTS
+   (:mod:`spacehasten.remote.prop_filter`) and predicts via chemprop
+   (:mod:`spacehasten.remote.predict`).
 3. **Ingest** (Phase C) — read ``predicted_propoutput_control_*.csv``,
    pick the *minimum* predicted ``docking_score`` per ``reghash``, drop
    any reghash already present in ``data``, and insert the survivors
@@ -29,6 +31,7 @@ Layout::
         CONTROL/
             inputs/
                 control.param              # 12-line property bounds
+                smarts.txt                 # optional SMARTS patterns
                 control_<i>.smi.gz         # one chunk per task
             results_propfilter/
                 propoutput_control_<i>.csv      # post-prop-filter
@@ -254,12 +257,28 @@ def _write_control_param(path: Path, db: Database) -> None:
             w.write(f"{lo}\n{hi}\n")
 
 
+def _write_smarts_file(path: Path, db: Database) -> bool:
+    """Write SMARTS include/exclude patterns to *path*.
+
+    Each line is ``<mode>:<pattern>`` where *mode* is ``include`` or
+    ``exclude``.  Returns ``True`` if any patterns were written, ``False``
+    when the DB has none (file is still written but empty).
+    """
+    patterns = db.load_smarts_filters()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wt", encoding="utf-8") as w:
+        for mode, pattern in patterns:
+            w.write(f"{mode}:{pattern}\n")
+    return bool(patterns)
+
+
 def _build_control_command(
     control_dir: Path,
     model_dir: Path,
     settings: Settings,
     prop_filter_prefix: Sequence[str],
     predict_prefix: Sequence[str],
+    has_smarts: bool = False,
 ) -> str:
     """Render the per-task bash body for one control task.
 
@@ -277,6 +296,8 @@ def _build_control_command(
     param = "inputs/control.param"
 
     pf_parts = [*prop_filter_prefix, in_smi, param, "--output", propout]
+    if has_smarts:
+        pf_parts += ["--smarts", "inputs/smarts.txt"]
     pred_parts = [
         *predict_prefix, propout, str(model_dir), predout,
         "--batch-size", str(g.pred_batch_size),
@@ -389,7 +410,6 @@ def simsearch(
     sim_ftrees: float | None = None,
     cpu: int = 1,
     threads_per_task: int = 2,
-    cluster_after: bool = False,
     spacelight_adapter: SpacelightAdapter | None = None,
     ftrees_adapter: FTreesAdapter | None = None,
     search_command_template: str | None = None,
@@ -402,7 +422,10 @@ def simsearch(
     :param source: ``docked`` or ``predicted`` — which score column to
         ORDER BY when picking queries.
     :param strategy: ``greedy`` or ``clustering`` — query acquisition
-        strategy.
+        strategy. ``clustering`` requires cluster assignments to already
+        exist (run ``spacehasten cluster`` first, or use
+        ``screening-cycle --strategy clustering``, which clusters
+        automatically before each round).
     :param top_n: number of queries (and hence search-array size).
     :param space: SpaceLight/FTrees ``.space`` file. Defaults to
         ``settings.paths.spaces_file_default``.
@@ -414,8 +437,6 @@ def simsearch(
         ``settings.general.sim_ftrees_default``.
     :param cpu: max concurrent control tasks (also chunk count cap).
     :param threads_per_task: ``--thread-count`` for the search tools.
-    :param cluster_after: re-run the clustering stage after ingestion
-        (mirrors legacy auto-trigger).
     :param search_command_template: override the canonical search body
         (used by tests with stub binaries).
     :param control_command_template: override the canonical control
@@ -428,6 +449,12 @@ def simsearch(
         raise ValueError(f"top_n must be >= 1, got {top_n}")
     if cpu < 1:
         raise ValueError(f"cpu must be >= 1, got {cpu}")
+    if strategy == "clustering" and not db.has_clusters():
+        raise ValueError(
+            "strategy='clustering' requires cluster assignments, but none exist yet;"
+            " run `spacehasten cluster` first (or use"
+            " `screening-cycle --strategy clustering`, which clusters automatically)"
+        )
 
     # --- Resolve defaults from settings ---------------------------------- #
     sp_exe = settings.paths.exe_spacelight_default
@@ -531,6 +558,9 @@ def simsearch(
     logger.info("Wrote %d control chunks to %s", n_chunks, control_dir)
 
     _write_control_param(control_dir / "inputs" / "control.param", db)
+    has_smarts = _write_smarts_file(control_dir / "inputs" / "smarts.txt", db)
+    if has_smarts:
+        logger.info("SMARTS filter active — patterns written to %s", control_dir / "inputs" / "smarts.txt")
 
     # Resolve the model path. Use the absolute path so the control script
     # can reference it directly without copying into CONTROL/.
@@ -561,6 +591,7 @@ def simsearch(
             settings=settings,
             prop_filter_prefix=pf_prefix,
             predict_prefix=pred_prefix,
+            has_smarts=has_smarts,
         )
     )
 
@@ -618,11 +649,6 @@ def simsearch(
         "Inserted %d new compounds (deduped %d existing reghashes) into cycle %d",
         inserted, len(rows) - inserted, cycle,
     )
-
-    if cluster_after:
-        from spacehasten.stages.clustering import cluster as _cluster
-
-        _cluster(db, workdir, scheduler, settings)
 
     return cycle
 

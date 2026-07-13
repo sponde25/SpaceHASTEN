@@ -45,17 +45,31 @@ def _default_cluster_command(settings: Settings) -> tuple[str, ...]:
         return _DEFAULT_CLUSTER_COMMAND
 
 
-def _stream_smiles_to_gzip(db: Database, out_path: Path) -> int:
+def _stream_smiles_to_gzip(
+    db: Database,
+    out_path: Path,
+    *,
+    docked_only: bool = False,
+    cutoff: float | None = None,
+) -> int:
     """Write ``<smiles> <spacehastenid>`` lines to a gzipped file.
 
-    Returns the number of compounds written.
+    :param docked_only: restrict to compounds with a non-NULL ``dock_score``.
+    :param cutoff: restrict to ``dock_score <= cutoff`` (requires
+        ``docked_only=True``; validated by the caller).
+    :returns: number of compounds written.
     """
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    query = "SELECT smiles, spacehastenid FROM data"
+    params: tuple[float, ...] = ()
+    if cutoff is not None:
+        query += " WHERE dock_score IS NOT NULL AND dock_score <= ?"
+        params = (cutoff,)
+    elif docked_only:
+        query += " WHERE dock_score IS NOT NULL"
     n = 0
     with gzip.open(out_path, "wt", encoding="utf-8") as w:
-        for smiles, sid in db.connection.execute(
-            "SELECT smiles, spacehastenid FROM data"
-        ):
+        for smiles, sid in db.connection.execute(query, params):
             w.write(f"{smiles} {sid}\n")
             n += 1
     return n
@@ -109,19 +123,44 @@ def cluster(
     settings: Settings,
     *,
     cluster_command_prefix: Sequence[str] | None = None,
+    docked_only: bool = False,
+    cutoff: float | None = None,
 ) -> int:
     """Run one sphere-exclusion clustering round.
 
-    Streams every ``(smiles, spacehastenid)`` row out of the DB to a
-    gzipped SMI file, submits a single CPU-heavy task that invokes
+    Streams ``(smiles, spacehastenid)`` rows out of the DB to a gzipped
+    SMI file, submits a single CPU-heavy task that invokes
     :mod:`spacehasten.remote.cluster`, and on success replaces the
     ``clusters`` table contents in a single transaction.
 
+    By default every compound in ``data`` is clustered (required for the
+    ``--strategy clustering`` acquisition mode, which needs diversity
+    information across the whole space). Pass ``docked_only``/``cutoff``
+    to restrict clustering to hits only — much faster on large libraries
+    when the only goal is populating ``clusterid`` for ``export csv``.
+
+    :param docked_only: cluster only compounds with a non-NULL
+        ``dock_score`` (i.e. already docked).
+    :param cutoff: further restrict to ``dock_score <= cutoff``. Requires
+        ``docked_only=True``.
     :param cluster_command_prefix: command to launch
         ``remote.cluster``. Override in tests with a stub.
     :returns: number of cluster rows ingested.
+    :raises ValueError: if ``cutoff`` is given without ``docked_only``.
     :raises RuntimeError: if the clustering job fails on the scheduler.
     """
+    if cutoff is not None and not docked_only:
+        raise ValueError("cutoff requires docked_only=True")
+    if docked_only:
+        logger.warning(
+            "Clustering a filtered subset (docked_only=%s, cutoff=%s); this "
+            "REPLACES the entire clusters table, so any previous full-space "
+            "clustering is discarded. Do not use a filtered cluster run if "
+            "you rely on `--strategy clustering` for search/dock acquisition "
+            "— that strategy needs cluster assignments for the whole space.",
+            docked_only, cutoff,
+        )
+
     cluster_dir = workdir.clustering_dir()
     input_smi = cluster_dir / "clustering_input.smi.gz"
     output_csv = cluster_dir / "clustering.csv"
@@ -130,9 +169,11 @@ def cluster(
     if output_csv.exists():
         output_csv.unlink()
 
-    n_compounds = _stream_smiles_to_gzip(db, input_smi)
+    n_compounds = _stream_smiles_to_gzip(
+        db, input_smi, docked_only=docked_only, cutoff=cutoff
+    )
     if n_compounds == 0:
-        logger.info("data table is empty; skipping clustering")
+        logger.info("no matching compounds; skipping clustering")
         return 0
     logger.info("Wrote %d compounds to %s", n_compounds, input_smi)
 
