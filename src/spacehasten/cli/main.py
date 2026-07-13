@@ -184,6 +184,10 @@ def _add_predict(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
     p = sub.add_parser("predict", help="Predict pred_score for every undocked row.")
     p.add_argument("--model-version", type=int, default=None,
                    help="Optional. Model version to use. Default: latest.")
+    p.add_argument("--jobs", type=int, default=None,
+                   help="Optional. Number of scheduler array tasks to spread "
+                        "undocked rows across (implicitly sets chunk size). "
+                        "Default: a fixed chunk size.")
     p.set_defaults(func=_cmd_predict)
 
 
@@ -512,6 +516,7 @@ def _cmd_predict(args: argparse.Namespace) -> int:
         n = prediction.predict_undocked(
             db, workdir, scheduler, settings,
             model_version=version,
+            jobs=args.jobs,
         )
     print(f"Updated pred_score for {n} rows (model v{version})")
     return 0

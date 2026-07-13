@@ -693,6 +693,14 @@ class Database:
                 break
             yield from rows
 
+    def count_undocked_for_prediction(self) -> int:
+        """Number of rows :meth:`select_undocked_for_prediction` would yield."""
+        sql = self._SQL_SELECT_UNDOCKED.replace(
+            "SELECT smiles, spacehastenid", "SELECT COUNT(*)", 1
+        )
+        row = self._conn.execute(sql).fetchone()
+        return int(row[0]) if row else 0
+
     def select_training_data(self, cutoff: float = 10.0) -> list[tuple[str, float]]:
         return [
             (s, d)

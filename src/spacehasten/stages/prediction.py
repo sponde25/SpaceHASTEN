@@ -150,6 +150,7 @@ def predict_undocked(
     *,
     model_version: int,
     chunk_size: int = 12345,
+    jobs: int | None = None,
     predict_command_prefix: Sequence[str] | None = None,
 ) -> int:
     """Predict ``pred_score`` for every undocked row and update the DB.
@@ -158,12 +159,24 @@ def predict_undocked(
         :meth:`Database.load_model_path` (BLOB fallback for legacy
         databases).
     :param chunk_size: rows per CSV chunk; one scheduler array task per
-        chunk.
+        chunk. Ignored when ``jobs`` is given.
+    :param jobs: number of scheduler array tasks to spread the undocked
+        rows across; ``chunk_size`` is derived as
+        ``ceil(count_undocked_for_prediction() / jobs)``. Takes precedence
+        over ``chunk_size`` when set.
     :param predict_command_prefix: command to launch ``remote.predict``.
         Override in tests with a stub script.
     :returns: number of rows whose ``pred_score`` was updated.
     :raises RuntimeError: if the prediction job fails on the scheduler.
     """
+    if jobs is not None:
+        if jobs < 1:
+            raise ValueError(f"jobs must be >= 1, got {jobs}")
+        total = db.count_undocked_for_prediction()
+        if total == 0:
+            logger.info("no undocked rows; skipping prediction")
+            return 0
+        chunk_size = -(-total // jobs)  # ceil division
     cycle = db.latest_simsearch_cycle()
     if cycle == 0:
         cycle = 1
