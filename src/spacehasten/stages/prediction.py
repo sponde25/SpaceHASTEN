@@ -189,6 +189,9 @@ def predict_undocked(
             f"model resolution mismatch: {bin_path} not under {model_dir}/model_0/"
         )
 
+    if chunk_size is None:
+        chunk_size = settings.general.pred_chunk_size
+
     predict_dir = workdir.simsearch_dir(cycle) / "PREDICT"
     n_chunks = _write_chunks(db.select_undocked_for_prediction(), predict_dir, chunk_size)
     if n_chunks == 0:

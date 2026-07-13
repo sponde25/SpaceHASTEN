@@ -20,6 +20,13 @@ tmux new -s work   # new session
 tmux attach -t work  # reattach
 ```
 
+## GitHub
+
+Create branches, pushes, and PRs against Anirudh Jain's fork:
+`https://github.com/sponde25/SpaceHASTEN`.
+
+Do not create PRs against the upstream/original SpaceHASTEN repository unless explicitly requested.
+
 ## Running code
 
 Prefix all Python execution with the conda activation:
