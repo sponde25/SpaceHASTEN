@@ -15,13 +15,6 @@ try:
     import gpytorch
     import torch
     from chemprop import data, featurizers
-<<<<<<< HEAD
-    from chemprop import models as chemprop_models
-    from chemprop import nn as chemprop_nn
-    from lightning.pytorch.callbacks import EarlyStopping
-    from lightning.pytorch.callbacks import ModelCheckpoint
-=======
->>>>>>> 32a6621 (Wire SVDKL into SpaceHASTEN workflow)
 except ImportError as e:  # pragma: no cover - import guarded for remote node only
     print(
         "Error: Failed to import chemprop, torch, or gpytorch. "
@@ -76,7 +69,7 @@ def train_model(
     init_lr: float,
     max_lr: float,
     final_lr: float,
-svdkl_gp_dim: int = 2,
+    svdkl_gp_dim: int = 2,
     svdkl_grid_size: int = 128,
     svdkl_grid_lower: float = -10.0,
     svdkl_grid_upper: float = 10.0,
@@ -205,44 +198,6 @@ svdkl_gp_dim: int = 2,
         )
 
     checkpoint_dir = save_dir_path / "model_0"
-<<<<<<< HEAD
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
-
-    ckpt_cb = ModelCheckpoint(
-        dirpath=str(checkpoint_dir),
-        filename="pytorch_model",
-        save_top_k=1,
-        monitor="val_loss",
-        mode="min",
-    )
-    callbacks: list = [ckpt_cb]
-    if early_stopping_patience > 0:
-        callbacks.append(
-            EarlyStopping(
-                monitor="val_loss",
-                mode="min",
-                patience=early_stopping_patience,
-                min_delta=early_stopping_min_delta,
-            )
-        )
-
-    trainer = pl.Trainer(
-        max_epochs=epochs,
-        callbacks=callbacks,
-        logger=False,
-        enable_progress_bar=True,
-        accelerator="auto",
-        devices=n_devices,
-    )
-    trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)
-
-    # Copy the best Lightning checkpoint to pytorch_model.bin for downstream loading
-    best_ckpt = ckpt_cb.best_model_path
-    if not best_ckpt:
-        logger.error("No best checkpoint was saved — check for training errors above")
-        return 1
-=======
->>>>>>> 32a6621 (Wire SVDKL into SpaceHASTEN workflow)
     bin_path = checkpoint_dir / "pytorch_model.bin"
     model.cpu()
     save_chemprop_svdkl_checkpoint(
@@ -311,16 +266,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--init-lr", type=float, default=1e-4)
     parser.add_argument("--max-lr", type=float, default=1e-3)
     parser.add_argument("--final-lr", type=float, default=1e-4)
-<<<<<<< HEAD
-    parser.add_argument("--early-stopping-patience", type=int, default=5)
-    parser.add_argument("--early-stopping-min-delta", type=float, default=0.0)
-=======
     parser.add_argument("--svdkl-gp-dim", type=int, default=2)
     parser.add_argument("--svdkl-grid-size", type=int, default=128)
     parser.add_argument("--svdkl-grid-lower", type=float, default=-10.0)
     parser.add_argument("--svdkl-grid-upper", type=float, default=10.0)
     parser.add_argument("--seed", type=int, default=0)
->>>>>>> 32a6621 (Wire SVDKL into SpaceHASTEN workflow)
+    parser.add_argument("--early-stopping-patience", type=int, default=5)
+    parser.add_argument("--early-stopping-min-delta", type=float, default=0.0)
     return parser
 
 
@@ -350,16 +302,11 @@ def main(argv: list[str] | None = None) -> int:
         args.init_lr,
         args.max_lr,
         args.final_lr,
-<<<<<<< HEAD
-        args.early_stopping_patience,
-        args.early_stopping_min_delta,
-=======
         args.svdkl_gp_dim,
         args.svdkl_grid_size,
         args.svdkl_grid_lower,
         args.svdkl_grid_upper,
         args.seed,
->>>>>>> 32a6621 (Wire SVDKL into SpaceHASTEN workflow)
     )
 
 

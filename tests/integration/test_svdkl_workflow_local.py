@@ -106,7 +106,10 @@ def test_svdkl_replacement_supports_greedy_simsearch_acquisition(tmp_path: Path)
         top_n=1,
         cpu=1,
         search_command_template=_SEARCH_STUB,
-        prop_filter_command_prefix=(sys.executable, str(settings.remote_script_path("prop_filter"))),
+        prop_filter_command_prefix=(
+            sys.executable,
+            str(settings.remote_script_path("prop_filter")),
+        ),
         predict_command_prefix=(sys.executable, str(settings.remote_script_path("predict"))),
     )
     assert cycle == 1

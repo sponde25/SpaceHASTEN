@@ -148,7 +148,7 @@ def predict_undocked(
     settings: Settings,
     *,
     model_version: int,
-    chunk_size: int = 12345,
+    chunk_size: int | None = None,
     jobs: int | None = None,
     predict_command_prefix: Sequence[str] | None = None,
 ) -> int:

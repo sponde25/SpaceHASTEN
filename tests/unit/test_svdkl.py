@@ -8,7 +8,6 @@ from typing import Any
 
 import pytest
 
-
 HAS_GPYTORCH = importlib.util.find_spec("gpytorch") is not None
 HAS_CHEMPROP = importlib.util.find_spec("chemprop") is not None
 HAS_PANDAS = importlib.util.find_spec("pandas") is not None
@@ -150,7 +149,12 @@ def test_actual_chemprop_svdkl_training_reproducible_with_seed() -> None:
     pred_rows = _example_rows(8, offset=24)
 
     first_mean, first_std = _predict_dataframe(first_model, pred_rows, first_scaler, batch_size=4)
-    second_mean, second_std = _predict_dataframe(second_model, pred_rows, second_scaler, batch_size=4)
+    second_mean, second_std = _predict_dataframe(
+        second_model,
+        pred_rows,
+        second_scaler,
+        batch_size=4,
+    )
 
     assert torch.allclose(first_mean, second_mean, atol=1e-6)
     assert torch.allclose(first_std, second_std, atol=1e-6)

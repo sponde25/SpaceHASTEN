@@ -64,7 +64,7 @@ class GeneralSettings(_Section):
     train_init_lr: float = 1e-4
     train_max_lr: float = 1e-3
     train_final_lr: float = 1e-4
-train_early_stopping_patience: int = 5
+    train_early_stopping_patience: int = 5
     train_early_stopping_min_delta: float = 0.0
     train_svdkl_gp_dim: int = 2
     train_svdkl_grid_size: int = 128

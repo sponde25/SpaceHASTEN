@@ -121,7 +121,7 @@ def test_prediction_stage_local(tmp_path: Path) -> None:
     assert all(r[0] is None for r in docked)
     db2.close()
 
-assert scheduler._jobs  # noqa: SLF001 - test-only introspection
+    assert scheduler._jobs  # noqa: SLF001 - test-only introspection
     submitted_job = next(iter(scheduler._jobs.values())).spec  # noqa: SLF001
     assert submitted_job.gpus == 1
     assert "CUDA_VISIBLE_DEVICES" not in submitted_job.command_template
@@ -153,4 +153,33 @@ def test_prediction_stage_no_undocked_returns_zero(tmp_path: Path) -> None:
     db.close()
     assert n_updated == 0
 
+
+def test_prediction_stage_uses_config_chunk_size_by_default(tmp_path: Path) -> None:
+    workdir = WorkDir.bootstrap(tmp_path / "ws", name="chunkcfg")
+    db = Database(workdir.dbsh())
+    _seed_db_with_undocked_rows(db, n=7)
+    _materialise_fake_model(workdir, version=1)
+    db.store_model_blob(1, b"")
+    db.commit()
+
+    stub = _make_stub_predict(tmp_path)
+    settings = Settings()
+    settings.general.pred_chunk_size = 4
+    scheduler = LocalScheduler()
+
+    n_updated = predict_undocked(
+        db,
+        workdir,
+        scheduler,
+        settings,
+        model_version=1,
+        predict_command_prefix=("bash", str(stub)),
+    )
+    db.close()
+
+    assert n_updated == 7
+    predict_dir = workdir.simsearch_dir(1) / "PREDICT"
+    assert (predict_dir / "predict_1.csv").exists()
+    assert (predict_dir / "predict_2.csv").exists()
+    assert not (predict_dir / "predict_3.csv").exists()
 

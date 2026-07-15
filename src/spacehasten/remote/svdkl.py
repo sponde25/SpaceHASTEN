@@ -216,7 +216,10 @@ def move_batch_to_device(batch: Any, device: Any) -> Any:
     _require_torch_gpytorch()
     if hasattr(batch, "_replace") and hasattr(batch, "_fields"):
         return batch._replace(
-            **{field: _move_value_to_device(getattr(batch, field), device) for field in batch._fields}
+            **{
+                field: _move_value_to_device(getattr(batch, field), device)
+                for field in batch._fields
+            }
         )
     return _move_value_to_device(batch, device)
 
