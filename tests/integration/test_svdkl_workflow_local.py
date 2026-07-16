@@ -75,6 +75,7 @@ def test_svdkl_replacement_supports_greedy_simsearch_acquisition(tmp_path: Path)
             activate_chemprop="conda activate spacehasten-quick",
             train_batch_size=8,
             train_epochs=1,
+            train_warmup_epochs=0,
             train_mp_hidden_size=16,
             train_mp_depth=2,
             train_ffn_hidden_size=16,
@@ -121,8 +122,21 @@ def test_svdkl_replacement_supports_greedy_simsearch_acquisition(tmp_path: Path)
     )
     assert pred_files
     pred_df = pd.read_csv(pred_files[0])
+    assert "docking_score_epistemic_std" in pred_df.columns
+    assert "docking_score_aleatoric_std" in pred_df.columns
     assert "docking_score_std" in pred_df.columns
     assert len(pred_df) >= 1
+
+    persisted = db.select_predictions(model_version=model_version)
+    assert persisted
+    for prediction in persisted:
+        assert prediction.epistemic_std is not None
+        assert prediction.aleatoric_std is not None
+        assert prediction.total_std is not None
+        assert prediction.total_std**2 == pytest.approx(
+            prediction.epistemic_std**2 + prediction.aleatoric_std**2,
+            rel=1e-5,
+        )
 
     selectable = db.select_queries_for_simsearch(
         source="predicted",

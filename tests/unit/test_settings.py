@@ -64,7 +64,7 @@ def test_settings_defaults_no_filesystem_access() -> None:
     assert s.general.train_epochs == 50
     assert s.general.train_num_workers == 8
     assert s.general.train_early_stopping_patience == 5
-    assert s.general.train_svdkl_gp_dim == 2
+    assert s.general.train_svdkl_gp_dim == 16
     assert s.general.train_seed == 0
     assert s.general.pred_accelerator == "auto"
     assert s.general.pred_batch_size == 32

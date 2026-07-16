@@ -125,6 +125,29 @@ def test_update_pred_score_roundtrip(db: Database) -> None:
     assert row == (-1.23, 2)
 
 
+def test_apply_predictions_persists_uncertainty_history(db: Database) -> None:
+    db.apply_predictions(
+        [
+            (1, 2, -7.25, 0.20, 0.15, 0.25),
+            (2, 2, -6.50, 0.30, 0.40, 0.50),
+        ]
+    )
+    db.commit()
+
+    rows = db.select_predictions(model_version=2)
+    assert [(row.spacehastenid, row.pred_score) for row in rows] == [
+        (1, -7.25),
+        (2, -6.50),
+    ]
+    assert rows[0].epistemic_std == pytest.approx(0.20)
+    assert rows[0].aleatoric_std == pytest.approx(0.15)
+    assert rows[0].total_std == pytest.approx(0.25)
+    latest = db.connection.execute(
+        "SELECT pred_score, pred_version FROM data WHERE spacehastenid = 1"
+    ).fetchone()
+    assert latest == (-7.25, 2)
+
+
 def test_mark_as_query(db: Database) -> None:
     db.mark_as_query(spacehastenid=3, cycle=7)
     db.commit()

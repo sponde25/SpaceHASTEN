@@ -41,13 +41,39 @@ def test_create_schema_matches_legacy_baseline(tmp_path: Path) -> None:
     legacy_conn = sqlite3.connect(LEGACY_BASELINE)
     try:
         # sqlite_master entries (type, name, normalised SQL).
-        assert _sqlite_master(fresh_conn) == _sqlite_master(legacy_conn)
+        legacy_master = _sqlite_master(legacy_conn)
+        legacy_names = {name for _, name, _ in legacy_master}
+        assert [row for row in _sqlite_master(fresh_conn) if row[1] in legacy_names] == (
+            legacy_master
+        )
         # Per-table column info matches column-for-column.
         for table in ("data", "docking_param", "docking_grid", "models", "clusters"):
             assert _column_info(fresh_conn, table) == _column_info(legacy_conn, table)
     finally:
         fresh_conn.close()
         legacy_conn.close()
+
+
+def test_create_schema_adds_versioned_predictions_table(tmp_path: Path) -> None:
+    fresh = tmp_path / "fresh.dbsh"
+    with Database(fresh) as db:
+        db.create_schema()
+
+    conn = sqlite3.connect(fresh)
+    try:
+        columns = _column_info(conn, "predictions")
+        assert [row[1] for row in columns] == [
+            "spacehastenid",
+            "model_version",
+            "pred_score",
+            "epistemic_std",
+            "aleatoric_std",
+            "total_std",
+            "created_at",
+        ]
+        assert [row[5] for row in columns[:2]] == [1, 2]
+    finally:
+        conn.close()
 
 
 def test_schema_statements_match_legacy_schema_sql() -> None:

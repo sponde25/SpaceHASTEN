@@ -89,6 +89,8 @@ def test_undo_simsearch_cycle_removes_hits_and_releases_queries(db: Database) ->
         "h3", "Cc1ccccc1", "HIT2",
         spacelight=0.7, ftrees=0.6, pred_score=-5.5, simsearch_cycle=1,
     )
+    db.store_prediction(hit1, 1, -6.0, 0.2, 0.15, 0.25)
+    db.store_prediction(hit2, 1, -5.5, 0.3, 0.4, 0.5)
     db.replace_clusters(
         [ClusterRow(seed_id, 1), ClusterRow(hit1, 1), ClusterRow(hit2, 1)]
     )
@@ -111,6 +113,7 @@ def test_undo_simsearch_cycle_removes_hits_and_releases_queries(db: Database) ->
         row[0] for row in db.connection.execute("SELECT spacehastenid FROM clusters")
     }
     assert cluster_ids.isdisjoint({hit1, hit2})  # stale cluster rows cleaned up
+    assert db.select_predictions(model_version=1) == []
 
 
 def test_undo_simsearch_cycle_handles_failed_attempt_with_no_hits(db: Database) -> None:

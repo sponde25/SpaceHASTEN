@@ -283,10 +283,26 @@ def predictive_mean_std(
     *,
     target_scaler: StandardScaler | None = None,
 ) -> tuple[Any, Any]:
-    """Return posterior mean and standard deviation for embeddings.
+    """Return posterior mean and epistemic standard deviation for embeddings."""
+
+    mean, epistemic_std, _, _ = predictive_mean_stds(
+        head,
+        embeddings,
+        target_scaler=target_scaler,
+    )
+    return mean, epistemic_std
+
+
+def predictive_mean_stds(
+    head: SVDKLHead,
+    embeddings: Any,
+    *,
+    target_scaler: StandardScaler | None = None,
+) -> tuple[Any, Any, Any, Any]:
+    """Return mean plus epistemic, aleatoric, and total standard deviations.
 
     If ``target_scaler`` is provided, both the posterior mean and standard
-    deviation are transformed back to docking-score units.
+    deviations are transformed back to docking-score units.
     """
 
     _require_torch_gpytorch()
@@ -294,15 +310,20 @@ def predictive_mean_std(
     head.likelihood.eval()
     with torch.no_grad(), gpytorch.settings.fast_pred_var():
         latent_posterior = head(embeddings)
-        mean, std = _mix_latent_moments(
+        mean, epistemic_std = _mix_latent_moments(
             latent_posterior.mean,
             latent_posterior.variance,
             head.likelihood.mixing_weights,
         )
+        noise_variance = head.likelihood.base_likelihood.noise.clamp_min(0.0)
+        aleatoric_std = noise_variance.sqrt().expand_as(epistemic_std)
+        total_std = (epistemic_std.square() + noise_variance).sqrt()
     if target_scaler is not None:
         mean = unscale_mean(mean, target_scaler)
-        std = unscale_std(std, target_scaler)
-    return mean, std
+        epistemic_std = unscale_std(epistemic_std, target_scaler)
+        aleatoric_std = unscale_std(aleatoric_std, target_scaler)
+        total_std = unscale_std(total_std, target_scaler)
+    return mean, epistemic_std, aleatoric_std, total_std
 
 
 def _mix_latent_moments(mean: Any, variance: Any, mixing_weights: Any) -> tuple[Any, Any]:
@@ -418,6 +439,7 @@ __all__ = [
     "load_svdkl_checkpoint",
     "move_batch_to_device",
     "predictive_mean_std",
+    "predictive_mean_stds",
     "save_chemprop_svdkl_checkpoint",
     "save_svdkl_checkpoint",
     "scale_targets",

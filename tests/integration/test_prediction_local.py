@@ -21,8 +21,8 @@ from spacehasten.workspace.layout import WorkDir
 def _make_stub_predict(tmp_path: Path) -> Path:
     """Bash stub that mimics ``remote.predict``.
 
-    Reads the input CSV at $1, writes ``smilesid,docking_score,docking_score_std``
-    with a constant score of ``-7.5`` to $3. Argument $2 (model_dir) is checked
+    Reads the input CSV at $1 and writes prediction means plus uncertainty
+    components to $3. Argument $2 (model_dir) is checked
     for existence so the test catches a missing model.
     """
     stub = tmp_path / "stub_predict.sh"
@@ -37,10 +37,11 @@ def _make_stub_predict(tmp_path: Path) -> Path:
         '  exit 2\n'
         'fi\n'
         'mkdir -p "$(dirname "$out_csv")"\n'
-        'echo "smilesid,docking_score,docking_score_std" > "$out_csv"\n'
+        'echo "smilesid,docking_score,docking_score_epistemic_std,'
+        'docking_score_aleatoric_std,docking_score_std" > "$out_csv"\n'
         # Skip header row, emit each smilesid with a constant score.
         'tail -n +2 "$in_csv" | while IFS=, read -r smi sid; do\n'
-        '  echo "${sid},-7.5,0.25" >> "$out_csv"\n'
+        '  echo "${sid},-7.5,0.2,0.15,0.25" >> "$out_csv"\n'
         'done\n'
     )
     stub.chmod(stub.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
@@ -119,6 +120,11 @@ def test_prediction_stage_local(tmp_path: Path) -> None:
         "SELECT pred_score FROM data WHERE smilesid IN ('ethanol-1','benzene-1')"
     ).fetchall()
     assert all(r[0] is None for r in docked)
+    predictions = db2.select_predictions(model_version=1)
+    assert len(predictions) == 7
+    assert all(row.epistemic_std == 0.2 for row in predictions)
+    assert all(row.aleatoric_std == 0.15 for row in predictions)
+    assert all(row.total_std == 0.25 for row in predictions)
     db2.close()
 
     assert scheduler._jobs  # noqa: SLF001 - test-only introspection
@@ -182,4 +188,3 @@ def test_prediction_stage_uses_config_chunk_size_by_default(tmp_path: Path) -> N
     assert (predict_dir / "predict_1.csv").exists()
     assert (predict_dir / "predict_2.csv").exists()
     assert not (predict_dir / "predict_3.csv").exists()
-

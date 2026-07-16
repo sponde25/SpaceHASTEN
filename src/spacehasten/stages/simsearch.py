@@ -44,7 +44,9 @@ from __future__ import annotations
 import csv
 import gzip
 import logging
+import math
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal
 
@@ -59,6 +61,11 @@ logger = logging.getLogger(__name__)
 
 
 _SIM_METHODS: Final[tuple[str, ...]] = ("spacelight", "ftrees")
+_UNCERTAINTY_COLUMNS: Final[tuple[str, ...]] = (
+    "docking_score_epistemic_std",
+    "docking_score_aleatoric_std",
+    "docking_score_std",
+)
 _PROP_ORDER: Final[tuple[str, ...]] = (
     "mw", "slogp", "hba", "hbd", "rotbonds", "tpsa",
 )
@@ -69,6 +76,14 @@ _DEFAULT_PROP_FILTER_COMMAND: Final[tuple[str, ...]] = (
 _DEFAULT_PREDICT_COMMAND: Final[tuple[str, ...]] = (
     "python3", "-m", "spacehasten.remote.predict",
 )
+
+
+@dataclass(frozen=True)
+class PredictionResult:
+    score: float
+    epistemic_std: float | None
+    aleatoric_std: float | None
+    total_std: float | None
 
 
 def _default_prop_filter_command(settings: Settings) -> tuple[str, ...]:
@@ -325,13 +340,13 @@ def _build_control_command(
 
 def _ingest_predictions(
     control_dir: Path,
-) -> tuple[list[tuple[str, str, str]], dict[str, float]]:
+) -> tuple[list[tuple[str, str, str]], dict[str, PredictionResult]]:
     """Read ``results_prediction/predicted_propoutput_control_*.csv`` files.
 
     :returns: ``(rows, scores)`` where ``rows`` is a list of
         ``(reghash, smiles, title)`` triples in first-seen order
         (deduplicated by reghash with min-score retention) and
-        ``scores`` is ``{reghash: min_predicted_score}``.
+        the prediction mapping retains the minimum score and its uncertainty.
     """
     pred_dir = control_dir / "results_prediction"
     files = sorted(pred_dir.glob("predicted_propoutput_control_*.csv"))
@@ -339,7 +354,7 @@ def _ingest_predictions(
         raise FileNotFoundError(
             f"no predicted_propoutput_control_*.csv under {pred_dir}"
         )
-    scores: dict[str, float] = {}
+    predictions: dict[str, PredictionResult] = {}
     rows: list[tuple[str, str, str]] = []
     seen: set[str] = set()
     for f in files:
@@ -350,25 +365,53 @@ def _ingest_predictions(
                 raise ValueError(
                     f"{f}: expected smilesid + docking_score, got {cols}"
                 )
+            uncertainty_present = [column in cols for column in _UNCERTAINTY_COLUMNS]
+            if any(uncertainty_present) and not all(uncertainty_present):
+                raise ValueError(
+                    f"{f}: uncertainty output requires all columns "
+                    f"{list(_UNCERTAINTY_COLUMNS)}, got {cols}"
+                )
+            has_uncertainty = all(uncertainty_present)
             for row in reader:
                 smilesid = row["smilesid"]
                 try:
                     score = float(row["docking_score"])
                 except (TypeError, ValueError):
                     continue
+                if not math.isfinite(score):
+                    continue
+                if has_uncertainty:
+                    try:
+                        epistemic_std = float(row[_UNCERTAINTY_COLUMNS[0]])
+                        aleatoric_std = float(row[_UNCERTAINTY_COLUMNS[1]])
+                        total_std = float(row[_UNCERTAINTY_COLUMNS[2]])
+                    except (TypeError, ValueError):
+                        continue
+                    if not all(
+                        math.isfinite(value) and value >= 0
+                        for value in (epistemic_std, aleatoric_std, total_std)
+                    ):
+                        continue
+                else:
+                    epistemic_std = aleatoric_std = total_std = None
                 parts = smilesid.split("§")
                 if len(parts) < 2:
                     continue
                 reghash = parts[0]
                 smiles = parts[1]
                 title = parts[2] if len(parts) >= 3 else ""
-                cur = scores.get(reghash)
-                if cur is None or score < cur:
-                    scores[reghash] = score
+                current = predictions.get(reghash)
+                if current is None or score < current.score:
+                    predictions[reghash] = PredictionResult(
+                        score=score,
+                        epistemic_std=epistemic_std,
+                        aleatoric_std=aleatoric_std,
+                        total_std=total_std,
+                    )
                 if reghash not in seen:
                     seen.add(reghash)
                     rows.append((reghash, smiles, title))
-    return rows, scores
+    return rows, predictions
 
 
 def _existing_reghashes(db: Database, candidates: Iterable[str]) -> set[str]:
@@ -559,7 +602,10 @@ def simsearch(
     _write_control_param(control_dir / "inputs" / "control.param", db)
     has_smarts = _write_smarts_file(control_dir / "inputs" / "smarts.txt", db)
     if has_smarts:
-        logger.info("SMARTS filter active — patterns written to %s", control_dir / "inputs" / "smarts.txt")
+        logger.info(
+            "SMARTS filter active — patterns written to %s",
+            control_dir / "inputs" / "smarts.txt",
+        )
 
     # Resolve the model path. Use the absolute path so the control script
     # can reference it directly without copying into CONTROL/.
@@ -620,7 +666,7 @@ def simsearch(
         )
 
     # --- Phase C: ingest ------------------------------------------------- #
-    rows, scores = _ingest_predictions(control_dir)
+    rows, predictions = _ingest_predictions(control_dir)
     if not rows:
         logger.warning("simsearch cycle %d: no rows survived prediction", cycle)
         return cycle
@@ -633,8 +679,9 @@ def simsearch(
             continue
         sl_sim = sims["spacelight"].get(smiles)
         ft_sim = sims["ftrees"].get(smiles)
-        pred_score = scores.get(reghash)
-        db.insert_simsearch_hit(
+        prediction = predictions.get(reghash)
+        pred_score = prediction.score if prediction is not None else None
+        spacehastenid = db.insert_simsearch_hit(
             reghash=reghash,
             smiles=smiles,
             smilesid=title,
@@ -642,7 +689,17 @@ def simsearch(
             ftrees=ft_sim,
             pred_score=pred_score,
             simsearch_cycle=cycle,
+            pred_version=model_version,
         )
+        if prediction is not None:
+            db.store_prediction(
+                spacehastenid=spacehastenid,
+                model_version=model_version,
+                pred_score=prediction.score,
+                epistemic_std=prediction.epistemic_std,
+                aleatoric_std=prediction.aleatoric_std,
+                total_std=prediction.total_std,
+            )
         inserted += 1
     db.commit()
     logger.info(

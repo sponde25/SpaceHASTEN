@@ -143,11 +143,12 @@ def _build_control_stub(prop_filter_argv: list[str]) -> str:
         #    keeping the smilesid column verbatim so the ingest step can
         #    recover (reghash, smiles, title).
         out="results_prediction/predicted_propoutput_control_${{TASK_ID}}.csv"
-        echo "smilesid,docking_score,docking_score_std" > "$out"
+        echo "smilesid,docking_score,docking_score_epistemic_std,"\
+"docking_score_aleatoric_std,docking_score_std" > "$out"
         # Skip CSV header.
         tail -n +2 "results_propfilter/propoutput_control_${{TASK_ID}}.csv" \
             | while IFS=, read -r smi sid; do
-                printf '%s,%s,%s\n' "$sid" "-7.0" "0.25" >> "$out"
+                printf '%s,%s,%s,%s,%s\n' "$sid" "-7.0" "0.2" "0.15" "0.25" >> "$out"
             done
     """).lstrip()
 
@@ -201,9 +202,10 @@ def test_simsearch_stage_local(tmp_path: Path) -> None:
     # ---- Inserted simsearch hits --------------------------------------- #
     rows = db2.connection.execute(
         "SELECT reghash, smiles, smilesid, spacelight, ftrees, pred_score,"
-        " simsearch_cycle FROM data WHERE simsearch_cycle = ?",
+        " simsearch_cycle, pred_version FROM data WHERE simsearch_cycle = ?",
         (new_cycle,),
     ).fetchall()
+    predictions = db2.select_predictions(model_version=1)
     db2.close()
 
     # We expect three unique-by-reghash rows ingested:
@@ -228,6 +230,11 @@ def test_simsearch_stage_local(tmp_path: Path) -> None:
     for r in rows:
         assert r[5] == pytest.approx(-7.0)
         assert r[6] == new_cycle
+        assert r[7] == 1
+    assert len(predictions) == 3
+    assert all(row.epistemic_std == pytest.approx(0.2) for row in predictions)
+    assert all(row.aleatoric_std == pytest.approx(0.15) for row in predictions)
+    assert all(row.total_std == pytest.approx(0.25) for row in predictions)
 
 
 def test_simsearch_writes_control_artefacts(tmp_path: Path) -> None:
@@ -275,6 +282,8 @@ def test_simsearch_writes_control_artefacts(tmp_path: Path) -> None:
     assert len(preds) == len(chunks)
     rows = list(csv.DictReader(preds[0].open()))
     assert rows and rows[0]["docking_score"] == "-7.0"
+    assert rows[0]["docking_score_epistemic_std"] == "0.2"
+    assert rows[0]["docking_score_aleatoric_std"] == "0.15"
     assert rows[0]["docking_score_std"] == "0.25"
 
 

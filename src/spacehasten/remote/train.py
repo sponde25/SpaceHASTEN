@@ -15,6 +15,9 @@ try:
     import gpytorch
     import torch
     from chemprop import data, featurizers
+    from chemprop.data.collate import collate_batch
+    from chemprop.schedulers import build_NoamLike_LRSched
+    from torch.utils.data import DataLoader
 except ImportError as e:  # pragma: no cover - import guarded for remote node only
     print(
         "Error: Failed to import chemprop, torch, or gpytorch. "
@@ -69,7 +72,7 @@ def train_model(
     init_lr: float,
     max_lr: float,
     final_lr: float,
-    svdkl_gp_dim: int = 2,
+    svdkl_gp_dim: int = 16,
     svdkl_grid_size: int = 128,
     svdkl_grid_lower: float = -10.0,
     svdkl_grid_upper: float = 10.0,
@@ -91,18 +94,25 @@ def train_model(
     if len(smiles) < 2:
         logger.error("Need at least 2 training rows to build train/validation splits")
         return 1
+    if ffn_layers < 1:
+        logger.error("SVDKL requires at least 1 FFN layer to produce its input embedding")
+        return 1
+    if warmup_epochs < 0 or warmup_epochs >= epochs:
+        logger.error("warmup_epochs must satisfy 0 <= warmup_epochs < epochs")
+        return 1
 
     logger.info("Loaded %d molecules for training", len(smiles))
 
-    # 90/10 train/val split (last 10% as val to keep deterministic ordering)
+    # TODO: support persisted chronological, random, and scaffold-based splits.
     n_val = max(1, int(0.1 * len(smiles)))
-    target_scaler = fit_target_scaler(targets.reshape(-1))
-    scaled_targets = scale_targets(targets.reshape(-1), target_scaler).reshape(-1, 1)
-    train_smiles, train_targets = smiles[:-n_val], scaled_targets[:-n_val]
-    val_smiles, val_targets = smiles[-n_val:], scaled_targets[-n_val:]
+    train_smiles, raw_train_targets = smiles[:-n_val], targets[:-n_val]
+    val_smiles, raw_val_targets = smiles[-n_val:], targets[-n_val:]
     if len(train_smiles) == 0:
         logger.error("Training split is empty after creating validation split")
         return 1
+    target_scaler = fit_target_scaler(raw_train_targets.reshape(-1))
+    train_targets = scale_targets(raw_train_targets.reshape(-1), target_scaler).reshape(-1, 1)
+    val_targets = scale_targets(raw_val_targets.reshape(-1), target_scaler).reshape(-1, 1)
     logger.info("Split: %d train / %d val", len(train_smiles), len(val_smiles))
 
     featurizer = featurizers.SimpleMoleculeMolGraphFeaturizer()
@@ -119,11 +129,22 @@ def train_model(
     train_ds = data.MoleculeDataset(train_data, featurizer)
     val_ds = data.MoleculeDataset(val_data, featurizer)
 
-    train_loader = data.build_dataloader(
-        train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers
+    drop_last_train = batch_norm and len(train_ds) % batch_size == 1
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        collate_fn=collate_batch,
+        drop_last=drop_last_train,
     )
-    val_loader = data.build_dataloader(
-        val_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        collate_fn=collate_batch,
+        drop_last=False,
     )
 
     chemprop_config = ChempropConfig(
@@ -142,7 +163,7 @@ def train_model(
     mpnn = build_chemprop_mpnn(chemprop_config)
     head = SVDKLHead(
         SVDKLConfig(
-            input_dim=mp_hidden_size,
+            input_dim=ffn_hidden_size,
             gp_dim=svdkl_gp_dim,
             grid_size=svdkl_grid_size,
             grid_lower=svdkl_grid_lower,
@@ -163,9 +184,18 @@ def train_model(
     mll = gpytorch.mlls.PredictiveLogLikelihood(
         likelihood=model.likelihood,
         model=model.gp_layer,
-        num_data=len(train_smiles),
+        num_data=len(train_smiles) - int(drop_last_train),
     )
-    optimizer = torch.optim.Adam(model.parameters(), lr=max_lr)
+    optimizer = torch.optim.Adam(model.parameters(), lr=init_lr)
+    steps_per_epoch = len(train_loader)
+    scheduler = build_NoamLike_LRSched(
+        optimizer,
+        warmup_steps=warmup_epochs * steps_per_epoch,
+        cooldown_steps=(epochs - warmup_epochs) * steps_per_epoch,
+        init_lr=init_lr,
+        max_lr=max_lr,
+        final_lr=final_lr,
+    )
 
     for epoch in range(epochs):
         model.train()
@@ -178,8 +208,10 @@ def train_model(
             loss = -mll(model(batch), target)
             loss.backward()
             optimizer.step()
+            scheduler.step()
             train_losses.append(float(loss.detach().cpu()))
 
+        # TODO: select and restore the best checkpoint using held-out predictive NLL.
         val_losses: list[float] = []
         model.eval()
         model.likelihood.eval()
@@ -266,7 +298,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--init-lr", type=float, default=1e-4)
     parser.add_argument("--max-lr", type=float, default=1e-3)
     parser.add_argument("--final-lr", type=float, default=1e-4)
-    parser.add_argument("--svdkl-gp-dim", type=int, default=2)
+    parser.add_argument("--svdkl-gp-dim", type=int, default=16)
     parser.add_argument("--svdkl-grid-size", type=int, default=128)
     parser.add_argument("--svdkl-grid-lower", type=float, default=-10.0)
     parser.add_argument("--svdkl-grid-upper", type=float, default=10.0)

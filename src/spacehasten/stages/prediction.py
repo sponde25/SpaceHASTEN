@@ -16,6 +16,7 @@ single-root workspace rather than ``$HOME/SPACEHASTEN/``)::
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 
@@ -27,6 +28,12 @@ from spacehasten.scheduler.base import ArrayJob, Scheduler
 from spacehasten.workspace.layout import WorkDir
 
 logger = logging.getLogger(__name__)
+
+_UNCERTAINTY_COLUMNS = (
+    "docking_score_epistemic_std",
+    "docking_score_aleatoric_std",
+    "docking_score_std",
+)
 
 
 _DEFAULT_PREDICT_COMMAND: tuple[str, ...] = (
@@ -121,9 +128,9 @@ def _build_predict_command(
 
 def _ingest_predictions(
     predict_dir: Path, n_chunks: int
-) -> list[tuple[float, int]]:
-    """Read ``predicted_predict_<i>.csv`` files into ``(score, spacehastenid)`` pairs."""
-    rows: list[tuple[float, int]] = []
+) -> list[tuple[float, float | None, float | None, float | None, int]]:
+    """Read prediction means and uncertainty components from chunk outputs."""
+    rows: list[tuple[float, float | None, float | None, float | None, int]] = []
     for i in range(1, n_chunks + 1):
         out_csv = predict_dir / _chunk_index_filename("predicted_predict", i)
         if not out_csv.exists():
@@ -136,8 +143,39 @@ def _ingest_predictions(
                 f"{out_csv}: expected columns 'smilesid' and 'docking_score', "
                 f"got {list(df.columns)}"
             )
-        for sid, score in zip(df["smilesid"], df["docking_score"], strict=False):
-            rows.append((float(score), int(sid)))
+        uncertainty_present = [column in df.columns for column in _UNCERTAINTY_COLUMNS]
+        if any(uncertainty_present) and not all(uncertainty_present):
+            raise ValueError(
+                f"{out_csv}: uncertainty output requires all columns "
+                f"{list(_UNCERTAINTY_COLUMNS)}, got {list(df.columns)}"
+            )
+        has_uncertainty = all(uncertainty_present)
+        for record in df.to_dict(orient="records"):
+            score = float(record["docking_score"])
+            if not math.isfinite(score):
+                raise ValueError(f"{out_csv}: nonfinite docking_score for {record['smilesid']}")
+            if has_uncertainty:
+                epistemic_std = float(record[_UNCERTAINTY_COLUMNS[0]])
+                aleatoric_std = float(record[_UNCERTAINTY_COLUMNS[1]])
+                total_std = float(record[_UNCERTAINTY_COLUMNS[2]])
+                if not all(
+                    math.isfinite(value) and value >= 0
+                    for value in (epistemic_std, aleatoric_std, total_std)
+                ):
+                    raise ValueError(
+                        f"{out_csv}: invalid uncertainty for {record['smilesid']}"
+                    )
+            else:
+                epistemic_std = aleatoric_std = total_std = None
+            rows.append(
+                (
+                    score,
+                    epistemic_std,
+                    aleatoric_std,
+                    total_std,
+                    int(record["smilesid"]),
+                )
+            )
     return rows
 
 
@@ -250,9 +288,12 @@ def predict_undocked(
     if not pairs:
         return 0
 
-    # Single-transaction bulk update.
-    update_rows = [(score, model_version, sid) for score, sid in pairs]
-    db.apply_pred_scores(update_rows)
+    # Single-transaction history insert plus legacy latest-score cache update.
+    update_rows = [
+        (sid, model_version, score, epistemic_std, aleatoric_std, total_std)
+        for score, epistemic_std, aleatoric_std, total_std, sid in pairs
+    ]
+    db.apply_predictions(update_rows)
     db.commit()
     logger.info("Updated pred_score for %d rows (version=%d)", len(update_rows), model_version)
     return len(update_rows)

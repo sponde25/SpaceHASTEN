@@ -44,9 +44,28 @@ SCHEMA_STATEMENTS: Final[tuple[str, ...]] = (
     "CREATE TABLE IF NOT EXISTS docking_param (dock_param BLOB)",
     "CREATE TABLE IF NOT EXISTS docking_grid (dock_grid BLOB)",
     "CREATE TABLE IF NOT EXISTS models (model_version INTEGER UNIQUE,model_tar BLOB)",
-    "CREATE TABLE IF NOT EXISTS properties (property TEXT,is_double INTEGER,min_limit TEXT,max_limit TEXT)",
+    (
+        "CREATE TABLE IF NOT EXISTS properties ("
+        "property TEXT,is_double INTEGER,min_limit TEXT,max_limit TEXT)"
+    ),
     "CREATE TABLE IF NOT EXISTS clusters(spacehastenid INTEGER PRIMARY KEY,clusterid INTEGER)",
     "CREATE INDEX IF NOT EXISTS idx_reghash ON data(reghash)",
+)
+
+EXTENSION_SCHEMA_STATEMENTS: Final[tuple[str, ...]] = (
+    (
+        "CREATE TABLE IF NOT EXISTS predictions ("
+        "spacehastenid INTEGER NOT NULL,"
+        "model_version INTEGER NOT NULL,"
+        "pred_score REAL NOT NULL,"
+        "epistemic_std REAL,"
+        "aleatoric_std REAL,"
+        "total_std REAL,"
+        "created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+        "PRIMARY KEY(spacehastenid, model_version)"
+        ")"
+    ),
+    "CREATE INDEX IF NOT EXISTS idx_predictions_model_version ON predictions(model_version)",
 )
 
 
@@ -95,6 +114,17 @@ class PropertyRow:
 class ModelRow:
     model_version: int
     model_tar: bytes
+
+
+@dataclass(frozen=True)
+class PredictionRow:
+    spacehastenid: int
+    model_version: int
+    pred_score: float
+    epistemic_std: float | None
+    aleatoric_std: float | None
+    total_std: float | None
+    created_at: str
 
 
 @dataclass(frozen=True)
@@ -208,6 +238,17 @@ class Database:
     _SQL_UPDATE_PRED_SCORE: Final[str] = (
         "UPDATE data SET pred_score = ?, pred_version = ? WHERE spacehastenid = ?"
     )
+    _SQL_UPSERT_PREDICTION: Final[str] = (
+        "INSERT INTO predictions("
+        "spacehastenid, model_version, pred_score, epistemic_std, aleatoric_std, total_std"
+        ") VALUES (?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(spacehastenid, model_version) DO UPDATE SET "
+        "pred_score = excluded.pred_score, "
+        "epistemic_std = excluded.epistemic_std, "
+        "aleatoric_std = excluded.aleatoric_std, "
+        "total_std = excluded.total_std, "
+        "created_at = CURRENT_TIMESTAMP"
+    )
     _SQL_MARK_AS_QUERY: Final[str] = (
         "UPDATE data SET query = ? WHERE spacehastenid = ?"
     )
@@ -266,9 +307,14 @@ class Database:
 
     def create_schema(self) -> None:
         c = self._conn.cursor()
-        for stmt in SCHEMA_STATEMENTS:
+        for stmt in (*SCHEMA_STATEMENTS, *EXTENSION_SCHEMA_STATEMENTS):
             c.execute(stmt)
         self._conn.commit()
+
+    def ensure_extension_schema(self) -> None:
+        """Create additive SpaceHASTEN extension tables for an existing database."""
+        for stmt in EXTENSION_SCHEMA_STATEMENTS:
+            self._conn.execute(stmt)
 
     # ----- lookups -----
 
@@ -309,12 +355,23 @@ class Database:
         ftrees: float | None,
         pred_score: float | None,
         simsearch_cycle: int,
+        pred_version: int | None = None,
     ) -> int:
         c = self._conn.execute(
             "INSERT INTO data("
-            "reghash, smiles, smilesid, spacelight, ftrees, pred_score, simsearch_cycle"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (reghash, smiles, smilesid, spacelight, ftrees, pred_score, simsearch_cycle),
+            "reghash, smiles, smilesid, spacelight, ftrees, pred_score, "
+            "simsearch_cycle, pred_version"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                reghash,
+                smiles,
+                smilesid,
+                spacelight,
+                ftrees,
+                pred_score,
+                simsearch_cycle,
+                pred_version,
+            ),
         )
         assert c.lastrowid is not None
         return c.lastrowid
@@ -333,6 +390,29 @@ class Database:
     ) -> None:
         self._conn.execute(
             self._SQL_UPDATE_PRED_SCORE, (pred_score, pred_version, spacehastenid)
+        )
+
+    def store_prediction(
+        self,
+        spacehastenid: int,
+        model_version: int,
+        pred_score: float,
+        epistemic_std: float | None,
+        aleatoric_std: float | None,
+        total_std: float | None,
+    ) -> None:
+        """Store one versioned prediction and its uncertainty decomposition."""
+        self.ensure_extension_schema()
+        self._conn.execute(
+            self._SQL_UPSERT_PREDICTION,
+            (
+                spacehastenid,
+                model_version,
+                pred_score,
+                epistemic_std,
+                aleatoric_std,
+                total_std,
+            ),
         )
 
     def mark_as_query(self, spacehastenid: int, cycle: int) -> None:
@@ -439,6 +519,11 @@ class Database:
         ]
         if hit_ids:
             placeholders = ",".join("?" * len(hit_ids))
+            self.ensure_extension_schema()
+            self._conn.execute(
+                f"DELETE FROM predictions WHERE spacehastenid IN ({placeholders})",
+                hit_ids,
+            )
             self._conn.execute(
                 f"DELETE FROM clusters WHERE spacehastenid IN ({placeholders})", hit_ids
             )
@@ -707,6 +792,20 @@ class Database:
             for s, d in self._conn.execute(self._SQL_SELECT_TRAINING, (cutoff,)).fetchall()
         ]
 
+    def select_predictions(self, model_version: int | None = None) -> list[PredictionRow]:
+        """Return persisted prediction history, optionally for one model version."""
+        self.ensure_extension_schema()
+        sql = (
+            "SELECT spacehastenid, model_version, pred_score, epistemic_std, "
+            "aleatoric_std, total_std, created_at FROM predictions"
+        )
+        params: tuple[int, ...] = ()
+        if model_version is not None:
+            sql += " WHERE model_version = ?"
+            params = (model_version,)
+        sql += " ORDER BY model_version, spacehastenid"
+        return [PredictionRow(*row) for row in self._conn.execute(sql, params).fetchall()]
+
     def select_export_rows(self, cutoff: float) -> list[ExportRow]:
         return [
             ExportRow(
@@ -749,13 +848,31 @@ class Database:
         """Apply many ``(pred_score, pred_version, spacehastenid)`` updates."""
         self._conn.executemany(self._SQL_UPDATE_PRED_SCORE, rows)
 
+    def apply_predictions(
+        self,
+        rows: Sequence[
+            tuple[int, int, float, float | None, float | None, float | None]
+        ],
+    ) -> None:
+        """Persist versioned predictions and update the legacy latest-score cache."""
+        if not rows:
+            return
+        self.ensure_extension_schema()
+        self._conn.executemany(
+            self._SQL_UPDATE_PRED_SCORE,
+            [(score, version, sid) for sid, version, score, _, _, _ in rows],
+        )
+        self._conn.executemany(self._SQL_UPSERT_PREDICTION, rows)
+
 
 __all__ = [
     "ClusterRow",
     "Database",
     "DataRow",
+    "EXTENSION_SCHEMA_STATEMENTS",
     "ExportRow",
     "ModelRow",
+    "PredictionRow",
     "PropertyRanges",
     "PropertyRow",
     "SCHEMA_STATEMENTS",

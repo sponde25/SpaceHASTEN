@@ -35,7 +35,7 @@ def test_svdkl_head_trains_one_step_and_predicts() -> None:
     import gpytorch
     import torch
 
-    from spacehasten.remote.svdkl import SVDKLConfig, SVDKLHead, predictive_mean_std
+    from spacehasten.remote.svdkl import SVDKLConfig, SVDKLHead, predictive_mean_stds
 
     torch.manual_seed(0)
     embeddings = torch.randn(12, 5)
@@ -55,12 +55,21 @@ def test_svdkl_head_trains_one_step_and_predicts() -> None:
     loss.backward()
     optimizer.step()
 
-    mean, std = predictive_mean_std(head, embeddings[:4])
+    mean, epistemic_std, aleatoric_std, total_std = predictive_mean_stds(
+        head,
+        embeddings[:4],
+    )
     assert mean.shape == torch.Size([4])
-    assert std.shape == torch.Size([4])
+    assert epistemic_std.shape == torch.Size([4])
     assert torch.isfinite(mean).all()
-    assert torch.isfinite(std).all()
-    assert torch.all(std >= 0)
+    assert torch.isfinite(epistemic_std).all()
+    assert torch.isfinite(aleatoric_std).all()
+    assert torch.isfinite(total_std).all()
+    assert torch.all(epistemic_std >= 0)
+    assert torch.allclose(
+        total_std.square(),
+        epistemic_std.square() + aleatoric_std.square(),
+    )
 
 
 @requires_chemprop_svdkl
@@ -76,6 +85,23 @@ def test_actual_chemprop_wrapper_uses_encoding() -> None:
         out = model(batch)
 
     assert embeddings.shape == torch.Size([2, 16])
+    assert out.event_shape.numel() > 0
+
+
+@requires_chemprop_svdkl
+def test_actual_chemprop_wrapper_uses_ffn_embedding_width() -> None:
+    import torch
+
+    model = _build_chemprop_svdkl_model(seed=0, ffn_hidden_size=12)
+    loader, _ = _build_training_loader(_example_rows(4), batch_size=2)
+    batch = next(iter(loader))
+
+    with torch.no_grad():
+        embeddings = model.encode_batch(batch)
+        out = model(batch)
+
+    assert embeddings.shape == torch.Size([2, 12])
+    assert model.head.projection.in_features == 12
     assert out.event_shape.numel() > 0
 
 
@@ -212,16 +238,29 @@ def test_actual_chemprop_svdkl_train_predict_roundtrip_output_schema() -> None:
 
     model, scaler = _train_actual_chemprop_svdkl(seed=0, rows=24, epochs=1)
     pred_rows = _example_rows(10, offset=32)
-    mean, std = _predict_dataframe(model, pred_rows, scaler, batch_size=5)
+    mean, epistemic_std, aleatoric_std, total_std = _predict_dataframe_stds(
+        model,
+        pred_rows,
+        scaler,
+        batch_size=5,
+    )
     output_df = pd.DataFrame(
         {
             "smilesid": pred_rows["smilesid"].tolist(),
             "docking_score": mean.detach().numpy(),
-            "docking_score_std": std.detach().numpy(),
+            "docking_score_epistemic_std": epistemic_std.detach().numpy(),
+            "docking_score_aleatoric_std": aleatoric_std.detach().numpy(),
+            "docking_score_std": total_std.detach().numpy(),
         }
     )
 
-    assert list(output_df.columns) == ["smilesid", "docking_score", "docking_score_std"]
+    assert list(output_df.columns) == [
+        "smilesid",
+        "docking_score",
+        "docking_score_epistemic_std",
+        "docking_score_aleatoric_std",
+        "docking_score_std",
+    ]
     assert len(output_df) == len(pred_rows)
     assert np.isfinite(output_df["docking_score"]).all()
     assert np.isfinite(output_df["docking_score_std"]).all()
@@ -234,6 +273,7 @@ def test_remote_train_predict_roundtrip_writes_uncertainty(tmp_path: Path) -> No
     import pandas as pd
 
     from spacehasten.remote.predict import predict
+    from spacehasten.remote.svdkl import load_chemprop_svdkl_checkpoint
     from spacehasten.remote.train import train_model
 
     train_csv = tmp_path / "train.csv"
@@ -241,18 +281,19 @@ def test_remote_train_predict_roundtrip_writes_uncertainty(tmp_path: Path) -> No
     out_csv = tmp_path / "predictions.csv"
     model_dir = tmp_path / "model"
     _example_rows(24).to_csv(train_csv, index=False)
-    _example_rows(8, offset=24)[["smiles", "smilesid"]].to_csv(pred_csv, index=False)
+    pred_rows = _example_rows(9, offset=24)
+    pred_rows[["smiles", "smilesid"]].to_csv(pred_csv, index=False)
 
     train_rc = train_model(
         str(train_csv),
         str(model_dir),
         batch_size=6,
-        epochs=1,
+        epochs=2,
         num_workers=0,
         devices="1",
         mp_hidden_size=16,
         mp_depth=2,
-        ffn_hidden_size=16,
+        ffn_hidden_size=12,
         ffn_layers=1,
         dropout=0.0,
         activation="relu",
@@ -266,7 +307,11 @@ def test_remote_train_predict_roundtrip_writes_uncertainty(tmp_path: Path) -> No
         seed=0,
     )
     assert train_rc == 0
-    assert (model_dir / "model_0" / "pytorch_model.bin").exists()
+    checkpoint_path = model_dir / "model_0" / "pytorch_model.bin"
+    assert checkpoint_path.exists()
+    _, target_scaler, _ = load_chemprop_svdkl_checkpoint(checkpoint_path)
+    expected_train_mean = _example_rows(24).iloc[:22]["docking_score"].mean()
+    assert float(target_scaler.mean_[0]) == pytest.approx(expected_train_mean)
 
     pred_rc = predict(
         str(pred_csv),
@@ -280,11 +325,27 @@ def test_remote_train_predict_roundtrip_writes_uncertainty(tmp_path: Path) -> No
     assert pred_rc == 0
 
     output_df = pd.read_csv(out_csv)
-    assert list(output_df.columns) == ["smilesid", "docking_score", "docking_score_std"]
-    assert len(output_df) == 8
+    assert list(output_df.columns) == [
+        "smilesid",
+        "docking_score",
+        "docking_score_epistemic_std",
+        "docking_score_aleatoric_std",
+        "docking_score_std",
+    ]
+    assert len(output_df) == 9
     assert np.isfinite(output_df["docking_score"]).all()
-    assert np.isfinite(output_df["docking_score_std"]).all()
-    assert (output_df["docking_score_std"] >= 0).all()
+    std_columns = [
+        "docking_score_epistemic_std",
+        "docking_score_aleatoric_std",
+        "docking_score_std",
+    ]
+    assert np.isfinite(output_df[std_columns]).all().all()
+    assert (output_df[std_columns] >= 0).all().all()
+    assert np.allclose(
+        output_df["docking_score_std"].to_numpy() ** 2,
+        output_df["docking_score_epistemic_std"].to_numpy() ** 2
+        + output_df["docking_score_aleatoric_std"].to_numpy() ** 2,
+    )
 
 
 @requires_gpytorch
@@ -366,7 +427,7 @@ def _build_prediction_loader(df: Any, batch_size: int) -> Any:
     )
 
 
-def _build_chemprop_svdkl_model(seed: int) -> Any:
+def _build_chemprop_svdkl_model(seed: int, ffn_hidden_size: int = 16) -> Any:
     import torch
 
     from spacehasten.remote.svdkl import (
@@ -382,7 +443,7 @@ def _build_chemprop_svdkl_model(seed: int) -> Any:
     config = ChempropConfig(
         mp_hidden_size=d_h,
         mp_depth=2,
-        ffn_hidden_size=16,
+        ffn_hidden_size=ffn_hidden_size,
         ffn_layers=1,
         dropout=0.0,
         activation="relu",
@@ -393,7 +454,9 @@ def _build_chemprop_svdkl_model(seed: int) -> Any:
         final_lr=1e-4,
     )
     mpnn = build_chemprop_mpnn(config)
-    head = SVDKLHead(SVDKLConfig(input_dim=d_h, gp_dim=2, grid_size=16))
+    head = SVDKLHead(
+        SVDKLConfig(input_dim=ffn_hidden_size, gp_dim=2, grid_size=16)
+    )
     return ChempropSVDKLModel(mpnn, head, embedding_i=-1)
 
 
@@ -459,6 +522,25 @@ def _encode_dataframe(model: Any, df: Any, batch_size: int) -> Any:
 def _predict_dataframe(model: Any, df: Any, scaler: Any, batch_size: int) -> tuple[Any, Any]:
     embeddings = _encode_dataframe(model, df, batch_size=batch_size)
     return _predict_embeddings(model.head, embeddings, scaler)
+
+
+def _predict_dataframe_stds(
+    model: Any,
+    df: Any,
+    scaler: Any,
+    batch_size: int,
+) -> tuple[Any, Any, Any, Any]:
+    from spacehasten.remote.svdkl import predictive_mean_stds
+
+    embeddings = _encode_dataframe(model, df, batch_size=batch_size)
+    return tuple(
+        value.detach()
+        for value in predictive_mean_stds(
+            model.head,
+            embeddings,
+            target_scaler=scaler,
+        )
+    )
 
 
 def _predict_embeddings(head: Any, embeddings: Any, scaler: Any) -> tuple[Any, Any]:

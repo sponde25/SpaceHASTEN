@@ -17,6 +17,8 @@ try:
     from chemprop import data, featurizers
     from chemprop import models as chemprop_models
     from chemprop import nn as chemprop_nn
+    from chemprop.data.collate import collate_batch
+    from torch.utils.data import DataLoader
 except ImportError as e:  # pragma: no cover - import guarded for remote node only
     print(
         "Error: Failed to import chemprop or lightning. "
@@ -28,17 +30,25 @@ try:  # script path execution on compute nodes does not import the package root
     from spacehasten.remote.svdkl import (
         load_chemprop_svdkl_checkpoint,
         move_batch_to_device,
-        predictive_mean_std,
+        predictive_mean_stds,
     )
 except ImportError:  # pragma: no cover - exercised by file-path remote execution
     from svdkl import (  # type: ignore[no-redef]
         load_chemprop_svdkl_checkpoint,
         move_batch_to_device,
-        predictive_mean_std,
+        predictive_mean_stds,
     )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+
+_SVDKL_OUTPUT_COLUMNS = [
+    "smilesid",
+    "docking_score",
+    "docking_score_epistemic_std",
+    "docking_score_aleatoric_std",
+    "docking_score_std",
+]
 
 
 def predict(
@@ -67,7 +77,7 @@ def predict(
     out_path = Path(output_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     if len(smiles) == 0:
-        pd.DataFrame(columns=["smilesid", "docking_score", "docking_score_std"]).to_csv(
+        pd.DataFrame(columns=_SVDKL_OUTPUT_COLUMNS).to_csv(
             out_path,
             index=False,
         )
@@ -77,8 +87,13 @@ def predict(
     featurizer = featurizers.SimpleMoleculeMolGraphFeaturizer()
     pred_data = [data.MoleculeDatapoint.from_smi(smi=smi) for smi in smiles]
     pred_ds = data.MoleculeDataset(pred_data, featurizer)
-    pred_loader = data.build_dataloader(
-        pred_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers
+    pred_loader = DataLoader(
+        pred_ds,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        collate_fn=collate_batch,
+        drop_last=False,
     )
 
     logger.info("Loading model from %s", model_file)
@@ -109,7 +124,7 @@ def predict(
             batch = move_batch_to_device(batch, device)
             embeddings.append(model.encode_batch(batch))
     if not embeddings:
-        pd.DataFrame(columns=["smilesid", "docking_score", "docking_score_std"]).to_csv(
+        pd.DataFrame(columns=_SVDKL_OUTPUT_COLUMNS).to_csv(
             out_path,
             index=False,
         )
@@ -117,9 +132,15 @@ def predict(
         return 0
 
     all_embeddings = torch.cat(embeddings, dim=0)
-    mean, std = predictive_mean_std(model.head, all_embeddings, target_scaler=target_scaler)
+    mean, epistemic_std, aleatoric_std, total_std = predictive_mean_stds(
+        model.head,
+        all_embeddings,
+        target_scaler=target_scaler,
+    )
     all_preds = mean.detach().cpu().numpy().reshape(-1)
-    all_stds = std.detach().cpu().numpy().reshape(-1)
+    all_epistemic_stds = epistemic_std.detach().cpu().numpy().reshape(-1)
+    all_aleatoric_stds = aleatoric_std.detach().cpu().numpy().reshape(-1)
+    all_total_stds = total_std.detach().cpu().numpy().reshape(-1)
 
     if len(all_preds) != len(smilesids):
         logger.warning(
@@ -133,7 +154,9 @@ def predict(
         {
             "smilesid": smilesids[: len(all_preds)],
             "docking_score": all_preds,
-            "docking_score_std": all_stds,
+            "docking_score_epistemic_std": all_epistemic_stds,
+            "docking_score_aleatoric_std": all_aleatoric_stds,
+            "docking_score_std": all_total_stds,
         }
     )
 
