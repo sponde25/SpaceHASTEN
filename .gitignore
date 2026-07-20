@@ -9,6 +9,7 @@ __pycache__/
 *.pyc
 .env
 opencode.json
+overnight_experiments/
 quick_test/*
 !quick_test/test_fast_auto.sh
 !quick_test/verify_uncertainty_db.py
