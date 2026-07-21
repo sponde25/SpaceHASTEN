@@ -47,6 +47,7 @@ class GeneralSettings(_Section):
     cpu_count_control: str = "1"
     cpu_count_clustering: str = "64"
     atlas_partition_count: int = 64
+    atlas_intermediate_reducers: int = 8
     atlas_assignment_shards: int = 16
     atlas_similarity_threshold: float = 0.4
     schrodinger_feature_flags: str | None = None

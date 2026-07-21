@@ -80,6 +80,7 @@ def test_settings_defaults_no_filesystem_access() -> None:
     assert s.general.cpu_count_predict == "1"
     assert s.general.cpu_count_control == "1"
     assert s.general.atlas_partition_count == 64
+    assert s.general.atlas_intermediate_reducers == 8
     assert s.general.atlas_assignment_shards == 16
     assert s.general.atlas_similarity_threshold == pytest.approx(0.4)
     assert s.paths.scratch_default == "/wrk"

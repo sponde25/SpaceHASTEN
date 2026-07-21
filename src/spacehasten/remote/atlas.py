@@ -287,6 +287,64 @@ def pool_centroids(map_root: Path, output_dir: Path) -> dict[str, Any]:
         raise
 
 
+def reduce_centroid_group(
+    map_root: Path,
+    output_dir: Path,
+    group_index: int,
+    group_count: int,
+    similarity_threshold: float,
+    processes: int,
+) -> dict[str, Any]:
+    map_root = map_root.resolve()
+    output_dir = output_dir.resolve()
+    all_centroid_files = sorted(map_root.glob("*/centroids.smi.gz"))
+    if not 0 <= group_index < group_count:
+        raise ValueError("group_index must be in [0, group_count)")
+    centroid_files = [
+        path for index, path in enumerate(all_centroid_files) if index % group_count == group_index
+    ]
+    if not centroid_files:
+        raise ValueError(f"intermediate reducer {group_index} has no mapper inputs")
+    inputs = {
+        "centroids": [{**_identity(path), "sha256": _sha256(path)} for path in centroid_files],
+        "group_index": group_index,
+        "group_count": group_count,
+        "similarity_threshold": similarity_threshold,
+        "fingerprint_type": FP_TYPE,
+        "fingerprint_parameters": FP_PARAMS,
+    }
+    outputs = ("centroids.smi.gz",)
+    if _complete(output_dir, inputs, outputs):
+        LOGGER.info("Reusing intermediate centroid reducer: %s", output_dir)
+        return json.loads((output_dir / COMPLETE_FILE).read_text())
+    temp_dir = _new_temp_dir(output_dir)
+    started = time.monotonic()
+    try:
+        pooled: dict[int, str] = {}
+        for path in centroid_files:
+            if not (path.parent / COMPLETE_FILE).is_file():
+                raise ValueError(f"mapper output has no completion marker: {path.parent}")
+            for smiles, identifier in read_smi(path):
+                if identifier in pooled and pooled[identifier] != smiles:
+                    raise ValueError(f"conflicting centroid SMILES for {identifier}")
+                pooled[identifier] = smiles
+        rows = [(smiles, identifier) for identifier, smiles in sorted(pooled.items())]
+        centroids, _ = _leader_centroids(rows, similarity_threshold, processes)
+        _write_smi(temp_dir / outputs[0], centroids)
+        metrics = {
+            "mapper_count": len(centroid_files),
+            "pooled_centroid_count": len(rows),
+            "reduced_centroid_count": len(centroids),
+            "elapsed_seconds": time.monotonic() - started,
+        }
+        _finish(temp_dir, inputs=inputs, outputs=outputs, metrics=metrics)
+        _commit_dir(temp_dir, output_dir)
+        return json.loads((output_dir / COMPLETE_FILE).read_text())
+    except Exception:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise
+
+
 def reduce_centroids(
     pooled_path: Path,
     output_dir: Path,
@@ -766,6 +824,14 @@ def build_parser() -> argparse.ArgumentParser:
     pool.add_argument("--map-root", type=Path, required=True)
     pool.add_argument("--output-dir", type=Path, required=True)
 
+    intermediate = subparsers.add_parser("intermediate-reduce")
+    intermediate.add_argument("--map-root", type=Path, required=True)
+    intermediate.add_argument("--output-dir", type=Path, required=True)
+    intermediate.add_argument("--group-index", type=int, required=True)
+    intermediate.add_argument("--group-count", type=int, required=True)
+    intermediate.add_argument("--similarity-threshold", type=float, default=0.4)
+    intermediate.add_argument("--processes", type=int, default=1)
+
     reducer = subparsers.add_parser("reduce")
     reducer.add_argument("--input", type=Path, required=True)
     reducer.add_argument("--output-dir", type=Path, required=True)
@@ -817,6 +883,15 @@ def main() -> int:
         map_partition(args.input, args.output_dir, args.similarity_threshold, args.processes)
     elif args.command == "pool":
         pool_centroids(args.map_root, args.output_dir)
+    elif args.command == "intermediate-reduce":
+        reduce_centroid_group(
+            args.map_root,
+            args.output_dir,
+            args.group_index,
+            args.group_count,
+            args.similarity_threshold,
+            args.processes,
+        )
     elif args.command == "reduce":
         reduce_centroids(args.input, args.output_dir, args.similarity_threshold, args.processes)
     elif args.command == "build-index":

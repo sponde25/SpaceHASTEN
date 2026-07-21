@@ -110,6 +110,7 @@ def _write_ini(path: Path, *, answers: dict[str, str]) -> None:
     lines.append("CPU_COUNT_CONTROL = 1")
     lines.append(f"CPU_COUNT_CLUSTERING = {a['slurm_cpu_clustering']}")
     lines.append("ATLAS_PARTITION_COUNT = 64")
+    lines.append("ATLAS_INTERMEDIATE_REDUCERS = 8")
     lines.append("ATLAS_ASSIGNMENT_SHARDS = 16")
     lines.append("ATLAS_SIMILARITY_THRESHOLD = 0.4")
     lines.append("TRAIN_BATCH_SIZE = 1024")

@@ -22,6 +22,7 @@ from spacehasten.remote.atlas import (
     partition_smiles,
     pool_centroids,
     read_smi,
+    reduce_centroid_group,
     reduce_centroids,
     repair_uncovered,
 )
@@ -76,8 +77,18 @@ def test_resumable_map_reduce_assignment_and_repair(tmp_path: Path) -> None:
         part = partitions / f"part_{index:04d}_of_0004.smi.gz"
         map_partition(part, mapper_root / f"map_{index:04d}", 0.4, 1)
 
+    intermediate_root = tmp_path / "intermediate"
+    for index in range(2):
+        reduce_centroid_group(
+            mapper_root,
+            intermediate_root / f"reducer_{index:04d}",
+            index,
+            2,
+            0.4,
+            1,
+        )
     pool = tmp_path / "pool"
-    pool_centroids(mapper_root, pool)
+    pool_centroids(intermediate_root, pool)
     reduced = tmp_path / "reduced"
     reduce_centroids(pool / "pooled_centroids.smi.gz", reduced, 0.4, 1)
 

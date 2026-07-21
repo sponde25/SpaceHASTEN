@@ -55,6 +55,7 @@ def test_initial_seed_atlas_stage_is_resumable(tmp_path: Path) -> None:
         general=GeneralSettings(
             cpu_count_clustering="1",
             atlas_partition_count=4,
+            atlas_intermediate_reducers=2,
             atlas_assignment_shards=2,
             atlas_similarity_threshold=0.4,
         )
@@ -77,7 +78,7 @@ def test_initial_seed_atlas_stage_is_resumable(tmp_path: Path) -> None:
     assert 1 <= version.centroid_count <= seed_count
     assert db.connection.execute("SELECT COUNT(*) FROM clusters").fetchone()[0] == seed_count
     first_job_count = len(scheduler._jobs)  # noqa: SLF001
-    assert first_job_count == 5
+    assert first_job_count == 6
 
     resumed = build_initial_seed_atlas(
         db,

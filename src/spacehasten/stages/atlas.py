@@ -233,6 +233,42 @@ def _assignment_command(
     )
 
 
+def _intermediate_reducer_command(
+    prefix: Sequence[str],
+    mapper_root: Path,
+    output_root: Path,
+    reducer_count: int,
+    threshold: float,
+) -> str:
+    return "\n".join(
+        [
+            "INDEX=$(( ${TASK_ID} - 1 ))",
+            'PADDED=$(printf "%04d" "${INDEX}")',
+            f'OUTPUT="{output_root}/reducer_${{PADDED}}"',
+            _quote(
+                [
+                    *prefix,
+                    "intermediate-reduce",
+                    "--map-root",
+                    mapper_root,
+                    "--output-dir",
+                    "${OUTPUT}",
+                    "--group-index",
+                    "${INDEX}",
+                    "--group-count",
+                    str(reducer_count),
+                    "--similarity-threshold",
+                    str(threshold),
+                    "--processes",
+                    "1",
+                ]
+            )
+            .replace("'${OUTPUT}'", '"${OUTPUT}"')
+            .replace("'${INDEX}'", '"${INDEX}"'),
+        ]
+    )
+
+
 def _batched(values: Iterable, size: int):  # type: ignore[no-untyped-def]
     batch = []
     for value in values:
@@ -346,11 +382,14 @@ def build_initial_seed_atlas(
 
     g = settings.general
     partition_count = g.atlas_partition_count
+    intermediate_reducers = g.atlas_intermediate_reducers
     shard_count = g.atlas_assignment_shards
     threshold = g.atlas_similarity_threshold
     clustering_cpus = max(1, int(g.cpu_count_clustering or 1))
     prefix = command_prefix or _default_atlas_command(settings)
     env_setup = _atlas_environment(settings)
+    if not 1 <= intermediate_reducers <= partition_count:
+        raise ValueError("atlas_intermediate_reducers must be between 1 and atlas_partition_count")
 
     seed_metadata = json.loads(source.with_suffix(source.suffix + ".json").read_text())
     definition = {
@@ -361,6 +400,7 @@ def build_initial_seed_atlas(
         "fingerprint_type": FP_TYPE,
         "fingerprint_parameters": FP_PARAMS,
         "partition_count": partition_count,
+        "intermediate_reducers": intermediate_reducers,
         "partition_rule": "spacehastenid_modulo",
     }
     definition_path = atlas_root / "atlas_definition.json"
@@ -423,12 +463,39 @@ def build_initial_seed_atlas(
         command=_mapper_command(prefix, partitions, mapper_root, partition_count, threshold),
     )
 
+    intermediate_root = atlas_root / "intermediate_reducers"
+    _submit(
+        scheduler,
+        name="atlas_intermediate_v0",
+        workdir=atlas_root,
+        array_size=intermediate_reducers,
+        max_concurrent=intermediate_reducers,
+        cpus=1,
+        env_setup=env_setup,
+        command=_intermediate_reducer_command(
+            prefix,
+            mapper_root,
+            intermediate_root,
+            intermediate_reducers,
+            threshold,
+        ),
+    )
+
     pool = atlas_root / "pool"
     reduced = atlas_root / "reduced"
     molecule_index = atlas_root / "molecule_index"
     reducer_command = "\n".join(
         [
-            _quote([*prefix, "pool", "--map-root", mapper_root, "--output-dir", pool]),
+            _quote(
+                [
+                    *prefix,
+                    "pool",
+                    "--map-root",
+                    intermediate_root,
+                    "--output-dir",
+                    pool,
+                ]
+            ),
             _quote(
                 [
                     *prefix,
