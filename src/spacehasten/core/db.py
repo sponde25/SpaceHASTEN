@@ -68,6 +68,51 @@ EXTENSION_SCHEMA_STATEMENTS: Final[tuple[str, ...]] = (
         ")"
     ),
     "CREATE INDEX IF NOT EXISTS idx_predictions_model_version ON predictions(model_version)",
+    (
+        "CREATE TABLE IF NOT EXISTS cluster_atlases ("
+        "atlas_id TEXT PRIMARY KEY,"
+        "similarity_threshold REAL NOT NULL,"
+        "fingerprint_type TEXT NOT NULL,"
+        "fingerprint_parameters TEXT NOT NULL,"
+        "partition_count INTEGER NOT NULL,"
+        "created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"
+        ")"
+    ),
+    (
+        "CREATE TABLE IF NOT EXISTS cluster_atlas_versions ("
+        "atlas_id TEXT NOT NULL,"
+        "version INTEGER NOT NULL,"
+        "last_spacehastenid INTEGER NOT NULL,"
+        "compound_count INTEGER NOT NULL,"
+        "centroid_count INTEGER NOT NULL,"
+        "metadata_path TEXT NOT NULL,"
+        "created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+        "PRIMARY KEY(atlas_id, version)"
+        ")"
+    ),
+    (
+        "CREATE TABLE IF NOT EXISTS cluster_atlas_centroids ("
+        "atlas_id TEXT NOT NULL,"
+        "clusterid INTEGER NOT NULL,"
+        "centroid_spacehastenid INTEGER NOT NULL,"
+        "created_version INTEGER NOT NULL,"
+        "PRIMARY KEY(atlas_id, clusterid)"
+        ")"
+    ),
+    (
+        "CREATE TABLE IF NOT EXISTS cluster_atlas_assignments ("
+        "atlas_id TEXT NOT NULL,"
+        "spacehastenid INTEGER NOT NULL,"
+        "clusterid INTEGER NOT NULL,"
+        "centroid_similarity REAL NOT NULL,"
+        "assigned_version INTEGER NOT NULL,"
+        "PRIMARY KEY(atlas_id, spacehastenid)"
+        ")"
+    ),
+    (
+        "CREATE INDEX IF NOT EXISTS idx_cluster_atlas_assignments_cluster "
+        "ON cluster_atlas_assignments(atlas_id, clusterid)"
+    ),
 )
 
 
@@ -96,6 +141,42 @@ class DataRow:
 class ClusterRow:
     spacehastenid: int
     clusterid: int
+
+
+@dataclass(frozen=True)
+class ClusterAtlasRow:
+    atlas_id: str
+    similarity_threshold: float
+    fingerprint_type: str
+    fingerprint_parameters: str
+    partition_count: int
+
+
+@dataclass(frozen=True)
+class ClusterAtlasVersionRow:
+    atlas_id: str
+    version: int
+    last_spacehastenid: int
+    compound_count: int
+    centroid_count: int
+    metadata_path: str
+
+
+@dataclass(frozen=True)
+class ClusterAtlasCentroidRow:
+    atlas_id: str
+    clusterid: int
+    centroid_spacehastenid: int
+    created_version: int
+
+
+@dataclass(frozen=True)
+class ClusterAtlasAssignmentRow:
+    atlas_id: str
+    spacehastenid: int
+    clusterid: int
+    centroid_similarity: float
+    assigned_version: int
 
 
 @dataclass(frozen=True)
@@ -659,6 +740,110 @@ class Database:
             ((r.spacehastenid, r.clusterid) for r in rows),
         )
 
+    def upsert_cluster_atlas(self, row: ClusterAtlasRow) -> None:
+        """Create an atlas definition or verify its immutable configuration."""
+        self.ensure_extension_schema()
+        existing = self._conn.execute(
+            "SELECT similarity_threshold, fingerprint_type, "
+            "fingerprint_parameters, partition_count FROM cluster_atlases "
+            "WHERE atlas_id = ?",
+            (row.atlas_id,),
+        ).fetchone()
+        values = (
+            row.similarity_threshold,
+            row.fingerprint_type,
+            row.fingerprint_parameters,
+            row.partition_count,
+        )
+        if existing is not None:
+            if tuple(existing) != values:
+                raise ValueError(
+                    f"atlas {row.atlas_id!r} already exists with different configuration"
+                )
+            return
+        self._conn.execute(
+            "INSERT INTO cluster_atlases("
+            "atlas_id, similarity_threshold, fingerprint_type, "
+            "fingerprint_parameters, partition_count"
+            ") VALUES (?, ?, ?, ?, ?)",
+            (row.atlas_id, *values),
+        )
+
+    def record_cluster_atlas_version(self, row: ClusterAtlasVersionRow) -> None:
+        self.ensure_extension_schema()
+        self._conn.execute(
+            "INSERT INTO cluster_atlas_versions("
+            "atlas_id, version, last_spacehastenid, compound_count, "
+            "centroid_count, metadata_path"
+            ") VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                row.atlas_id,
+                row.version,
+                row.last_spacehastenid,
+                row.compound_count,
+                row.centroid_count,
+                row.metadata_path,
+            ),
+        )
+
+    def append_cluster_atlas_centroids(self, rows: Iterable[ClusterAtlasCentroidRow]) -> None:
+        self.ensure_extension_schema()
+        self._conn.executemany(
+            "INSERT INTO cluster_atlas_centroids("
+            "atlas_id, clusterid, centroid_spacehastenid, created_version"
+            ") VALUES (?, ?, ?, ?)",
+            (
+                (
+                    row.atlas_id,
+                    row.clusterid,
+                    row.centroid_spacehastenid,
+                    row.created_version,
+                )
+                for row in rows
+            ),
+        )
+
+    def append_cluster_atlas_assignments(self, rows: Iterable[ClusterAtlasAssignmentRow]) -> None:
+        self.ensure_extension_schema()
+        self._conn.executemany(
+            "INSERT INTO cluster_atlas_assignments("
+            "atlas_id, spacehastenid, clusterid, centroid_similarity, "
+            "assigned_version"
+            ") VALUES (?, ?, ?, ?, ?)",
+            (
+                (
+                    row.atlas_id,
+                    row.spacehastenid,
+                    row.clusterid,
+                    row.centroid_similarity,
+                    row.assigned_version,
+                )
+                for row in rows
+            ),
+        )
+
+    def latest_cluster_atlas_version(self, atlas_id: str) -> ClusterAtlasVersionRow | None:
+        self.ensure_extension_schema()
+        row = self._conn.execute(
+            "SELECT atlas_id, version, last_spacehastenid, compound_count, "
+            "centroid_count, metadata_path FROM cluster_atlas_versions "
+            "WHERE atlas_id = ? ORDER BY version DESC LIMIT 1",
+            (atlas_id,),
+        ).fetchone()
+        return ClusterAtlasVersionRow(*row) if row is not None else None
+
+    def materialize_cluster_atlas(self, atlas_id: str) -> int:
+        """Replace the legacy clusters table from a persistent atlas."""
+        self.ensure_extension_schema()
+        rows = self._conn.execute(
+            "SELECT spacehastenid, clusterid FROM cluster_atlas_assignments "
+            "WHERE atlas_id = ? ORDER BY spacehastenid",
+            (atlas_id,),
+        ).fetchall()
+        self.replace_clusters(ClusterRow(int(sid), int(cid)) for sid, cid in rows)
+        count = int(self._conn.execute("SELECT COUNT(*) FROM clusters").fetchone()[0])
+        return count
+
     # ----- properties -----
 
     def replace_properties(self, props: PropertyRanges) -> None:
@@ -880,6 +1065,10 @@ class Database:
 
 
 __all__ = [
+    "ClusterAtlasAssignmentRow",
+    "ClusterAtlasCentroidRow",
+    "ClusterAtlasRow",
+    "ClusterAtlasVersionRow",
     "ClusterRow",
     "Database",
     "DataRow",
