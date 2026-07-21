@@ -34,6 +34,9 @@ def test_installer_writes_training_and_prediction_defaults(tmp_path: Path) -> No
     assert settings.general.train_seed == 42
     assert settings.general.cpu_count_predict == "1"
     assert settings.general.cpu_count_control == "1"
+    assert settings.general.atlas_partition_count == 64
+    assert settings.general.atlas_assignment_shards == 16
+    assert settings.general.atlas_similarity_threshold == 0.4
     assert settings.general.pred_batch_size == 32
     assert settings.general.pred_num_workers == 0
     assert settings.general.pred_accelerator == "cpu"

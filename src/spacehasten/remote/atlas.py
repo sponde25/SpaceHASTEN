@@ -325,6 +325,35 @@ def reduce_centroids(
         raise
 
 
+def build_molecule_index(input_path: Path, output_dir: Path) -> dict[str, Any]:
+    input_path = input_path.resolve()
+    output_dir = output_dir.resolve()
+    inputs = {
+        "input": {**_identity(input_path), "sha256": _sha256(input_path)},
+        "fingerprint_type": FP_TYPE,
+        "fingerprint_parameters": FP_PARAMS,
+    }
+    outputs = ("molecules_fp.h5",)
+    if _complete(output_dir, inputs, outputs):
+        LOGGER.info("Reusing completed molecule index: %s", output_dir)
+        return json.loads((output_dir / COMPLETE_FILE).read_text())
+    temp_dir = _new_temp_dir(output_dir)
+    started = time.monotonic()
+    try:
+        rows = read_smi(input_path)
+        _build_fpsim2_index(rows, temp_dir / outputs[0])
+        metrics = {
+            "molecule_count": len(rows),
+            "elapsed_seconds": time.monotonic() - started,
+        }
+        _finish(temp_dir, inputs=inputs, outputs=outputs, metrics=metrics)
+        _commit_dir(temp_dir, output_dir)
+        return json.loads((output_dir / COMPLETE_FILE).read_text())
+    except Exception:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise
+
+
 def _validate_index(engine: Any) -> None:
     if engine.fp_type != FP_TYPE or engine.fp_params != FP_PARAMS:
         raise ValueError(
@@ -743,6 +772,10 @@ def build_parser() -> argparse.ArgumentParser:
     reducer.add_argument("--similarity-threshold", type=float, default=0.4)
     reducer.add_argument("--processes", type=int, default=1)
 
+    index = subparsers.add_parser("build-index")
+    index.add_argument("--input", type=Path, required=True)
+    index.add_argument("--output-dir", type=Path, required=True)
+
     assign = subparsers.add_parser("assign-shard")
     assign.add_argument("--molecule-index", type=Path, required=True)
     assign.add_argument("--centroids", type=Path, required=True)
@@ -786,6 +819,8 @@ def main() -> int:
         pool_centroids(args.map_root, args.output_dir)
     elif args.command == "reduce":
         reduce_centroids(args.input, args.output_dir, args.similarity_threshold, args.processes)
+    elif args.command == "build-index":
+        build_molecule_index(args.input, args.output_dir)
     elif args.command == "assign-shard":
         assign_centroid_shard(
             args.molecule_index,

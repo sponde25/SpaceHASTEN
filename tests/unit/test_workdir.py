@@ -7,7 +7,6 @@ from pathlib import Path
 
 from spacehasten.workspace import Manifest, WorkDir
 
-
 # --------------------------------------------------------------------------- #
 # Single-root (backward compat: shared_root defaults to root)                 #
 # --------------------------------------------------------------------------- #
@@ -21,12 +20,10 @@ def test_paths_are_relative_to_root(tmp_path: Path) -> None:
     assert wd.docking_dir(2) == tmp_path / "myrun" / "docking" / "iter2"
     assert wd.model_dir(1) == tmp_path / "myrun" / "models" / "v1"
     assert wd.clustering_dir() == tmp_path / "myrun" / "clustering"
+    assert wd.atlas_dir() == tmp_path / "myrun" / "clustering" / "atlas"
     assert wd.archive_dir() == tmp_path / "myrun" / "archive"
     assert wd.logs_dir() == tmp_path / "myrun" / "logs"
-    assert (
-        wd.slurm_logs_dir("dock_iter1")
-        == tmp_path / "myrun" / "logs" / "slurm" / "dock_iter1"
-    )
+    assert wd.slurm_logs_dir("dock_iter1") == tmp_path / "myrun" / "logs" / "slurm" / "dock_iter1"
     assert wd.manifest_path() == tmp_path / "myrun" / "manifest.json"
     assert wd.props_path() == tmp_path / "myrun" / "props.toml"
 
@@ -65,10 +62,7 @@ def test_dual_root_shared_paths(tmp_path: Path) -> None:
     assert wd.clustering_dir() == shared / "clustering"
     assert wd.archive_dir() == shared / "archive"
     assert wd.export_dir() == shared / "export"
-    assert (
-        wd.slurm_logs_dir("dock_iter1")
-        == shared / "logs" / "slurm" / "dock_iter1"
-    )
+    assert wd.slurm_logs_dir("dock_iter1") == shared / "logs" / "slurm" / "dock_iter1"
 
 
 # --------------------------------------------------------------------------- #

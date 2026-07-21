@@ -92,6 +92,9 @@ class WorkDir:
     def clustering_dir(self) -> Path:
         return self.shared_root / "clustering"
 
+    def atlas_dir(self) -> Path:
+        return self.shared_root / "clustering" / "atlas"
+
     def archive_dir(self) -> Path:
         return self.shared_root / "archive"
 
