@@ -19,6 +19,7 @@ from __future__ import annotations
 import csv
 import gzip
 import logging
+import time
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -28,6 +29,7 @@ from spacehasten.scheduler.base import ArrayJob, Scheduler
 from spacehasten.workspace.layout import WorkDir
 
 logger = logging.getLogger(__name__)
+_OUTPUT_VISIBILITY_TIMEOUT_SECONDS = 60.0
 
 
 _DEFAULT_CLUSTER_COMMAND: tuple[str, ...] = (
@@ -81,9 +83,7 @@ def _ingest_clustering_csv(csv_path: Path) -> list[ClusterRow]:
     with csv_path.open("rt", encoding="utf-8") as fh:
         reader = csv.DictReader(fh)
         if reader.fieldnames != ["spacehastenid", "clusterid"]:
-            raise ValueError(
-                f"unexpected columns in {csv_path}: {reader.fieldnames!r}"
-            )
+            raise ValueError(f"unexpected columns in {csv_path}: {reader.fieldnames!r}")
         for row in reader:
             rows.append(
                 ClusterRow(
@@ -94,11 +94,29 @@ def _ingest_clustering_csv(csv_path: Path) -> list[ClusterRow]:
     return rows
 
 
+def _wait_for_output(
+    path: Path,
+    *,
+    timeout: float = _OUTPUT_VISIBILITY_TIMEOUT_SECONDS,
+    poll_interval: float = 0.5,
+) -> bool:
+    if path.exists():
+        return True
+    logger.info("Waiting up to %.0fs for output visibility: %s", timeout, path)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        time.sleep(poll_interval)
+        if path.exists():
+            return True
+    return False
+
+
 def _build_cluster_command(
     input_smi: Path,
     output_csv: Path,
     cpus: int,
     command_prefix: Sequence[str],
+    similarity_threshold: float,
 ) -> str:
     parts: list[str] = [
         *command_prefix,
@@ -107,11 +125,13 @@ def _build_cluster_command(
         str(output_csv),
         "--processes",
         str(cpus),
+        "--similarity-threshold",
+        str(similarity_threshold),
     ]
     cmd = " ".join(parts)
     return (
         f'echo "Starting clustering ({input_smi.name}, cpus={cpus})"\n'
-        f'{cmd}\n'
+        f"{cmd}\n"
         f'echo "Clustering complete"'
     )
 
@@ -125,6 +145,7 @@ def cluster(
     cluster_command_prefix: Sequence[str] | None = None,
     docked_only: bool = False,
     cutoff: float | None = None,
+    similarity_threshold: float = 0.3,
 ) -> int:
     """Run one sphere-exclusion clustering round.
 
@@ -143,6 +164,7 @@ def cluster(
         ``dock_score`` (i.e. already docked).
     :param cutoff: further restrict to ``dock_score <= cutoff``. Requires
         ``docked_only=True``.
+    :param similarity_threshold: minimum within-cluster Tanimoto similarity.
     :param cluster_command_prefix: command to launch
         ``remote.cluster``. Override in tests with a stub.
     :returns: number of cluster rows ingested.
@@ -151,6 +173,8 @@ def cluster(
     """
     if cutoff is not None and not docked_only:
         raise ValueError("cutoff requires docked_only=True")
+    if not 0.0 < similarity_threshold <= 1.0:
+        raise ValueError("similarity_threshold must be in (0, 1]")
     if docked_only:
         logger.warning(
             "Clustering a filtered subset (docked_only=%s, cutoff=%s); this "
@@ -158,7 +182,8 @@ def cluster(
             "clustering is discarded. Do not use a filtered cluster run if "
             "you rely on `--strategy clustering` for search/dock acquisition "
             "— that strategy needs cluster assignments for the whole space.",
-            docked_only, cutoff,
+            docked_only,
+            cutoff,
         )
 
     cluster_dir = workdir.clustering_dir()
@@ -169,9 +194,7 @@ def cluster(
     if output_csv.exists():
         output_csv.unlink()
 
-    n_compounds = _stream_smiles_to_gzip(
-        db, input_smi, docked_only=docked_only, cutoff=cutoff
-    )
+    n_compounds = _stream_smiles_to_gzip(db, input_smi, docked_only=docked_only, cutoff=cutoff)
     if n_compounds == 0:
         logger.info("no matching compounds; skipping clustering")
         return 0
@@ -192,9 +215,7 @@ def cluster(
         if cluster_command_prefix is not None
         else _default_cluster_command(settings)
     )
-    command = _build_cluster_command(
-        input_smi, output_csv, cpus, prefix
-    )
+    command = _build_cluster_command(input_smi, output_csv, cpus, prefix, similarity_threshold)
 
     job = ArrayJob(
         name="clustering",
@@ -211,14 +232,16 @@ def cluster(
     result = scheduler.wait(handle)
     if not result.success:
         from spacehasten.scheduler.diagnostics import tail_logs
+
         raise RuntimeError(
             f"clustering job {handle.job_id} failed; failed task indices: "
             f"{result.failed_indices}\n"
             f"--- tail of task logs ---\n{tail_logs(handle)}"
         )
 
-    if not output_csv.exists():
+    if not _wait_for_output(output_csv):
         from spacehasten.scheduler.diagnostics import tail_logs
+
         raise FileNotFoundError(
             f"clustering job did not produce {output_csv}\n"
             f"--- tail of task logs ---\n{tail_logs(handle)}"

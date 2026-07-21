@@ -185,16 +185,14 @@ def test_simsearch_stage_local(tmp_path: Path) -> None:
     jobs = [local_job.spec for local_job in scheduler._jobs.values()]  # noqa: SLF001
     control_jobs = [job for job in jobs if job.name.startswith("control_cycle")]
     assert control_jobs
-    assert control_jobs[0].gpus == 1
-    assert "CUDA_VISIBLE_DEVICES" not in control_jobs[0].command_template
+    assert control_jobs[0].gpus == 0
 
     assert new_cycle == 1
 
     # ---- Query bookkeeping --------------------------------------------- #
     db2 = Database(workdir.dbsh())
     queries = db2.connection.execute(
-        "SELECT spacehastenid, query FROM data WHERE query IS NOT NULL"
-        " ORDER BY spacehastenid"
+        "SELECT spacehastenid, query FROM data WHERE query IS NOT NULL ORDER BY spacehastenid"
     ).fetchall()
     assert {sid for sid, _ in queries} == set(seed_sids)
     assert all(q == new_cycle for _, q in queries)
@@ -287,7 +285,7 @@ def test_simsearch_writes_control_artefacts(tmp_path: Path) -> None:
     assert rows[0]["docking_score_std"] == "0.25"
 
 
-def test_simsearch_control_command_uses_gpu_prediction(tmp_path: Path) -> None:
+def test_simsearch_control_command_uses_cpu_prediction(tmp_path: Path) -> None:
     settings = Settings()
     body = _build_control_command(
         tmp_path / "CONTROL",
@@ -297,8 +295,8 @@ def test_simsearch_control_command_uses_gpu_prediction(tmp_path: Path) -> None:
         predict_prefix=("python3", "predict.py"),
     )
 
-    assert 'CUDA_VISIBLE_DEVICES=""' not in body
-    assert "--accelerator auto" in body
+    assert 'CUDA_VISIBLE_DEVICES=""' in body
+    assert "--accelerator cpu" in body
 
 
 def test_simsearch_no_queries_raises(tmp_path: Path) -> None:

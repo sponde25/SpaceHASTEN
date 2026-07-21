@@ -64,33 +64,67 @@ def _build_train_command(
     g = settings.general
     parts: list[str] = [*command_prefix, str(csv_path), str(model_dir)]
     parts += [
-        "--batch-size", str(g.train_batch_size),
-        "--epochs", str(g.train_epochs),
-        "--num-workers", str(g.train_num_workers),
-        "--devices", g.train_devices,
-        "--mp-hidden-size", str(g.train_mp_hidden_size),
-        "--mp-depth", str(g.train_mp_depth),
-        "--ffn-hidden-size", str(g.train_ffn_hidden_size),
-        "--ffn-layers", str(g.train_ffn_layers),
-        "--dropout", str(g.train_dropout),
-        "--activation", g.train_activation,
-        "--batch-norm", str(g.train_batch_norm),
-        "--warmup-epochs", str(g.train_warmup_epochs),
-        "--init-lr", str(g.train_init_lr),
-        "--max-lr", str(g.train_max_lr),
-        "--final-lr", str(g.train_final_lr),
-        "--early-stopping-patience", str(g.train_early_stopping_patience),
-        "--early-stopping-min-delta", str(g.train_early_stopping_min_delta),
-        "--svdkl-gp-dim", str(g.train_svdkl_gp_dim),
-        "--svdkl-grid-size", str(g.train_svdkl_grid_size),
-        "--svdkl-grid-lower", str(g.train_svdkl_grid_lower),
-        "--svdkl-grid-upper", str(g.train_svdkl_grid_upper),
-        "--seed", str(g.train_seed),
+        "--batch-size",
+        str(g.train_batch_size),
+        "--epochs",
+        str(g.train_epochs),
+        "--num-workers",
+        str(g.train_num_workers),
+        "--devices",
+        g.train_devices,
+        "--mp-hidden-size",
+        str(g.train_mp_hidden_size),
+        "--mp-depth",
+        str(g.train_mp_depth),
+        "--ffn-hidden-size",
+        str(g.train_ffn_hidden_size),
+        "--ffn-layers",
+        str(g.train_ffn_layers),
+        "--dropout",
+        str(g.train_dropout),
+        "--activation",
+        g.train_activation,
+        "--batch-norm",
+        str(g.train_batch_norm),
+        "--warmup-epochs",
+        str(g.train_warmup_epochs),
+        "--init-lr",
+        str(g.train_init_lr),
+        "--max-lr",
+        str(g.train_max_lr),
+        "--final-lr",
+        str(g.train_final_lr),
+        "--early-stopping-patience",
+        str(g.train_early_stopping_patience),
+        "--early-stopping-min-delta",
+        str(g.train_early_stopping_min_delta),
+        "--validation-fraction",
+        str(g.train_validation_fraction),
+        "--gradient-clip-val",
+        str(g.train_gradient_clip_val),
+        "--precision",
+        g.train_precision,
+        "--svdkl-gp-dim",
+        str(g.train_svdkl_gp_dim),
+        "--svdkl-grid-size",
+        str(g.train_svdkl_grid_size),
+        "--svdkl-grid-lower",
+        str(g.train_svdkl_grid_lower),
+        "--svdkl-grid-upper",
+        str(g.train_svdkl_grid_upper),
+        "--svdkl-cholesky-jitter",
+        str(g.train_svdkl_cholesky_jitter),
+        "--svdkl-feature-transform",
+        g.train_svdkl_feature_transform,
+        "--svdkl-tanh-temperature",
+        str(g.train_svdkl_tanh_temperature),
+        "--seed",
+        str(g.train_seed),
     ]
     cmd = " ".join(parts)
     return (
         f'echo "Starting chemprop training (csv={csv_path.name}, model_dir={model_dir.name})"\n'
-        f'{cmd}\n'
+        f"{cmd}\n"
         f'echo "Training complete"'
     )
 
@@ -131,8 +165,7 @@ def train(
     rows = db.select_training_data(cutoff)
     if not rows:
         raise ValueError(
-            f"no training rows (dock_score < {cutoff} AND NOT NULL); "
-            "run docking before training"
+            f"no training rows (dock_score < {cutoff} AND NOT NULL); run docking before training"
         )
 
     latest = db.latest_model_version()
@@ -176,6 +209,7 @@ def train(
     result = scheduler.wait(handle)
     if not result.success:
         from spacehasten.scheduler.diagnostics import tail_logs
+
         raise RuntimeError(
             f"training job {handle.job_id} failed; failed task indices: "
             f"{result.failed_indices}\n"
@@ -185,6 +219,7 @@ def train(
     bin_path = model_dir / "model_0" / "pytorch_model.bin"
     if not bin_path.exists():
         from spacehasten.scheduler.diagnostics import tail_logs
+
         raise RuntimeError(
             f"training job reported success but {bin_path} is missing\n"
             f"--- tail of task logs ---\n{tail_logs(handle)}"

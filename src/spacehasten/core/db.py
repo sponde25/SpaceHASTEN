@@ -20,6 +20,8 @@ from pathlib import Path
 from types import TracebackType
 from typing import Final, Literal
 
+from spacehasten.core.acquisition import AcquisitionCandidate
+
 # ---------------------------------------------------------------------------
 # Schema (frozen — must stay byte-identical to tests/fixtures/legacy_schema.sql)
 # ---------------------------------------------------------------------------
@@ -230,6 +232,19 @@ class Database:
         "   AND query IS NULL AND pred_score IS NOT NULL AND dock_score IS NULL\n"
         " GROUP BY clusterid ORDER BY MIN(pred_score) LIMIT ?"
     )
+    _SQL_DOCK_UNCERTAINTY_CANDIDATES: Final[str] = (
+        "SELECT d.smiles, d.spacehastenid, p.pred_score, p.epistemic_std,"
+        " d.pred_version, c.clusterid\n"
+        " FROM data AS d\n"
+        " LEFT JOIN predictions AS p"
+        " ON p.spacehastenid = d.spacehastenid"
+        " AND p.model_version = d.pred_version\n"
+        " LEFT JOIN clusters AS c ON c.spacehastenid = d.spacehastenid\n"
+        " WHERE d.dock_score IS NULL"
+        " AND d.pred_score IS NOT NULL"
+        " AND d.pred_version IS NOT NULL\n"
+        " ORDER BY d.spacehastenid"
+    )
 
     # ----- update SQL (parameterised) -----
     _SQL_UPDATE_DOCK_SCORE: Final[str] = (
@@ -249,17 +264,14 @@ class Database:
         "total_std = excluded.total_std, "
         "created_at = CURRENT_TIMESTAMP"
     )
-    _SQL_MARK_AS_QUERY: Final[str] = (
-        "UPDATE data SET query = ? WHERE spacehastenid = ?"
-    )
+    _SQL_MARK_AS_QUERY: Final[str] = "UPDATE data SET query = ? WHERE spacehastenid = ?"
 
     # ----- supporting select SQL -----
     _SQL_SELECT_UNDOCKED: Final[str] = (
         "SELECT smiles, spacehastenid FROM data WHERE dock_score IS NULL"
     )
     _SQL_SELECT_TRAINING: Final[str] = (
-        "SELECT smiles, dock_score FROM data\n"
-        " WHERE dock_score IS NOT NULL AND dock_score < ?"
+        "SELECT smiles, dock_score FROM data\n WHERE dock_score IS NOT NULL AND dock_score < ?"
     )
     _SQL_SELECT_EXPORT: Final[str] = (
         "SELECT smiles, data.spacehastenid, smilesid, dock_score, pred_score,"
@@ -378,19 +390,11 @@ class Database:
 
     # ----- updates -----
 
-    def update_dock_score(
-        self, spacehastenid: int, dock_score: float, dock_iteration: int
-    ) -> None:
-        self._conn.execute(
-            self._SQL_UPDATE_DOCK_SCORE, (dock_score, dock_iteration, spacehastenid)
-        )
+    def update_dock_score(self, spacehastenid: int, dock_score: float, dock_iteration: int) -> None:
+        self._conn.execute(self._SQL_UPDATE_DOCK_SCORE, (dock_score, dock_iteration, spacehastenid))
 
-    def update_pred_score(
-        self, spacehastenid: int, pred_score: float, pred_version: int
-    ) -> None:
-        self._conn.execute(
-            self._SQL_UPDATE_PRED_SCORE, (pred_score, pred_version, spacehastenid)
-        )
+    def update_pred_score(self, spacehastenid: int, pred_score: float, pred_version: int) -> None:
+        self._conn.execute(self._SQL_UPDATE_PRED_SCORE, (pred_score, pred_version, spacehastenid))
 
     def store_prediction(
         self,
@@ -627,14 +631,10 @@ class Database:
     # ----- docking blobs -----
 
     def store_dock_param(self, blob: bytes) -> None:
-        self._conn.execute(
-            "INSERT INTO docking_param VALUES (?)", (memoryview(blob),)
-        )
+        self._conn.execute("INSERT INTO docking_param VALUES (?)", (memoryview(blob),))
 
     def store_dock_grid(self, blob: bytes) -> None:
-        self._conn.execute(
-            "INSERT INTO docking_grid VALUES (?)", (memoryview(blob),)
-        )
+        self._conn.execute("INSERT INTO docking_grid VALUES (?)", (memoryview(blob),))
 
     def load_dock_param(self) -> bytes:
         row = self._conn.execute("SELECT dock_param FROM docking_param").fetchone()
@@ -653,9 +653,7 @@ class Database:
     def replace_clusters(self, rows: Iterable[ClusterRow]) -> None:
         c = self._conn.cursor()
         c.execute("DROP TABLE IF EXISTS clusters")
-        c.execute(
-            "CREATE TABLE clusters(spacehastenid INTEGER PRIMARY KEY,clusterid INTEGER)"
-        )
+        c.execute("CREATE TABLE clusters(spacehastenid INTEGER PRIMARY KEY,clusterid INTEGER)")
         c.executemany(
             "INSERT INTO clusters(spacehastenid, clusterid) VALUES (?, ?)",
             ((r.spacehastenid, r.clusterid) for r in rows),
@@ -685,9 +683,7 @@ class Database:
             return None
         if not rows:
             return None
-        index: dict[str, tuple[str, str]] = {
-            str(r[0]): (str(r[2]), str(r[3])) for r in rows
-        }
+        index: dict[str, tuple[str, str]] = {str(r[0]): (str(r[2]), str(r[3])) for r in rows}
         required = ("mw", "slogp", "hba", "hbd", "rotbonds", "tpsa")
         if not all(k in index for k in required):
             return None
@@ -721,13 +717,10 @@ class Database:
     def load_smarts_filters(self) -> list[tuple[str, str]]:
         """Return stored ``(mode, smarts)`` pairs, or ``[]`` if none stored."""
         try:
-            rows = self._conn.execute(
-                "SELECT mode, pattern FROM smarts_filters"
-            ).fetchall()
+            rows = self._conn.execute("SELECT mode, pattern FROM smarts_filters").fetchall()
         except sqlite3.OperationalError:
             return []
         return [(str(r[0]), str(r[1])) for r in rows]
-
 
     def select_queries_for_simsearch(
         self,
@@ -757,20 +750,44 @@ class Database:
     def select_compounds_to_dock(
         self, strategy: Literal["greedy", "clustering"], limit: int
     ) -> list[tuple[str, int]]:
-        sql = (
-            self._SQL_DOCK_GREEDY
-            if strategy == "greedy"
-            else self._SQL_DOCK_CLUSTERING
-        )
+        sql = self._SQL_DOCK_GREEDY if strategy == "greedy" else self._SQL_DOCK_CLUSTERING
         return [(s, i) for s, i in self._conn.execute(sql, (limit,)).fetchall()]
+
+    def select_uncertainty_docking_candidates(self) -> list[AcquisitionCandidate]:
+        """Return undocked candidates with version-matched epistemic uncertainty."""
+        self.ensure_extension_schema()
+        rows = self._conn.execute(self._SQL_DOCK_UNCERTAINTY_CANDIDATES).fetchall()
+        missing: list[int] = []
+        candidates: list[AcquisitionCandidate] = []
+        for smiles, sid, mean, epistemic_std, version, clusterid in rows:
+            if mean is None or epistemic_std is None:
+                missing.append(int(sid))
+                continue
+            if smiles is None:
+                raise ValueError(f"acquisition candidate {sid} has no SMILES")
+            candidates.append(
+                AcquisitionCandidate(
+                    smiles=str(smiles),
+                    spacehastenid=int(sid),
+                    pred_score=float(mean),
+                    epistemic_std=float(epistemic_std),
+                    model_version=int(version),
+                    clusterid=int(clusterid) if clusterid is not None else None,
+                )
+            )
+        if missing:
+            preview = ", ".join(str(identifier) for identifier in missing[:5])
+            raise ValueError(
+                f"{len(missing)} predicted undocked compounds lack version-matched "
+                f"epistemic uncertainty (first IDs: {preview})"
+            )
+        return candidates
 
     def has_clusters(self) -> bool:
         """Whether ``clusters`` has any rows (i.e. ``cluster`` has run)."""
         return self._conn.execute("SELECT 1 FROM clusters LIMIT 1").fetchone() is not None
 
-    def select_undocked_for_prediction(
-        self, batch_size: int = 10000
-    ) -> Iterator[tuple[str, int]]:
+    def select_undocked_for_prediction(self, batch_size: int = 10000) -> Iterator[tuple[str, int]]:
         cur = self._conn.execute(self._SQL_SELECT_UNDOCKED)
         while True:
             rows = cur.fetchmany(batch_size)
@@ -788,8 +805,7 @@ class Database:
 
     def select_training_data(self, cutoff: float = 10.0) -> list[tuple[str, float]]:
         return [
-            (s, d)
-            for s, d in self._conn.execute(self._SQL_SELECT_TRAINING, (cutoff,)).fetchall()
+            (s, d) for s, d in self._conn.execute(self._SQL_SELECT_TRAINING, (cutoff,)).fetchall()
         ]
 
     def select_predictions(self, model_version: int | None = None) -> list[PredictionRow]:
@@ -850,9 +866,7 @@ class Database:
 
     def apply_predictions(
         self,
-        rows: Sequence[
-            tuple[int, int, float, float | None, float | None, float | None]
-        ],
+        rows: Sequence[tuple[int, int, float, float | None, float | None, float | None]],
     ) -> None:
         """Persist versioned predictions and update the legacy latest-score cache."""
         if not rows:

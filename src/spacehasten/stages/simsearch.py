@@ -67,14 +67,23 @@ _UNCERTAINTY_COLUMNS: Final[tuple[str, ...]] = (
     "docking_score_std",
 )
 _PROP_ORDER: Final[tuple[str, ...]] = (
-    "mw", "slogp", "hba", "hbd", "rotbonds", "tpsa",
+    "mw",
+    "slogp",
+    "hba",
+    "hbd",
+    "rotbonds",
+    "tpsa",
 )
 
 _DEFAULT_PROP_FILTER_COMMAND: Final[tuple[str, ...]] = (
-    "python3", "-m", "spacehasten.remote.prop_filter",
+    "python3",
+    "-m",
+    "spacehasten.remote.prop_filter",
 )
 _DEFAULT_PREDICT_COMMAND: Final[tuple[str, ...]] = (
-    "python3", "-m", "spacehasten.remote.predict",
+    "python3",
+    "-m",
+    "spacehasten.remote.predict",
 )
 
 
@@ -155,12 +164,12 @@ def _build_search_command(
     # Note: $query is a bash variable; it is intentionally NOT formatted
     # by python here so the local scheduler / sbatch sees the literal.
     return (
-        f'mkdir -p {results_dir}\n'
-        f'query=$(sed -n "${{TASK_ID}}p" {queries_file} | awk \'{{print $1}}\')\n'
+        f"mkdir -p {results_dir}\n"
+        f"query=$(sed -n \"${{TASK_ID}}p\" {queries_file} | awk '{{print $1}}')\n"
         f'echo "[task ${{TASK_ID}}] query: $query"\n'
-        f'{sl_cmd}\n'
+        f"{sl_cmd}\n"
         f'echo "[task ${{TASK_ID}}] SpaceLight done"\n'
-        f'{ft_cmd}\n'
+        f"{ft_cmd}\n"
         f'echo "[task ${{TASK_ID}}] FTrees done"\n'
     )
 
@@ -202,7 +211,8 @@ def _aggregate_search_results(
                 if smi_col not in fields or title_col not in fields or sim_field not in fields:
                     logger.warning(
                         "skipping %s: missing one of %s",
-                        resfile, (smi_col, title_col, sim_field),
+                        resfile,
+                        (smi_col, title_col, sim_field),
                     )
                     continue
                 for row in reader:
@@ -220,9 +230,7 @@ def _aggregate_search_results(
     return raw_mols, sims
 
 
-def _write_control_chunks(
-    raw_mols: dict[str, str], control_dir: Path, n_chunks: int
-) -> int:
+def _write_control_chunks(raw_mols: dict[str, str], control_dir: Path, n_chunks: int) -> int:
     """Distribute raw-mol lines across ``n_chunks`` gzipped chunks.
 
     Returns the number of chunks actually written (may be less than
@@ -254,8 +262,7 @@ def _write_control_param(path: Path, db: Database) -> None:
     props = db.load_properties()
     if props is None:
         raise RuntimeError(
-            "properties table is empty; cannot write control.param"
-            " (run `import-seeds` first)"
+            "properties table is empty; cannot write control.param (run `import-seeds` first)"
         )
     path.parent.mkdir(parents=True, exist_ok=True)
     pairs = {
@@ -314,21 +321,29 @@ def _build_control_command(
     if has_smarts:
         pf_parts += ["--smarts", "inputs/smarts.txt"]
     pred_parts = [
-        *predict_prefix, propout, str(model_dir), predout,
-        "--batch-size", str(g.pred_batch_size),
-        "--num-workers", str(g.pred_num_workers),
-        "--accelerator", g.pred_accelerator,
-        "--devices", g.pred_devices,
+        *predict_prefix,
+        propout,
+        str(model_dir),
+        predout,
+        "--batch-size",
+        str(g.pred_batch_size),
+        "--num-workers",
+        str(g.pred_num_workers),
+        "--accelerator",
+        g.pred_accelerator,
+        "--devices",
+        g.pred_devices,
     ]
     pf_cmd = " ".join(pf_parts)
     pred_cmd = " ".join(pred_parts)
     return (
-        f'mkdir -p results_propfilter results_prediction\n'
+        f"mkdir -p results_propfilter results_prediction\n"
         f'echo "[task ${{TASK_ID}}] Property filter"\n'
-        f'{pf_cmd}\n'
+        f"{pf_cmd}\n"
         f'echo "[task ${{TASK_ID}}] Predicting"\n'
-        f'export OMP_NUM_THREADS=1\n'
-        f'{pred_cmd}\n'
+        f'export CUDA_VISIBLE_DEVICES=""\n'
+        f"export OMP_NUM_THREADS=1\n"
+        f"{pred_cmd}\n"
         f'echo "[task ${{TASK_ID}}] Done"\n'
     )
 
@@ -351,9 +366,7 @@ def _ingest_predictions(
     pred_dir = control_dir / "results_prediction"
     files = sorted(pred_dir.glob("predicted_propoutput_control_*.csv"))
     if not files:
-        raise FileNotFoundError(
-            f"no predicted_propoutput_control_*.csv under {pred_dir}"
-        )
+        raise FileNotFoundError(f"no predicted_propoutput_control_*.csv under {pred_dir}")
     predictions: dict[str, PredictionResult] = {}
     rows: list[tuple[str, str, str]] = []
     seen: set[str] = set()
@@ -362,9 +375,7 @@ def _ingest_predictions(
             reader = csv.DictReader(fh)
             cols = reader.fieldnames or []
             if "smilesid" not in cols or "docking_score" not in cols:
-                raise ValueError(
-                    f"{f}: expected smilesid + docking_score, got {cols}"
-                )
+                raise ValueError(f"{f}: expected smilesid + docking_score, got {cols}")
             uncertainty_present = [column in cols for column in _UNCERTAINTY_COLUMNS]
             if any(uncertainty_present) and not all(uncertainty_present):
                 raise ValueError(
@@ -504,32 +515,28 @@ def simsearch(
     sl_adapter = spacelight_adapter or SpacelightAdapter(exe=sp_exe)
     ft_adapter = ftrees_adapter or FTreesAdapter(exe=ft_exe)
 
-    space_path = (
-        Path(space) if space is not None else Path(settings.paths.spaces_file_default)
-    )
+    space_path = Path(space) if space is not None else Path(settings.paths.spaces_file_default)
     nnn_v = nnn if nnn is not None else settings.general.nnn_default
     sim_sl = (
-        sim_spacelight if sim_spacelight is not None
-        else settings.general.sim_spacelight_default
+        sim_spacelight if sim_spacelight is not None else settings.general.sim_spacelight_default
     )
-    sim_ft = (
-        sim_ftrees if sim_ftrees is not None
-        else settings.general.sim_ftrees_default
-    )
+    sim_ft = sim_ftrees if sim_ftrees is not None else settings.general.sim_ftrees_default
 
     cycle = db.latest_simsearch_cycle() + 1
     cycle_dir = workdir.simsearch_dir(cycle)
     cycle_dir.mkdir(parents=True, exist_ok=True)
     logger.info(
-        "Simsearch cycle %d: source=%s strategy=%s top=%d", cycle, source, strategy, top_n,
+        "Simsearch cycle %d: source=%s strategy=%s top=%d",
+        cycle,
+        source,
+        strategy,
+        top_n,
     )
 
     # --- Phase A: pick queries ------------------------------------------- #
     queries = db.select_queries_for_simsearch(source, strategy, top_n)
     if not queries:
-        raise ValueError(
-            f"no candidate queries for source={source!r} strategy={strategy!r}"
-        )
+        raise ValueError(f"no candidate queries for source={source!r} strategy={strategy!r}")
     for _smiles, sid in queries:
         db.mark_as_query(sid, cycle)
     db.commit()
@@ -539,10 +546,12 @@ def simsearch(
     logger.info("Wrote %d queries to %s", len(queries), queries_file)
 
     env_setup = [
-        line for line in (
+        line
+        for line in (
             settings.general.prepare_anaconda,
             settings.general.activate_chemprop,
-        ) if line
+        )
+        if line
     ]
 
     search_body = (
@@ -575,6 +584,7 @@ def simsearch(
     res_a = scheduler.wait(handle_a)
     if not res_a.success:
         from spacehasten.scheduler.diagnostics import tail_logs
+
         raise RuntimeError(
             f"search job {handle_a.job_id} failed; failed task indices: "
             f"{res_a.failed_indices}\n"
@@ -589,7 +599,9 @@ def simsearch(
     )
     logger.info(
         "Aggregated %d unique SMILES from %d spacelight + %d ftrees rows",
-        len(raw_mols), len(sims["spacelight"]), len(sims["ftrees"]),
+        len(raw_mols),
+        len(sims["spacelight"]),
+        len(sims["ftrees"]),
     )
     if not raw_mols:
         logger.warning("simsearch cycle %d: no raw mols; nothing to ingest", cycle)
@@ -611,9 +623,7 @@ def simsearch(
     # can reference it directly without copying into CONTROL/.
     model_version = db.latest_model_version()
     if model_version is None:
-        raise RuntimeError(
-            "no trained model available; train one before running simsearch"
-        )
+        raise RuntimeError("no trained model available; train one before running simsearch")
     bin_path = db.load_model_path(model_version, workdir)
     model_dir = bin_path.parent.parent  # <model_dir>/model_0/pytorch_model.bin
 
@@ -647,18 +657,20 @@ def simsearch(
         array_size=n_chunks,
         max_concurrent=min(n_chunks, cpu),
         cpus_per_task=max(1, control_cpus),
-        gpus=1,
         env_setup=env_setup,
         command_template=control_body,
     )
     handle_b = scheduler.submit_array(control_job)
     logger.info(
         "Submitted control job %s (%d chunks, model v%d)",
-        handle_b.job_id, n_chunks, model_version,
+        handle_b.job_id,
+        n_chunks,
+        model_version,
     )
     res_b = scheduler.wait(handle_b)
     if not res_b.success:
         from spacehasten.scheduler.diagnostics import tail_logs
+
         raise RuntimeError(
             f"control job {handle_b.job_id} failed; failed task indices: "
             f"{res_b.failed_indices}\n"
@@ -704,7 +716,9 @@ def simsearch(
     db.commit()
     logger.info(
         "Inserted %d new compounds (deduped %d existing reghashes) into cycle %d",
-        inserted, len(rows) - inserted, cycle,
+        inserted,
+        len(rows) - inserted,
+        cycle,
     )
 
     return cycle

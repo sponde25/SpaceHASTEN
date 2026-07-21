@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from spacehasten.cli.main import _build_parser, main
@@ -102,7 +104,19 @@ def test_each_subcommand_parses_minimally(tmp_path) -> None:  # type: ignore[no-
         ["-w", str(ws), "search", "--source", "docked", "--top-n", "10", "--cpus", "4"],
         ["-w", str(ws), "dock", "--top-n", "10", "--cpus", "4"],
         ["-w", str(ws), "cluster"],
-        ["-w", str(ws), "screening-cycle", "--simsearch-top-n", "100", "--simsearch-jobs", "4", "--dock-top-n", "1000", "--dock-cpus", "4"],
+        [
+            "-w",
+            str(ws),
+            "screening-cycle",
+            "--simsearch-top-n",
+            "100",
+            "--simsearch-jobs",
+            "4",
+            "--dock-top-n",
+            "1000",
+            "--dock-cpus",
+            "4",
+        ],
         ["-w", str(ws), "export", "csv", "--cutoff", "-7", "--output", "out.csv"],
         ["-w", str(ws), "export", "poses", "--cutoff", "-7", "--output", "out.mae"],
         ["-w", str(ws), "export", "seeds", "--output", "seeds.csv"],
@@ -118,6 +132,49 @@ def test_each_subcommand_parses_minimally(tmp_path) -> None:  # type: ignore[no-
         assert ns.command is not None
 
 
+def test_dock_parses_uncertainty_acquisition_options() -> None:
+    parser = _build_parser()
+    args = parser.parse_args(
+        [
+            "dock",
+            "--top-n",
+            "100",
+            "--cpus",
+            "4",
+            "--strategy",
+            "ei",
+            "--ei-hit-threshold",
+            "-9.7",
+            "--ei-xi",
+            "0.1",
+            "--cluster-lambda",
+            "0.5",
+        ]
+    )
+    assert args.strategy == "ei"
+    assert args.ei_hit_threshold == -9.7
+    assert args.ei_xi == 0.1
+    assert args.cluster_lambda == 0.5
+
+
+def test_search_rejects_uncertainty_acquisition() -> None:
+    parser = _build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "search",
+                "--source",
+                "predicted",
+                "--top-n",
+                "10",
+                "--cpus",
+                "2",
+                "--strategy",
+                "lcb",
+            ]
+        )
+
+
 def test_init_creates_workspace(tmp_path) -> None:  # type: ignore[no-untyped-def]
     ws = tmp_path / "ws"
     shared = tmp_path / "shared"
@@ -125,7 +182,18 @@ def test_init_creates_workspace(tmp_path) -> None:  # type: ignore[no-untyped-de
     dock_in.write_bytes(b"DOCK_PARAM_CONTENT")
     grid = tmp_path / "grid.zip"
     grid.write_bytes(b"GRID_CONTENT")
-    rc = main(["init", str(ws), "--shared-root", str(shared), "--dock-params", str(dock_in), "--dock-grid", str(grid)])
+    rc = main(
+        [
+            "init",
+            str(ws),
+            "--shared-root",
+            str(shared),
+            "--dock-params",
+            str(dock_in),
+            "--dock-grid",
+            str(grid),
+        ]
+    )
     assert rc == 0
     assert (ws / "manifest.json").exists()
     assert (ws / "logs").is_dir()
@@ -134,19 +202,25 @@ def test_init_creates_workspace(tmp_path) -> None:  # type: ignore[no-untyped-de
     assert (ws / "ws.dbsh").exists()
 
 
-def _init_workspace(tmp_path) -> "Path":  # type: ignore[no-untyped-def]
-    from pathlib import Path
-
+def _init_workspace(tmp_path) -> Path:  # type: ignore[no-untyped-def]
     ws = tmp_path / "ws"
     shared = tmp_path / "shared"
     dock_in = tmp_path / "dock.in"
     dock_in.write_bytes(b"DOCK_PARAM_CONTENT")
     grid = tmp_path / "grid.zip"
     grid.write_bytes(b"GRID_CONTENT")
-    rc = main([
-        "init", str(ws), "--shared-root", str(shared),
-        "--dock-params", str(dock_in), "--dock-grid", str(grid),
-    ])
+    rc = main(
+        [
+            "init",
+            str(ws),
+            "--shared-root",
+            str(shared),
+            "--dock-params",
+            str(dock_in),
+            "--dock-grid",
+            str(grid),
+        ]
+    )
     assert rc == 0
     return Path(ws)
 
@@ -164,12 +238,25 @@ def test_screening_cycle_clustering_strategy_autoclusters(tmp_path, monkeypatch)
     monkeypatch.setattr(docking, "dock", lambda *a, **k: 1)
     monkeypatch.setattr(training, "train", lambda *a, **k: 1)
 
-    rc = main([
-        "-w", str(ws), "screening-cycle",
-        "--simsearch-top-n", "10", "--simsearch-jobs", "1",
-        "--dock-top-n", "10", "--dock-cpus", "1",
-        "--rounds", "2", "--strategy", "clustering",
-    ])
+    rc = main(
+        [
+            "-w",
+            str(ws),
+            "screening-cycle",
+            "--simsearch-top-n",
+            "10",
+            "--simsearch-jobs",
+            "1",
+            "--dock-top-n",
+            "10",
+            "--dock-cpus",
+            "1",
+            "--rounds",
+            "2",
+            "--strategy",
+            "clustering",
+        ]
+    )
     assert rc == 0
     # 3 search steps + 1 dock step = 4 cluster calls per round.
     assert len(cluster_calls) == 4 * 2
@@ -187,11 +274,83 @@ def test_screening_cycle_greedy_strategy_never_clusters(tmp_path, monkeypatch) -
     monkeypatch.setattr(docking, "dock", lambda *a, **k: 1)
     monkeypatch.setattr(training, "train", lambda *a, **k: 1)
 
-    rc = main([
-        "-w", str(ws), "screening-cycle",
-        "--simsearch-top-n", "10", "--simsearch-jobs", "1",
-        "--dock-top-n", "10", "--dock-cpus", "1",
-        "--rounds", "2", "--strategy", "greedy",
-    ])
+    rc = main(
+        [
+            "-w",
+            str(ws),
+            "screening-cycle",
+            "--simsearch-top-n",
+            "10",
+            "--simsearch-jobs",
+            "1",
+            "--dock-top-n",
+            "10",
+            "--dock-cpus",
+            "1",
+            "--rounds",
+            "2",
+            "--strategy",
+            "greedy",
+        ]
+    )
     assert rc == 0
     assert cluster_calls == []
+
+
+def test_screening_cycle_lcb_only_changes_docking_acquisition(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from spacehasten.stages import clustering, docking, simsearch, training
+
+    ws = _init_workspace(tmp_path)
+    cluster_calls: list[dict[str, object]] = []
+    search_calls: list[dict[str, object]] = []
+    dock_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        clustering,
+        "cluster",
+        lambda *a, **kwargs: cluster_calls.append(kwargs) or 0,
+    )
+    monkeypatch.setattr(
+        simsearch,
+        "simsearch",
+        lambda *a, **kwargs: search_calls.append(kwargs) or 1,
+    )
+    monkeypatch.setattr(
+        docking,
+        "dock",
+        lambda *a, **kwargs: dock_calls.append(kwargs) or 1,
+    )
+    monkeypatch.setattr(training, "train", lambda *a, **k: 1)
+
+    rc = main(
+        [
+            "-w",
+            str(ws),
+            "screening-cycle",
+            "--simsearch-top-n",
+            "10",
+            "--simsearch-jobs",
+            "1",
+            "--dock-top-n",
+            "10",
+            "--dock-cpus",
+            "1",
+            "--dock-acquisition",
+            "lcb",
+            "--lcb-beta",
+            "2.0",
+            "--cluster-lambda",
+            "0.5",
+        ]
+    )
+
+    assert rc == 0
+    assert [call["strategy"] for call in search_calls] == [
+        "greedy",
+        "greedy",
+        "greedy",
+    ]
+    assert len(cluster_calls) == 1
+    assert cluster_calls[0]["similarity_threshold"] == 0.4
+    assert dock_calls[0]["strategy"] == "lcb"
+    assert dock_calls[0]["lcb_beta"] == 2.0
+    assert dock_calls[0]["cluster_lambda"] == 0.5

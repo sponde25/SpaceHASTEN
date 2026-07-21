@@ -4,8 +4,15 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import logging
+import os
+import random
 import sys
+import time
+from dataclasses import asdict
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 import numpy as np
@@ -54,6 +61,62 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 
+def _seed_everything(seed: int) -> None:
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    torch.use_deterministic_algorithms(True, warn_only=True)
+    if hasattr(torch.backends, "cudnn"):
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+
+def _seed_worker(worker_id: int) -> None:
+    del worker_id
+    worker_seed = torch.initial_seed() % (2**32)
+    random.seed(worker_seed)
+    np.random.seed(worker_seed)
+
+
+def deterministic_split_indices(
+    row_count: int,
+    *,
+    validation_fraction: float,
+    seed: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return deterministic random train/validation row indices."""
+    if row_count < 2:
+        raise ValueError("at least two rows are required")
+    if not 0.0 < validation_fraction < 1.0:
+        raise ValueError("validation_fraction must be in (0, 1)")
+    validation_count = min(
+        row_count - 1,
+        max(1, int(round(validation_fraction * row_count))),
+    )
+    permutation = np.random.default_rng(seed).permutation(row_count)
+    validation_indices = np.sort(permutation[:validation_count])
+    train_indices = np.sort(permutation[validation_count:])
+    return train_indices, validation_indices
+
+
+def _format_optional(value: object | None) -> str:
+    if value is None:
+        return "nan"
+    if hasattr(value, "detach"):
+        value = value.detach().cpu()  # type: ignore[union-attr]
+    return f"{float(value):.4g}"
+
+
+def _package_version(package: str) -> str:
+    try:
+        return version(package)
+    except PackageNotFoundError:
+        return "unknown"
+
+
 def train_model(
     data_path: str,
     save_dir: str,
@@ -76,9 +139,18 @@ def train_model(
     svdkl_grid_size: int = 128,
     svdkl_grid_lower: float = -10.0,
     svdkl_grid_upper: float = 10.0,
+    svdkl_cholesky_jitter: float = 1e-3,
+    svdkl_feature_transform: str = "scale_to_bounds",
+    svdkl_tanh_temperature: float = 3.0,
     seed: int = 0,
+    early_stopping_patience: int = 8,
+    early_stopping_min_delta: float = 0.0,
+    validation_fraction: float = 0.1,
+    gradient_clip_val: float = 5.0,
+    precision: str = "32-true",
 ) -> int:
-    torch.manual_seed(seed)
+    _seed_everything(seed)
+    torch.set_float32_matmul_precision("medium")
 
     save_dir_path = Path(save_dir)
     save_dir_path.mkdir(parents=True, exist_ok=True)
@@ -100,16 +172,29 @@ def train_model(
     if warmup_epochs < 0 or warmup_epochs >= epochs:
         logger.error("warmup_epochs must satisfy 0 <= warmup_epochs < epochs")
         return 1
+    if early_stopping_patience < 1:
+        logger.error("early_stopping_patience must be at least 1")
+        return 1
+    if early_stopping_min_delta < 0:
+        logger.error("early_stopping_min_delta must be non-negative")
+        return 1
+    if not 0.0 < validation_fraction < 1.0:
+        logger.error("validation_fraction must be in (0, 1)")
+        return 1
+    if gradient_clip_val <= 0:
+        logger.error("gradient_clip_val must be positive")
+        return 1
+    if precision not in {"32", "32-true"}:
+        logger.error("only float32 training is supported; got precision=%s", precision)
+        return 1
 
     logger.info("Loaded %d molecules for training", len(smiles))
 
-    # TODO: support persisted chronological, random, and scaffold-based splits.
-    n_val = max(1, int(0.1 * len(smiles)))
-    train_smiles, raw_train_targets = smiles[:-n_val], targets[:-n_val]
-    val_smiles, raw_val_targets = smiles[-n_val:], targets[-n_val:]
-    if len(train_smiles) == 0:
-        logger.error("Training split is empty after creating validation split")
-        return 1
+    train_indices, val_indices = deterministic_split_indices(
+        len(smiles), validation_fraction=validation_fraction, seed=seed
+    )
+    train_smiles, raw_train_targets = smiles[train_indices], targets[train_indices]
+    val_smiles, raw_val_targets = smiles[val_indices], targets[val_indices]
     target_scaler = fit_target_scaler(raw_train_targets.reshape(-1))
     train_targets = scale_targets(raw_train_targets.reshape(-1), target_scaler).reshape(-1, 1)
     val_targets = scale_targets(raw_val_targets.reshape(-1), target_scaler).reshape(-1, 1)
@@ -137,6 +222,8 @@ def train_model(
         num_workers=num_workers,
         collate_fn=collate_batch,
         drop_last=drop_last_train,
+        worker_init_fn=_seed_worker,
+        generator=torch.Generator().manual_seed(seed),
     )
     val_loader = DataLoader(
         val_ds,
@@ -168,6 +255,9 @@ def train_model(
             grid_size=svdkl_grid_size,
             grid_lower=svdkl_grid_lower,
             grid_upper=svdkl_grid_upper,
+            cholesky_jitter=svdkl_cholesky_jitter,
+            feature_transform=svdkl_feature_transform,
+            tanh_temperature=svdkl_tanh_temperature,
         )
     )
     model = ChempropSVDKLModel(mpnn, head, embedding_i=chemprop_config.embedding_i)
@@ -197,21 +287,34 @@ def train_model(
         final_lr=final_lr,
     )
 
+    training_started = time.monotonic()
+    best_val_nll = float("inf")
+    best_epoch = 0
+    best_state: dict[str, torch.Tensor] | None = None
+    epochs_without_improvement = 0
+    epochs_completed = 0
+    stop_reason = "max_epochs"
     for epoch in range(epochs):
+        epoch_started = time.monotonic()
         model.train()
         model.likelihood.train()
         train_losses: list[float] = []
+        gradient_norms: list[float] = []
         for batch in train_loader:
             batch = move_batch_to_device(batch, device)
             target = _batch_targets(batch, device)
             optimizer.zero_grad()
             loss = -mll(model(batch), target)
+            if not torch.isfinite(loss):
+                logger.error("Non-finite training loss at epoch %d", epoch + 1)
+                return 1
             loss.backward()
+            gradient_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip_val)
             optimizer.step()
             scheduler.step()
             train_losses.append(float(loss.detach().cpu()))
+            gradient_norms.append(float(gradient_norm.detach().cpu()))
 
-        # TODO: select and restore the best checkpoint using held-out predictive NLL.
         val_losses: list[float] = []
         model.eval()
         model.likelihood.eval()
@@ -221,28 +324,111 @@ def train_model(
                 target = _batch_targets(batch, device)
                 val_loss = -mll(model(batch), target)
                 val_losses.append(float(val_loss.detach().cpu()))
+        train_loss = float(np.mean(train_losses)) if train_losses else float("nan")
+        val_nll = float(np.mean(val_losses)) if val_losses else float("nan")
+        if not np.isfinite(val_nll):
+            logger.error("Non-finite validation NLL at epoch %d", epoch + 1)
+            return 1
+
+        improved = val_nll < best_val_nll - early_stopping_min_delta
+        if improved:
+            best_val_nll = val_nll
+            best_epoch = epoch + 1
+            best_state = {
+                name: value.detach().cpu().clone() for name, value in model.state_dict().items()
+            }
+            epochs_without_improvement = 0
+        else:
+            epochs_without_improvement += 1
+
+        epochs_completed = epoch + 1
+        elapsed = time.monotonic() - training_started
+        mean_epoch_seconds = elapsed / epochs_completed
+        remaining_epochs = max(0, epochs - epochs_completed)
+        eta_seconds = mean_epoch_seconds * remaining_epochs
+        current_lr = float(optimizer.param_groups[0]["lr"])
+        noise = float(model.likelihood.base_likelihood.noise.detach().mean().cpu())
         logger.info(
-            "Epoch %d/%d train_loss=%.4f val_loss=%.4f",
+            "Epoch %d/%d train_loss=%.4f val_nll=%.4f best_val_nll=%.4f "
+            "best_epoch=%d patience=%d/%d lr=%.3g grad_norm=%.3g noise=%.3g "
+            "raw_features=[%s,%s] gp_features=[%s,%s] epoch_s=%.1f "
+            "elapsed_s=%.1f eta_s=%.1f",
             epoch + 1,
             epochs,
-            float(np.mean(train_losses)) if train_losses else float("nan"),
-            float(np.mean(val_losses)) if val_losses else float("nan"),
+            train_loss,
+            val_nll,
+            best_val_nll,
+            best_epoch,
+            epochs_without_improvement,
+            early_stopping_patience,
+            current_lr,
+            float(np.mean(gradient_norms)) if gradient_norms else float("nan"),
+            noise,
+            _format_optional(model.head.last_raw_feature_min),
+            _format_optional(model.head.last_raw_feature_max),
+            _format_optional(model.head.last_transformed_feature_min),
+            _format_optional(model.head.last_transformed_feature_max),
+            time.monotonic() - epoch_started,
+            elapsed,
+            eta_seconds,
         )
+        if epochs_without_improvement >= early_stopping_patience:
+            stop_reason = "early_stopping"
+            logger.info(
+                "Early stopping after epoch %d; best epoch=%d val_nll=%.4f",
+                epochs_completed,
+                best_epoch,
+                best_val_nll,
+            )
+            break
+
+    if best_state is None:
+        logger.error("Training completed without a finite best checkpoint")
+        return 1
+    model.load_state_dict(best_state)
 
     checkpoint_dir = save_dir_path / "model_0"
     bin_path = checkpoint_dir / "pytorch_model.bin"
     model.cpu()
+    split_hash = hashlib.sha256(val_indices.astype(np.int64).tobytes()).hexdigest()
+    metadata = {
+        "train_rows": int(len(train_smiles)),
+        "val_rows": int(len(val_smiles)),
+        "validation_fraction": validation_fraction,
+        "validation_indices_sha256": split_hash,
+        "split_seed": seed,
+        "epochs_requested": epochs,
+        "epochs_completed": epochs_completed,
+        "best_epoch": best_epoch,
+        "best_val_nll": best_val_nll,
+        "stop_reason": stop_reason,
+        "early_stopping_patience": early_stopping_patience,
+        "early_stopping_min_delta": early_stopping_min_delta,
+        "gradient_clip_val": gradient_clip_val,
+        "precision": precision,
+        "seed": seed,
+        "target_mean": float(target_scaler.mean_[0]),
+        "target_scale": float(target_scaler.scale_[0]),
+        "batch_size": batch_size,
+        "num_workers": num_workers,
+        "optimizer": "Adam",
+        "chemprop_config": asdict(chemprop_config),
+        "svdkl_config": asdict(model.head.config),
+        "software": {
+            "chemprop": _package_version("chemprop"),
+            "gpytorch": _package_version("gpytorch"),
+            "torch": torch.__version__,
+        },
+    }
     save_chemprop_svdkl_checkpoint(
         bin_path,
         model=model,
         target_scaler=target_scaler,
         chemprop_config=chemprop_config,
-        metadata={
-            "train_rows": int(len(train_smiles)),
-            "val_rows": int(len(val_smiles)),
-            "epochs": int(epochs),
-            "seed": int(seed),
-        },
+        metadata=metadata,
+    )
+    (save_dir_path / "training_metadata.json").write_text(
+        json.dumps(metadata, indent=2) + "\n", encoding="utf-8"
     )
     logger.info("Model saved to %s", bin_path)
     return 0
@@ -302,9 +488,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--svdkl-grid-size", type=int, default=128)
     parser.add_argument("--svdkl-grid-lower", type=float, default=-10.0)
     parser.add_argument("--svdkl-grid-upper", type=float, default=10.0)
+    parser.add_argument("--svdkl-cholesky-jitter", type=float, default=1e-3)
+    parser.add_argument(
+        "--svdkl-feature-transform",
+        choices=("scale_to_bounds", "tanh"),
+        default="scale_to_bounds",
+    )
+    parser.add_argument("--svdkl-tanh-temperature", type=float, default=3.0)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--early-stopping-patience", type=int, default=5)
+    parser.add_argument("--early-stopping-patience", type=int, default=8)
     parser.add_argument("--early-stopping-min-delta", type=float, default=0.0)
+    parser.add_argument("--validation-fraction", type=float, default=0.1)
+    parser.add_argument("--gradient-clip-val", type=float, default=5.0)
+    parser.add_argument("--precision", choices=("32", "32-true"), default="32-true")
     return parser
 
 
@@ -338,7 +534,15 @@ def main(argv: list[str] | None = None) -> int:
         args.svdkl_grid_size,
         args.svdkl_grid_lower,
         args.svdkl_grid_upper,
+        args.svdkl_cholesky_jitter,
+        args.svdkl_feature_transform,
+        args.svdkl_tanh_temperature,
         args.seed,
+        args.early_stopping_patience,
+        args.early_stopping_min_delta,
+        args.validation_fraction,
+        args.gradient_clip_val,
+        args.precision,
     )
 
 

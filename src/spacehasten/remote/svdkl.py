@@ -41,6 +41,9 @@ class SVDKLConfig:
     grid_size: int = 128
     grid_lower: float = -10.0
     grid_upper: float = 10.0
+    cholesky_jitter: float = 1e-3
+    feature_transform: str = "scale_to_bounds"
+    tanh_temperature: float = 3.0
 
 
 @dataclass(frozen=True)
@@ -159,6 +162,14 @@ class SVDKLHead(gpytorch.Module if gpytorch else object):
 
     def __init__(self, config: SVDKLConfig) -> None:
         _require_torch_gpytorch()
+        if config.feature_transform not in {"scale_to_bounds", "tanh"}:
+            raise ValueError("feature_transform must be 'scale_to_bounds' or 'tanh'")
+        if config.tanh_temperature <= 0:
+            raise ValueError("tanh_temperature must be positive")
+        if config.cholesky_jitter <= 0:
+            raise ValueError("cholesky_jitter must be positive")
+        if config.grid_lower >= config.grid_upper:
+            raise ValueError("grid_lower must be smaller than grid_upper")
         super().__init__()
         self.config = config
         self.projection = torch.nn.Linear(config.input_dim, config.gp_dim)
@@ -172,12 +183,33 @@ class SVDKLHead(gpytorch.Module if gpytorch else object):
             config.grid_lower,
             config.grid_upper,
         )
+        self.last_raw_feature_min: Any | None = None
+        self.last_raw_feature_max: Any | None = None
+        self.last_transformed_feature_min: Any | None = None
+        self.last_transformed_feature_max: Any | None = None
 
     def forward(self, embeddings: Any) -> Any:
-        features = self.projection(embeddings.float())
-        scaled = self.scale_to_bounds(features)
-        scaled = scaled.transpose(-1, -2).unsqueeze(-1)
-        return self.gp_layer(scaled)
+        raw_features = self.projection(embeddings.float())
+        features = self.transform_features(raw_features)
+        self.last_raw_feature_min = raw_features.detach().min()
+        self.last_raw_feature_max = raw_features.detach().max()
+        self.last_transformed_feature_min = features.detach().min()
+        self.last_transformed_feature_max = features.detach().max()
+        gp_input = features.transpose(-1, -2).unsqueeze(-1)
+        config_jitter = float(self.config.cholesky_jitter)
+        with gpytorch.settings.cholesky_jitter(
+            float_value=config_jitter,
+            double_value=min(config_jitter, 1e-6),
+        ):
+            return self.gp_layer(gp_input)
+
+    def transform_features(self, raw_features: Any) -> Any:
+        """Map projected neural features into the configured GP grid."""
+        if self.config.feature_transform == "scale_to_bounds":
+            return self.scale_to_bounds(raw_features)
+        midpoint = 0.5 * (self.config.grid_lower + self.config.grid_upper)
+        half_range = 0.475 * (self.config.grid_upper - self.config.grid_lower)
+        return midpoint + half_range * torch.tanh(raw_features / self.config.tanh_temperature)
 
 
 class ChempropSVDKLModel(torch.nn.Module if torch else object):

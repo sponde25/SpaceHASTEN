@@ -112,16 +112,21 @@ def _build_predict_command(
     out_csv = predict_dir / "predicted_predict_${TASK_ID}.csv"
     parts: list[str] = [*command_prefix, str(in_csv), str(model_dir), str(out_csv)]
     parts += [
-        "--batch-size", str(g.pred_batch_size),
-        "--num-workers", str(g.pred_num_workers),
-        "--accelerator", g.pred_accelerator,
-        "--devices", g.pred_devices,
+        "--batch-size",
+        str(g.pred_batch_size),
+        "--num-workers",
+        str(g.pred_num_workers),
+        "--accelerator",
+        g.pred_accelerator,
+        "--devices",
+        g.pred_devices,
     ]
     cmd = " ".join(parts)
     return (
         f'echo "[task ${{TASK_ID}}] Predicting chunk ${{TASK_ID}}"\n'
-        f'export OMP_NUM_THREADS=1\n'
-        f'{cmd}\n'
+        f'export CUDA_VISIBLE_DEVICES=""\n'
+        f"export OMP_NUM_THREADS=1\n"
+        f"{cmd}\n"
         f'echo "[task ${{TASK_ID}}] Prediction done"'
     )
 
@@ -134,9 +139,7 @@ def _ingest_predictions(
     for i in range(1, n_chunks + 1):
         out_csv = predict_dir / _chunk_index_filename("predicted_predict", i)
         if not out_csv.exists():
-            raise FileNotFoundError(
-                f"missing prediction output for chunk {i}: {out_csv}"
-            )
+            raise FileNotFoundError(f"missing prediction output for chunk {i}: {out_csv}")
         df = pd.read_csv(out_csv)
         if "smilesid" not in df.columns or "docking_score" not in df.columns:
             raise ValueError(
@@ -162,9 +165,7 @@ def _ingest_predictions(
                     math.isfinite(value) and value >= 0
                     for value in (epistemic_std, aleatoric_std, total_std)
                 ):
-                    raise ValueError(
-                        f"{out_csv}: invalid uncertainty for {record['smilesid']}"
-                    )
+                    raise ValueError(f"{out_csv}: invalid uncertainty for {record['smilesid']}")
             else:
                 epistemic_std = aleatoric_std = total_std = None
             rows.append(
@@ -222,9 +223,7 @@ def predict_undocked(
     bin_path = db.load_model_path(model_version, workdir)
     model_dir = bin_path.parent.parent  # <model_dir>/model_0/pytorch_model.bin
     if not (model_dir / "model_0" / "pytorch_model.bin").exists():
-        raise RuntimeError(
-            f"model resolution mismatch: {bin_path} not under {model_dir}/model_0/"
-        )
+        raise RuntimeError(f"model resolution mismatch: {bin_path} not under {model_dir}/model_0/")
 
     if chunk_size is None:
         chunk_size = settings.general.pred_chunk_size
@@ -252,7 +251,9 @@ def predict_undocked(
     ]
 
     command = _build_predict_command(
-        predict_dir, model_dir, settings,
+        predict_dir,
+        model_dir,
+        settings,
         predict_command_prefix
         if predict_command_prefix is not None
         else _default_predict_command(settings),
@@ -264,7 +265,6 @@ def predict_undocked(
         array_size=n_chunks,
         max_concurrent=n_chunks,
         cpus_per_task=int(settings.general.cpu_count_predict or 1),
-        gpus=1,
         env_setup=env_setup,
         command_template=command,
     )
@@ -278,6 +278,7 @@ def predict_undocked(
     result = scheduler.wait(handle)
     if not result.success:
         from spacehasten.scheduler.diagnostics import tail_logs
+
         raise RuntimeError(
             f"prediction job {handle.job_id} failed; failed task indices: "
             f"{result.failed_indices}\n"

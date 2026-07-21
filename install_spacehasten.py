@@ -15,7 +15,6 @@ directory and the active Python environment.
 
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
 import sys
@@ -59,9 +58,7 @@ DEFAULTS = {
 def _ask_for_file(default: str, desc: str | None = None) -> str:
     if desc is None:
         desc = default.split("/")[-1]
-    answer = input(
-        f"Please enter the path to {desc} executable [default:{default}]: "
-    ).strip()
+    answer = input(f"Please enter the path to {desc} executable [default:{default}]: ").strip()
     if not answer:
         answer = default
     if not Path(answer).exists():
@@ -71,9 +68,7 @@ def _ask_for_file(default: str, desc: str | None = None) -> str:
 
 
 def _ask_for_dir(default: str, desc: str, exist: bool = True) -> str:
-    answer = input(
-        f"Please enter the path to {desc} directory [default:{default}]: "
-    ).strip()
+    answer = input(f"Please enter the path to {desc} directory [default:{default}]: ").strip()
     if not answer:
         answer = default
     if exist and not Path(answer).is_dir():
@@ -129,17 +124,26 @@ def _write_ini(path: Path, *, answers: dict[str, str]) -> None:
     lines.append("TRAIN_INIT_LR = 1e-4")
     lines.append("TRAIN_MAX_LR = 1e-3")
     lines.append("TRAIN_FINAL_LR = 1e-4")
-    lines.append("TRAIN_EARLY_STOPPING_PATIENCE = 5")
+    lines.append("TRAIN_EARLY_STOPPING_PATIENCE = 8")
     lines.append("TRAIN_EARLY_STOPPING_MIN_DELTA = 0.0")
+    lines.append("TRAIN_VALIDATION_FRACTION = 0.1")
+    lines.append("TRAIN_GRADIENT_CLIP_VAL = 5.0")
+    lines.append("TRAIN_PRECISION = 32-true")
+    lines.append("TRAIN_SVDKL_GP_DIM = 16")
+    lines.append("TRAIN_SVDKL_GRID_SIZE = 64")
+    lines.append("TRAIN_SVDKL_GRID_LOWER = -10.0")
+    lines.append("TRAIN_SVDKL_GRID_UPPER = 10.0")
+    lines.append("TRAIN_SVDKL_CHOLESKY_JITTER = 0.001")
+    lines.append("TRAIN_SVDKL_FEATURE_TRANSFORM = tanh")
+    lines.append("TRAIN_SVDKL_TANH_TEMPERATURE = 3.0")
+    lines.append("TRAIN_SEED = 42")
     lines.append("PRED_BATCH_SIZE = 32")
     lines.append("PRED_NUM_WORKERS = 0")
     lines.append("PRED_ACCELERATOR = cpu")
     lines.append("PRED_DEVICES = 1")
     lines.append("PRED_CHUNK_SIZE = 12345")
     if a["schrodinger_feature_flags"]:
-        lines.append(
-            f"SCHRODINGER_FEATURE_FLAGS = {a['schrodinger_feature_flags']}"
-        )
+        lines.append(f"SCHRODINGER_FEATURE_FLAGS = {a['schrodinger_feature_flags']}")
     lines.append("")
     lines.append("[Paths]")
     lines.append(f"EXE_SPACELIGHT_DEFAULT = {a['spacelight']}")
@@ -187,8 +191,7 @@ def _write_ini(path: Path, *, answers: dict[str, str]) -> None:
 
 
 def _pip_install_package() -> None:
-    print("\nInstalling the spacehasten package into the active Python "
-          "environment...")
+    print("\nInstalling the spacehasten package into the active Python environment...")
     cmd = [sys.executable, "-m", "pip", "install", str(REPO_ROOT)]
     print("  $", " ".join(cmd))
     rc = subprocess.run(cmd).returncode
@@ -199,12 +202,13 @@ def _pip_install_package() -> None:
 
 def main() -> None:
     _print_banner()
-    print("This installer writes a site config (`spacehasten.ini`) to a "
-          "directory of your choice, copies the verify fixtures, and "
-          "installs the `spacehasten` Python package into the active "
-          "Python environment via `pip install`.\n")
-    print("NOTE: the install directory must be visible to all compute "
-          "nodes (NFS).")
+    print(
+        "This installer writes a site config (`spacehasten.ini`) to a "
+        "directory of your choice, copies the verify fixtures, and "
+        "installs the `spacehasten` Python package into the active "
+        "Python environment via `pip install`.\n"
+    )
+    print("NOTE: the install directory must be visible to all compute nodes (NFS).")
     print("NOTE: SLURM is the default scheduler.\n")
 
     install_dir = _ask_for_dir(
@@ -226,18 +230,10 @@ def main() -> None:
     answers["ftrees"] = _ask_for_file(DEFAULTS["ftrees"])
     answers["spaces_dir"] = _ask_for_dir(DEFAULTS["spaces_dir"], "BiosolveIT spaces")
     answers["default_space"] = _ask_for_file(DEFAULTS["default_space"], "default space")
-    answers["default_seeds"] = _ask_for_file(
-        DEFAULTS["default_seeds"], "default enumerated seeds"
-    )
-    answers["seeds_dir"] = _ask_for_dir(
-        DEFAULTS["seeds_dir"], "Directory for enumerated seeds"
-    )
-    answers["scratch"] = _ask_for_dir(
-        DEFAULTS["scratch"], "scratch (local fast disk)"
-    )
-    answers["prepare_anaconda"] = _ask(
-        "Anaconda3 activation command", DEFAULTS["prepare_anaconda"]
-    )
+    answers["default_seeds"] = _ask_for_file(DEFAULTS["default_seeds"], "default enumerated seeds")
+    answers["seeds_dir"] = _ask_for_dir(DEFAULTS["seeds_dir"], "Directory for enumerated seeds")
+    answers["scratch"] = _ask_for_dir(DEFAULTS["scratch"], "scratch (local fast disk)")
+    answers["prepare_anaconda"] = _ask("Anaconda3 activation command", DEFAULTS["prepare_anaconda"])
     answers["activate_chemprop"] = _ask(
         "Anaconda3 chemprop activation command", DEFAULTS["activate_chemprop"]
     )
@@ -246,14 +242,11 @@ def main() -> None:
         DEFAULTS["activate_clustering"],
     )
     answers["gpu_exclusive"] = _ask(
-        "Type 1 if you want node exclusivity for training/clustering, "
-        "0 otherwise",
+        "Type 1 if you want node exclusivity for training/clustering, 0 otherwise",
         DEFAULTS["gpu_exclusive"],
     )
     answers["slurm_queue"] = _ask("SLURM partition name", DEFAULTS["slurm_queue"])
-    answers["slurm_gpu_parameter"] = _ask(
-        "SLURM GPU parameter", DEFAULTS["slurm_gpu_parameter"]
-    )
+    answers["slurm_gpu_parameter"] = _ask("SLURM GPU parameter", DEFAULTS["slurm_gpu_parameter"])
     answers["slurm_cpu_clustering"] = _ask(
         "Number of cores for clustering", DEFAULTS["slurm_cpu_clustering"]
     )
@@ -278,8 +271,10 @@ def main() -> None:
     for fixture in VERIFY_FIXTURES:
         src = REPO_ROOT / fixture
         if not src.exists():
-            print(f"  WARNING: missing verify fixture {src}; verify --fixtures-dir "
-                  "will need an explicit path.")
+            print(
+                f"  WARNING: missing verify fixture {src}; verify --fixtures-dir "
+                "will need an explicit path."
+            )
             continue
         dst = install_path / fixture
         if src.resolve() == dst.resolve():
@@ -297,19 +292,21 @@ def main() -> None:
     print(f"Install dir:    {install_path}")
     print()
     print("Next steps:")
-    print(f"  1. Verify the install on the cluster:")
-    print(f"       spacehasten verify \\")
+    print("  1. Verify the install on the cluster:")
+    print("       spacehasten verify \\")
     print(f"           --config {ini_path} \\")
     print(f"           --fixtures-dir {install_path}")
-    print(f"  2. Start a screening run, e.g.:")
+    print("  2. Start a screening run, e.g.:")
     print(f"       spacehasten --config {ini_path} \\")
-    print(f"           --db /data/$USER/SPACEHASTEN/myrun/myrun.dbsh \\")
-    print(f"           import-seeds --smi seeds.smi \\")
+    print("           --db /data/$USER/SPACEHASTEN/myrun/myrun.dbsh \\")
+    print("           import-seeds --smi seeds.smi \\")
     print(f"               --dock-params {install_path}/test_dock.in \\")
     print(f"               --dock-grid   {install_path}/grid-test_dock.zip")
     print()
-    print(f"The legacy Tk GUI is available for one release as the "
-          "`spacehasten-legacy-gui` console script.")
+    print(
+        "The legacy Tk GUI is available for one release as the "
+        "`spacehasten-legacy-gui` console script."
+    )
     print("This test should take around 15-30 minutes to run.")
 
 

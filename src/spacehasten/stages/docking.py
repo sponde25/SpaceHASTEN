@@ -21,16 +21,23 @@ Layout (rooted in the new single-root workspace, replacing
 
 from __future__ import annotations
 
+import csv
 import logging
 import os
 import random
 import shutil
 import subprocess
+from collections import Counter
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Final, Literal
+from typing import Final, Literal, cast
 
 from spacehasten.config.settings import Settings
+from spacehasten.core.acquisition import (
+    AcquisitionSelection,
+    DockAcquisition,
+    select_penalized_batch,
+)
 from spacehasten.core.db import Database
 from spacehasten.scheduler.base import ArrayJob, Scheduler
 from spacehasten.tools.glide import parse_glide_csv, write_glide_in, write_phase_inp
@@ -41,11 +48,11 @@ logger = logging.getLogger(__name__)
 
 #: Maximum SMILES per docking task (cf. legacy ``cfg.DOCKING_CHUNK``).
 DOCKING_CHUNK: Final[int] = 1000
+PENALTY_CLUSTER_SIMILARITY: Final[float] = 0.4
+DockStrategy = Literal["greedy", "clustering", "lcb", "ei"]
 
 
-def _chunked(
-    rows: Sequence[tuple[str, int]], chunk_size: int
-) -> list[list[tuple[str, int]]]:
+def _chunked(rows: Sequence[tuple[str, int]], chunk_size: int) -> list[list[tuple[str, int]]]:
     if chunk_size < 1:
         raise ValueError(f"chunk_size must be >= 1, got {chunk_size}")
     return [list(rows[i : i + chunk_size]) for i in range(0, len(rows), chunk_size)]
@@ -56,6 +63,64 @@ def _write_chunk_smi(path: Path, rows: Sequence[tuple[str, int]]) -> None:
     with path.open("wt", encoding="utf-8") as w:
         for smiles, sid in rows:
             w.write(f"{smiles.strip()} {sid}\n")
+
+
+def _write_acquisition_csv(
+    path: Path,
+    selections: Sequence[AcquisitionSelection],
+    *,
+    method: DockAcquisition,
+    lcb_beta: float,
+    ei_hit_threshold: float | None,
+    ei_xi: float,
+    cluster_lambda: float,
+) -> None:
+    with path.open("wt", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(
+            [
+                "rank",
+                "method",
+                "spacehastenid",
+                "smiles",
+                "model_version",
+                "pred_score",
+                "epistemic_std",
+                "base_score",
+                "clusterid",
+                "cluster_count_before",
+                "cluster_penalty",
+                "penalized_score",
+                "lcb_beta",
+                "ei_hit_threshold",
+                "ei_xi",
+                "cluster_lambda",
+                "cluster_similarity_threshold",
+            ]
+        )
+        for rank, selection in enumerate(selections, start=1):
+            candidate = selection.candidate
+            writer.writerow(
+                [
+                    rank,
+                    method,
+                    candidate.spacehastenid,
+                    candidate.smiles,
+                    candidate.model_version,
+                    candidate.pred_score,
+                    candidate.epistemic_std,
+                    selection.base_score,
+                    candidate.clusterid if candidate.clusterid is not None else "",
+                    selection.cluster_count_before,
+                    selection.cluster_penalty,
+                    selection.penalized_score,
+                    lcb_beta,
+                    ei_hit_threshold if ei_hit_threshold is not None else "",
+                    ei_xi,
+                    cluster_lambda,
+                    PENALTY_CLUSTER_SIMILARITY if cluster_lambda > 0 else "",
+                ]
+            )
 
 
 def _build_dock_command_body(settings: Settings, dock_dir: Path) -> str:
@@ -71,23 +136,23 @@ def _build_dock_command_body(settings: Settings, dock_dir: Path) -> str:
     scratch_root = settings.paths.scratch_default or "/tmp"
     feature_flags = settings.general.schrodinger_feature_flags
     iter_token = dock_dir.name  # e.g. "iter3"
+    run_token = dock_dir.parent.parent.name
     user = os.environ.get("USER", "spacehasten")
-    scratch_path = (
-        f"{scratch_root}/{user}/dock_{iter_token}_chunk_${{TASK_ID}}"
-    )
+    scratch_path = f"{scratch_root}/{user}/dock_{run_token}_{iter_token}_chunk_${{TASK_ID}}"
     lines: list[str] = [
+        "set -euo pipefail",
         'echo "[task ${TASK_ID}] Starting docking chunk_${TASK_ID}"',
-        'check_and_start_jobserver() {',
-        '    status=$($SCHRODINGER/jsc local-server-status 2>&1)',
-        '    if echo \"$status\" | grep -q \"STOPPED\"; then',
-        '        echo \"Job server is not running. Starting it...\"',
-        '        $SCHRODINGER/jsc local-server-start',
-        '    else',
-        '        echo \"Job server is already running.\"',
-        '    fi',
-        '}',
-        'check_and_start_jobserver',
-        'curdir=$(pwd)',
+        "check_and_start_jobserver() {",
+        "    status=$($SCHRODINGER/jsc local-server-status 2>&1)",
+        '    if echo "$status" | grep -q "STOPPED"; then',
+        '        echo "Job server is not running. Starting it..."',
+        "        $SCHRODINGER/jsc local-server-start",
+        "    else",
+        '        echo "Job server is already running."',
+        "    fi",
+        "}",
+        "check_and_start_jobserver",
+        "curdir=$(pwd)",
         f'scratch_dir="{scratch_path}"',
         'rm -fr "$scratch_dir"',
         'mkdir -p "$scratch_dir"',
@@ -101,17 +166,17 @@ def _build_dock_command_body(settings: Settings, dock_dir: Path) -> str:
         lines.append(f'export SCHRODINGER_FEATURE_FLAGS="{feature_flags}"')
     lines += [
         'echo "[task ${TASK_ID}] Building phase database"',
-        '$SCHRODINGER/pipeline -prog phase_db chunk_${TASK_ID}.inp'
-        ' -OVERWRITE -WAIT -NOJOBID -NJOBS 1',
+        "$SCHRODINGER/pipeline -prog phase_db chunk_${TASK_ID}.inp"
+        " -OVERWRITE -WAIT -NOJOBID -NJOBS 1",
         'echo "[task ${TASK_ID}] Exporting structures"',
-        '$SCHRODINGER/phase_database $(pwd)/chunk_${TASK_ID}.phdb export'
-        ' -omae $(pwd)/chunk_${TASK_ID} -get 1 -limit 99999999 -WAIT',
-        'rm -fr $(pwd)/chunk_${TASK_ID}.phdb',
+        "$SCHRODINGER/phase_database $(pwd)/chunk_${TASK_ID}.phdb export"
+        " -omae $(pwd)/chunk_${TASK_ID} -get 1 -limit 99999999 -WAIT",
+        "rm -fr $(pwd)/chunk_${TASK_ID}.phdb",
         'echo "[task ${TASK_ID}] Running Glide docking"',
-        '$SCHRODINGER/glide -new -OVERWRITE -WAIT -NJOBS 1'
-        ' -HOST localhost:1 glide_chunk_${TASK_ID}.in',
+        "$SCHRODINGER/glide -new -OVERWRITE -WAIT -NJOBS 1"
+        " -HOST localhost:1 glide_chunk_${TASK_ID}.in",
         'echo "[task ${TASK_ID}] Packaging results"',
-        'rm -f glide_grid.zip',
+        "rm -f glide_grid.zip",
         'mkdir -p "$curdir/results"',
         'tar -czf "$curdir/results/results-chunk_${TASK_ID}.tar.gz" .',
         'cd "$curdir"',
@@ -128,7 +193,9 @@ def _extract_results(dock_dir: Path, scratch_root: str) -> Path:
     drive (``/wrk``) instead of NFS, and cleans up after ingestion.
     """
     user = os.environ.get("USER", "spacehasten")
-    extract_root = Path(scratch_root) / user / f"COLLECTdock_{dock_dir.parent.parent.name}_{dock_dir.name}"
+    extract_root = (
+        Path(scratch_root) / user / f"COLLECTdock_{dock_dir.parent.parent.name}_{dock_dir.name}"
+    )
     if extract_root.exists():
         shutil.rmtree(extract_root)
     extract_root.mkdir(parents=True, exist_ok=True)
@@ -136,8 +203,7 @@ def _extract_results(dock_dir: Path, scratch_root: str) -> Path:
     tars = sorted((dock_dir / "results").glob("results-chunk_*.tar.gz"))
     if not tars:
         raise FileNotFoundError(
-            f"no results-chunk_*.tar.gz under {dock_dir}; the docking job"
-            " produced no output"
+            f"no results-chunk_*.tar.gz under {dock_dir}; the docking job produced no output"
         )
     # Parallel extraction via xargs, like the legacy multiprocessing approach.
     tar_list = "\n".join(str(t) for t in tars)
@@ -154,9 +220,7 @@ def _ingest_dock_results(extract_root: Path) -> dict[str, float]:
     results: dict[str, float] = {}
     csvs = list(extract_root.rglob("glide_*.csv"))
     if not csvs:
-        raise FileNotFoundError(
-            f"no glide_*.csv under {extract_root}; cannot ingest dock scores"
-        )
+        raise FileNotFoundError(f"no glide_*.csv under {extract_root}; cannot ingest dock scores")
     for csv_path in csvs:
         if csv_path.name.endswith("_skip.csv"):
             continue
@@ -174,8 +238,12 @@ def dock(
     settings: Settings,
     *,
     top_n: int,
-    strategy: Literal["greedy", "clustering"],
+    strategy: DockStrategy,
     cpus: int,
+    lcb_beta: float = 1.0,
+    ei_hit_threshold: float | None = None,
+    ei_xi: float = 0.0,
+    cluster_lambda: float = 0.0,
     dock_command_template: str | None = None,
     seed: int | None = None,
 ) -> int:
@@ -190,11 +258,9 @@ def dock(
     ? WHERE spacehastenid = ?`` in a single transaction.
 
     :param top_n: number of candidates to acquire from the DB.
-    :param strategy: acquisition strategy passed straight to
-        :meth:`Database.select_compounds_to_dock`. ``clustering`` requires
-        cluster assignments to already exist (run ``spacehasten cluster``
-        first, or use ``screening-cycle --strategy clustering``, which
-        clusters automatically before each round).
+    :param strategy: docking acquisition method. ``lcb`` and ``ei`` use
+        version-matched epistemic uncertainty and optionally apply a dynamic
+        within-batch cluster penalty.
     :param cpus: maximum concurrent docking tasks (also the chunk-count
         cap — chunks scale down toward the CPU count when N is small).
     :param dock_command_template: per-task bash body. If ``None``, the
@@ -217,11 +283,30 @@ def dock(
             " `screening-cycle --strategy clustering`, which clusters automatically)"
         )
 
-    rows = db.select_compounds_to_dock(strategy, top_n)
+    selections: list[AcquisitionSelection] = []
+    if strategy in {"lcb", "ei"}:
+        method = cast(DockAcquisition, strategy)
+        candidates = db.select_uncertainty_docking_candidates()
+        selections = select_penalized_batch(
+            candidates,
+            method=method,
+            batch_size=top_n,
+            cluster_lambda=cluster_lambda,
+            beta=lcb_beta,
+            hit_threshold=ei_hit_threshold,
+            xi=ei_xi,
+        )
+        rows = [
+            (selection.candidate.smiles, selection.candidate.spacehastenid)
+            for selection in selections
+        ]
+    elif strategy in {"greedy", "clustering"}:
+        rows = db.select_compounds_to_dock(strategy, top_n)
+    else:
+        raise ValueError(f"unknown docking acquisition strategy: {strategy!r}")
     if not rows:
         raise ValueError(
-            f"no compounds match the {strategy!r} acquisition query;"
-            " run prediction first"
+            f"no compounds match the {strategy!r} acquisition query; run prediction first"
         )
 
     rng = random.Random(seed)
@@ -238,9 +323,32 @@ def dock(
     iteration = 0 if latest is None else latest + 1
     dock_dir = workdir.docking_dir(iteration)
     dock_dir.mkdir(parents=True, exist_ok=True)
+    if selections:
+        _write_acquisition_csv(
+            dock_dir / "acquisition.csv",
+            selections,
+            method=cast(DockAcquisition, strategy),
+            lcb_beta=lcb_beta,
+            ei_hit_threshold=ei_hit_threshold,
+            ei_xi=ei_xi,
+            cluster_lambda=cluster_lambda,
+        )
+        selected_clusters = Counter(selection.candidate.clusterid for selection in selections)
+        logger.info(
+            "%s acquisition selected %d compounds across %d clusters "
+            "(largest cluster contribution=%d)",
+            strategy.upper(),
+            len(selections),
+            len(selected_clusters),
+            max(selected_clusters.values()),
+        )
     logger.info(
         "Docking iter%d: %d compounds, %d chunks of <=%d (cpus=%d)",
-        iteration, len(shuffled), n_chunks, chunk_size, cpus,
+        iteration,
+        len(shuffled),
+        n_chunks,
+        chunk_size,
+        cpus,
     )
 
     # Extract the grid + load the dock_param template once.
@@ -282,6 +390,7 @@ def dock(
     result = scheduler.wait(handle)
     if not result.success:
         from spacehasten.scheduler.diagnostics import tail_logs
+
         raise RuntimeError(
             f"docking job {handle.job_id} failed; failed task indices: "
             f"{result.failed_indices}\n"
@@ -292,9 +401,7 @@ def dock(
     title_to_score = _ingest_dock_results(extract_root)
     shutil.rmtree(extract_root, ignore_errors=True)
     if not title_to_score:
-        raise RuntimeError(
-            f"docking iter{iteration}: no scores parsed from {extract_root}"
-        )
+        raise RuntimeError(f"docking iter{iteration}: no scores parsed from {extract_root}")
 
     update_rows: list[tuple[float, int, int]] = []
     for title, score in title_to_score.items():
@@ -305,16 +412,17 @@ def dock(
             continue
         update_rows.append((float(score), iteration, sid))
     if not update_rows:
-        raise RuntimeError(
-            f"docking iter{iteration}: no integer titles in result CSVs"
-        )
+        raise RuntimeError(f"docking iter{iteration}: no integer titles in result CSVs")
 
     db.apply_dock_scores(update_rows)
     db.commit()
-    logger.info(
-        "Updated dock_score for %d rows (iter=%d)", len(update_rows), iteration
-    )
+    logger.info("Updated dock_score for %d rows (iter=%d)", len(update_rows), iteration)
     return iteration
 
 
-__all__ = ["DOCKING_CHUNK", "dock"]
+__all__ = [
+    "DOCKING_CHUNK",
+    "PENALTY_CLUSTER_SIMILARITY",
+    "DockStrategy",
+    "dock",
+]

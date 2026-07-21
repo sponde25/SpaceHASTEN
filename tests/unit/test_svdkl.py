@@ -72,6 +72,51 @@ def test_svdkl_head_trains_one_step_and_predicts() -> None:
     )
 
 
+@requires_gpytorch
+def test_tanh_feature_transform_is_bounded_and_differentiable() -> None:
+    import torch
+
+    from spacehasten.remote.svdkl import SVDKLConfig, SVDKLHead
+
+    head = SVDKLHead(
+        SVDKLConfig(
+            input_dim=3,
+            gp_dim=2,
+            grid_lower=-10.0,
+            grid_upper=10.0,
+            feature_transform="tanh",
+            tanh_temperature=3.0,
+            cholesky_jitter=1e-3,
+        )
+    )
+    raw_features = torch.tensor([[-100.0, -3.0], [3.0, 100.0]], requires_grad=True)
+    transformed = head.transform_features(raw_features)
+
+    assert torch.all(transformed >= -9.5)
+    assert torch.all(transformed <= 9.5)
+    transformed.sum().backward()
+    assert raw_features.grad is not None
+    assert torch.isfinite(raw_features.grad).all()
+
+
+@requires_chemprop_svdkl
+def test_deterministic_random_split() -> None:
+    import numpy as np
+
+    from spacehasten.remote.train import deterministic_split_indices
+
+    first_train, first_val = deterministic_split_indices(100, validation_fraction=0.1, seed=42)
+    second_train, second_val = deterministic_split_indices(100, validation_fraction=0.1, seed=42)
+    other_train, other_val = deterministic_split_indices(100, validation_fraction=0.1, seed=43)
+
+    assert np.array_equal(first_train, second_train)
+    assert np.array_equal(first_val, second_val)
+    assert len(first_train) == 90
+    assert len(first_val) == 10
+    assert not np.array_equal(first_val, other_val)
+    assert not np.array_equal(first_train, other_train)
+
+
 @requires_chemprop_svdkl
 def test_actual_chemprop_wrapper_uses_encoding() -> None:
     import torch
@@ -288,7 +333,7 @@ def test_remote_train_predict_roundtrip_writes_uncertainty(tmp_path: Path) -> No
         str(train_csv),
         str(model_dir),
         batch_size=6,
-        epochs=2,
+        epochs=3,
         num_workers=0,
         devices="1",
         mp_hidden_size=16,
@@ -304,14 +349,32 @@ def test_remote_train_predict_roundtrip_writes_uncertainty(tmp_path: Path) -> No
         final_lr=1e-4,
         svdkl_gp_dim=2,
         svdkl_grid_size=16,
-        seed=0,
+        svdkl_cholesky_jitter=1e-3,
+        svdkl_feature_transform="tanh",
+        svdkl_tanh_temperature=3.0,
+        seed=42,
+        early_stopping_patience=1,
+        early_stopping_min_delta=1e6,
+        validation_fraction=0.1,
+        gradient_clip_val=5.0,
+        precision="32-true",
     )
     assert train_rc == 0
     checkpoint_path = model_dir / "model_0" / "pytorch_model.bin"
     assert checkpoint_path.exists()
-    _, target_scaler, _ = load_chemprop_svdkl_checkpoint(checkpoint_path)
-    expected_train_mean = _example_rows(24).iloc[:22]["docking_score"].mean()
+    loaded_model, target_scaler, metadata = load_chemprop_svdkl_checkpoint(checkpoint_path)
+    from spacehasten.remote.train import deterministic_split_indices
+
+    train_indices, _ = deterministic_split_indices(24, validation_fraction=0.1, seed=42)
+    expected_train_mean = _example_rows(24).iloc[train_indices]["docking_score"].mean()
     assert float(target_scaler.mean_[0]) == pytest.approx(expected_train_mean)
+    assert loaded_model.head.config.feature_transform == "tanh"
+    assert loaded_model.head.config.tanh_temperature == pytest.approx(3.0)
+    assert loaded_model.head.config.cholesky_jitter == pytest.approx(1e-3)
+    assert metadata["stop_reason"] == "early_stopping"
+    assert metadata["best_epoch"] == 1
+    assert metadata["epochs_completed"] == 2
+    assert (model_dir / "training_metadata.json").exists()
 
     pred_rc = predict(
         str(pred_csv),
@@ -414,10 +477,7 @@ def _build_prediction_loader(df: Any, batch_size: int) -> Any:
     from chemprop import data, featurizers
 
     featurizer = featurizers.SimpleMoleculeMolGraphFeaturizer()
-    datapoints = [
-        data.MoleculeDatapoint.from_smi(smi=smi)
-        for smi in df["smiles"].astype(str)
-    ]
+    datapoints = [data.MoleculeDatapoint.from_smi(smi=smi) for smi in df["smiles"].astype(str)]
     dataset = data.MoleculeDataset(datapoints, featurizer)
     return data.build_dataloader(
         dataset,
@@ -454,9 +514,7 @@ def _build_chemprop_svdkl_model(seed: int, ffn_hidden_size: int = 16) -> Any:
         final_lr=1e-4,
     )
     mpnn = build_chemprop_mpnn(config)
-    head = SVDKLHead(
-        SVDKLConfig(input_dim=ffn_hidden_size, gp_dim=2, grid_size=16)
-    )
+    head = SVDKLHead(SVDKLConfig(input_dim=ffn_hidden_size, gp_dim=2, grid_size=16))
     return ChempropSVDKLModel(mpnn, head, embedding_i=-1)
 
 

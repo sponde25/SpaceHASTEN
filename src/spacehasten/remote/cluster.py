@@ -14,10 +14,10 @@ Pipeline (matches sec_clustering.sh and §1 of CODEBASE_REFERENCE.md):
    (plain text or gzip; auto-detected by suffix ``.gz``).
 2. Compute Morgan-2 1024-bit fingerprints for every compound.
 3. Build an FPSim2 ``fp.h5`` index over the same input.
-4. Pick cluster centroids with RDKit ``LeaderPicker`` at distance 0.7
-   (= similarity 0.3).
-5. For each centroid, similarity-search the FPSim2 index at
-   tanimoto >= 0.3.
+4. Pick cluster centroids with RDKit ``LeaderPicker`` at the configured
+   Tanimoto distance (default similarity 0.3).
+5. For each centroid, similarity-search the FPSim2 index at the same
+   configured Tanimoto threshold.
 6. Assign every compound to the centroid that gave it the highest
    similarity (LeaderPicker guarantees coverage at the chosen threshold).
 7. Write ``clustering.csv`` (``spacehastenid,clusterid``) in the
@@ -42,11 +42,10 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# Algorithm parameters, identical to sec_clustering.sh.
+# Fingerprint parameters, identical to sec_clustering.sh.
 _MORGAN_RADIUS = 2
 _MORGAN_FP_SIZE = 1024
-_LEADER_DISTANCE_THRESHOLD = 1.0 - 0.3  # 0.7
-_SEARCH_SIMILARITY_THRESHOLD = 0.30
+_DEFAULT_SIMILARITY_THRESHOLD = 0.3
 
 
 # --------------------------------------------------------------------------- #
@@ -85,9 +84,7 @@ def _fp_worker(smiles: str):  # type: ignore[no-untyped-def]
     from rdkit import Chem
     from rdkit.Chem import rdFingerprintGenerator
 
-    gen = rdFingerprintGenerator.GetMorganGenerator(
-        radius=_MORGAN_RADIUS, fpSize=_MORGAN_FP_SIZE
-    )
+    gen = rdFingerprintGenerator.GetMorganGenerator(radius=_MORGAN_RADIUS, fpSize=_MORGAN_FP_SIZE)
     mol = Chem.MolFromSmiles(smiles)
     if mol is None:
         raise ValueError(f"RDKit failed to parse SMILES: {smiles!r}")
@@ -108,14 +105,24 @@ def _generate_fingerprints(smiles_list: list[str], processes: int) -> list:  # t
 # --------------------------------------------------------------------------- #
 
 
-def run_clustering(input_smi: Path, output_csv: Path, *, processes: int = 1) -> int:
+def run_clustering(
+    input_smi: Path,
+    output_csv: Path,
+    *,
+    processes: int = 1,
+    similarity_threshold: float = _DEFAULT_SIMILARITY_THRESHOLD,
+) -> int:
     """Run the full sphere-exclusion clustering pipeline.
 
     :param input_smi: ``smiles spacehastenid`` text file (plain or gzip).
     :param output_csv: destination ``clustering.csv``.
     :param processes: worker count for the Morgan fingerprint pass.
+    :param similarity_threshold: minimum within-cluster Tanimoto similarity.
     :returns: number of clusters discovered.
     """
+    if not 0.0 < similarity_threshold <= 1.0:
+        raise ValueError("similarity_threshold must be in (0, 1]")
+    leader_distance_threshold = 1.0 - similarity_threshold
     # Local imports keep module import cheap on machines without RDKit/FPSim2.
     from rdkit.SimDivFilters import rdSimDivPickers
 
@@ -142,19 +149,17 @@ def run_clustering(input_smi: Path, output_csv: Path, *, processes: int = 1) -> 
     # Step 4: identify cluster centroids.
     logger.info(
         "Picking cluster centroids (LeaderPicker, distance=%.2f)...",
-        _LEADER_DISTANCE_THRESHOLD,
+        leader_distance_threshold,
     )
     picker = rdSimDivPickers.LeaderPicker()
     centroid_indices = list(
-        picker.LazyBitVectorPick(fingerprints, len(fingerprints), _LEADER_DISTANCE_THRESHOLD)
+        picker.LazyBitVectorPick(fingerprints, len(fingerprints), leader_distance_threshold)
     )
     num_clusters = len(centroid_indices)
     logger.info("Identified %d cluster centroids", num_clusters)
 
     # Step 5+6: assign each compound to the centroid with highest similarity.
-    logger.info(
-        "Searching FPSim2 index (similarity >= %.2f)...", _SEARCH_SIMILARITY_THRESHOLD
-    )
+    logger.info("Searching FPSim2 index (similarity >= %.2f)...", similarity_threshold)
     centroid_ids = [spacehastenids[idx] for idx in centroid_indices]
     centroid_smiles = [smiles_list[idx] for idx in centroid_indices]
     cluster_of: dict[int, int] = {}
@@ -165,7 +170,7 @@ def run_clustering(input_smi: Path, output_csv: Path, *, processes: int = 1) -> 
     for cluster_id, query_smiles in zip(centroid_ids, centroid_smiles, strict=True):
         results = fpe.similarity(
             query_smiles,
-            threshold=_SEARCH_SIMILARITY_THRESHOLD,
+            threshold=similarity_threshold,
             metric="tanimoto",
             n_workers=1,
         )
@@ -238,17 +243,30 @@ def main(argv: list[str] | None = None) -> int:
         help="worker count for Morgan fingerprint generation",
     )
     parser.add_argument(
+        "--similarity-threshold",
+        type=float,
+        default=_DEFAULT_SIMILARITY_THRESHOLD,
+        help="minimum within-cluster Tanimoto similarity (default: 0.3)",
+    )
+    parser.add_argument(
         "--log-level",
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
     )
     args = parser.parse_args(argv)
+    if not 0.0 < args.similarity_threshold <= 1.0:
+        parser.error("--similarity-threshold must be in (0, 1]")
 
     logging.basicConfig(
         level=args.log_level,
         format="%(asctime)s - %(levelname)s - %(message)s",
     )
-    run_clustering(args.input, args.output, processes=args.processes)
+    run_clustering(
+        args.input,
+        args.output,
+        processes=args.processes,
+        similarity_threshold=args.similarity_threshold,
+    )
     return 0
 
 

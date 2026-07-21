@@ -50,7 +50,7 @@ class GeneralSettings(_Section):
     model_spec_path: str | None = None
     model_hparams_path: str | None = None
     train_batch_size: int = 1024
-    train_epochs: int = 50
+    train_epochs: int = 30
     train_num_workers: int = 8
     train_devices: str = "1"
     train_mp_hidden_size: int = 300
@@ -64,16 +64,22 @@ class GeneralSettings(_Section):
     train_init_lr: float = 1e-4
     train_max_lr: float = 1e-3
     train_final_lr: float = 1e-4
-    train_early_stopping_patience: int = 5
+    train_early_stopping_patience: int = 8
     train_early_stopping_min_delta: float = 0.0
+    train_validation_fraction: float = 0.1
+    train_gradient_clip_val: float = 5.0
+    train_precision: str = "32-true"
     train_svdkl_gp_dim: int = 16
-    train_svdkl_grid_size: int = 128
+    train_svdkl_grid_size: int = 64
     train_svdkl_grid_lower: float = -10.0
     train_svdkl_grid_upper: float = 10.0
-    train_seed: int = 0
+    train_svdkl_cholesky_jitter: float = 1e-3
+    train_svdkl_feature_transform: str = "tanh"
+    train_svdkl_tanh_temperature: float = 3.0
+    train_seed: int = 42
     pred_batch_size: int = 32
     pred_num_workers: int = 0
-    pred_accelerator: str = "auto"
+    pred_accelerator: str = "cpu"
     pred_devices: str = "1"
     pred_chunk_size: int = 12345
     sim_spacelight_default: float = 0.5
@@ -91,9 +97,7 @@ class PathsSettings(_Section):
     scratch_default: str = "/wrk"
     shared_data_root: str = "/data"
     spaces_dir_default: str = "/data/programs/BiosolveIT/spaces_new"
-    spaces_file_default: str = (
-        "/data/programs/BiosolveIT/spaces_new/REALSpace_83bn_2025-09.space"
-    )
+    spaces_file_default: str = "/data/programs/BiosolveIT/spaces_new/REALSpace_83bn_2025-09.space"
     seeds_dir_default: str = "/data/programs/BiosolveIT/spaces_seeds"
     seeds_file_default: str = (
         "/data/programs/BiosolveIT/spaces_seeds/"
@@ -267,7 +271,6 @@ class Settings(BaseModel):
                 errors.append(f"{label} executable not found: {p}")
         if self.general.scheduler not in {"slurm", "SGE"}:
             errors.append(
-                f"unknown scheduler '{self.general.scheduler}' "
-                "(expected 'slurm' or 'SGE')"
+                f"unknown scheduler '{self.general.scheduler}' (expected 'slurm' or 'SGE')"
             )
         return errors

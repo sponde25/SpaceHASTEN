@@ -34,15 +34,15 @@ def _make_stub_predict(tmp_path: Path) -> Path:
         'out_csv="$3"\n'
         'if [ ! -f "$model_dir/model_0/pytorch_model.bin" ]; then\n'
         '  echo "model bin missing under $model_dir" >&2\n'
-        '  exit 2\n'
-        'fi\n'
+        "  exit 2\n"
+        "fi\n"
         'mkdir -p "$(dirname "$out_csv")"\n'
         'echo "smilesid,docking_score,docking_score_epistemic_std,'
         'docking_score_aleatoric_std,docking_score_std" > "$out_csv"\n'
         # Skip header row, emit each smilesid with a constant score.
         'tail -n +2 "$in_csv" | while IFS=, read -r smi sid; do\n'
         '  echo "${sid},-7.5,0.2,0.15,0.25" >> "$out_csv"\n'
-        'done\n'
+        "done\n"
     )
     stub.chmod(stub.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     return stub
@@ -106,8 +106,7 @@ def test_prediction_stage_local(tmp_path: Path) -> None:
     # All undocked rows now have pred_score=-7.5 and pred_version=1.
     db2 = Database(workdir.dbsh())
     rows = db2.connection.execute(
-        "SELECT smilesid, dock_score, pred_score, pred_version FROM data"
-        " WHERE smilesid LIKE 'ud-%'"
+        "SELECT smilesid, dock_score, pred_score, pred_version FROM data WHERE smilesid LIKE 'ud-%'"
     ).fetchall()
     assert len(rows) == 7
     for _sid, dock_score, pred_score, pred_version in rows:
@@ -129,8 +128,9 @@ def test_prediction_stage_local(tmp_path: Path) -> None:
 
     assert scheduler._jobs  # noqa: SLF001 - test-only introspection
     submitted_job = next(iter(scheduler._jobs.values())).spec  # noqa: SLF001
-    assert submitted_job.gpus == 1
-    assert "CUDA_VISIBLE_DEVICES" not in submitted_job.command_template
+    assert submitted_job.gpus == 0
+    assert 'CUDA_VISIBLE_DEVICES=""' in submitted_job.command_template
+    assert "--accelerator cpu" in submitted_job.command_template
 
 
 def test_prediction_stage_no_undocked_returns_zero(tmp_path: Path) -> None:

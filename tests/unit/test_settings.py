@@ -61,12 +61,19 @@ def test_settings_defaults_no_filesystem_access() -> None:
     assert s.general.scheduler == "slurm"
     assert s.general.cpu_count_train == "8"
     assert s.general.train_batch_size == 1024
-    assert s.general.train_epochs == 50
+    assert s.general.train_epochs == 30
     assert s.general.train_num_workers == 8
-    assert s.general.train_early_stopping_patience == 5
+    assert s.general.train_early_stopping_patience == 8
+    assert s.general.train_validation_fraction == pytest.approx(0.1)
+    assert s.general.train_gradient_clip_val == pytest.approx(5.0)
+    assert s.general.train_precision == "32-true"
     assert s.general.train_svdkl_gp_dim == 16
-    assert s.general.train_seed == 0
-    assert s.general.pred_accelerator == "auto"
+    assert s.general.train_svdkl_grid_size == 64
+    assert s.general.train_svdkl_cholesky_jitter == pytest.approx(1e-3)
+    assert s.general.train_svdkl_feature_transform == "tanh"
+    assert s.general.train_svdkl_tanh_temperature == pytest.approx(3.0)
+    assert s.general.train_seed == 42
+    assert s.general.pred_accelerator == "cpu"
     assert s.general.pred_batch_size == 32
     assert s.general.pred_num_workers == 0
     assert s.general.pred_chunk_size == 12345

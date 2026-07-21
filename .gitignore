@@ -12,4 +12,6 @@ opencode.json
 overnight_experiments/
 quick_test/*
 !quick_test/test_fast_auto.sh
+!quick_test/test_fast_acquisition.sh
+!quick_test/verify_acquisition.py
 !quick_test/verify_uncertainty_db.py

@@ -32,7 +32,7 @@ mkdir "${RUN_DIR}"
 
 "${spacehasten_exe}" --config "${config}" -w "${RUN_DIR}" screening-cycle \
     --simsearch-top-n 10 \
-    --simsearch-jobs 100 \
+    --simsearch-jobs 10 \
     --nnn 10 \
     --dock-top-n 10 \
     --dock-cpus 2 \

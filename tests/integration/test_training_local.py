@@ -34,7 +34,7 @@ def _make_stub_train(tmp_path: Path) -> Path:
         "set -eu\n"
         'data_path="$1"\n'
         'save_dir="$2"\n'
-        'shift 2\n'
+        "shift 2\n"
         'mkdir -p "$save_dir/model_0"\n'
         'touch "$save_dir/model_0/pytorch_model.bin"\n'
         # Record args for assertions.
@@ -130,8 +130,18 @@ def test_training_stage_local(tmp_path: Path) -> None:
     assert flag_pairs["--early-stopping-min-delta"] == str(
         settings.general.train_early_stopping_min_delta
     )
+    assert flag_pairs["--validation-fraction"] == str(settings.general.train_validation_fraction)
+    assert flag_pairs["--gradient-clip-val"] == str(settings.general.train_gradient_clip_val)
+    assert flag_pairs["--precision"] == settings.general.train_precision
     assert flag_pairs["--svdkl-gp-dim"] == str(settings.general.train_svdkl_gp_dim)
     assert flag_pairs["--svdkl-grid-size"] == str(settings.general.train_svdkl_grid_size)
+    assert flag_pairs["--svdkl-cholesky-jitter"] == str(
+        settings.general.train_svdkl_cholesky_jitter
+    )
+    assert flag_pairs["--svdkl-feature-transform"] == settings.general.train_svdkl_feature_transform
+    assert flag_pairs["--svdkl-tanh-temperature"] == str(
+        settings.general.train_svdkl_tanh_temperature
+    )
     assert flag_pairs["--seed"] == str(settings.general.train_seed)
 
     submitted_job = next(iter(scheduler._jobs.values())).spec  # noqa: SLF001

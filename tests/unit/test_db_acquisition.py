@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from spacehasten.core.db import Database
+from spacehasten.core.db import ClusterRow, Database
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 LEGACY_BASELINE = FIXTURES / "legacy_baseline.dbsh"
@@ -67,6 +67,56 @@ def test_select_undocked_for_prediction(db: Database) -> None:
     rows = list(db.select_undocked_for_prediction())
     sids = sorted(sid for _, sid in rows)
     assert sids == [3, 4, 5]
+
+
+def test_uncertainty_candidates_use_each_rows_current_prediction_version(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "uncertainty.dbsh")
+    database.create_schema()
+    first = database.insert_seed_undocked("h1", "CC", "first")
+    second = database.insert_seed_undocked("h2", "CCC", "second")
+    database.apply_predictions(
+        [
+            (first, 1, -100.0, 50.0, 0.1, 50.0),
+            (second, 1, -100.0, 50.0, 0.1, 50.0),
+        ]
+    )
+    database.apply_predictions(
+        [
+            (first, 2, -8.0, 0.2, 0.1, 0.3),
+            (second, 2, -7.0, 0.4, 0.1, 0.5),
+        ]
+    )
+    database.replace_clusters(
+        [
+            ClusterRow(spacehastenid=first, clusterid=10),
+            ClusterRow(spacehastenid=second, clusterid=20),
+        ]
+    )
+    database.commit()
+
+    candidates = database.select_uncertainty_docking_candidates()
+    database.close()
+
+    assert [candidate.model_version for candidate in candidates] == [2, 2]
+    assert [candidate.pred_score for candidate in candidates] == [-8.0, -7.0]
+    assert [candidate.epistemic_std for candidate in candidates] == [0.2, 0.4]
+    assert [candidate.clusterid for candidate in candidates] == [10, 20]
+
+
+def test_uncertainty_candidates_reject_missing_epistemic_uncertainty(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "missing-uncertainty.dbsh")
+    database.create_schema()
+    sid = database.insert_seed_undocked("h1", "CC", "first")
+    database.apply_predictions([(sid, 1, -8.0, None, None, None)])
+    database.commit()
+
+    with pytest.raises(ValueError, match="epistemic uncertainty"):
+        database.select_uncertainty_docking_candidates()
+    database.close()
 
 
 def test_select_training_data(db: Database) -> None:
@@ -151,7 +201,5 @@ def test_apply_predictions_persists_uncertainty_history(db: Database) -> None:
 def test_mark_as_query(db: Database) -> None:
     db.mark_as_query(spacehastenid=3, cycle=7)
     db.commit()
-    (q,) = db.connection.execute(
-        "SELECT query FROM data WHERE spacehastenid = 3"
-    ).fetchone()
+    (q,) = db.connection.execute("SELECT query FROM data WHERE spacehastenid = 3").fetchone()
     assert q == 7

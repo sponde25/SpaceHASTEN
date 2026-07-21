@@ -59,21 +59,16 @@ def run_with_existing_index(
         LOGGER.info("Reusing validated FPSim2 index %s", index_path)
 
     original_builder = cluster_module._build_fpsim2_index
-    original_leader_threshold = cluster_module._LEADER_DISTANCE_THRESHOLD
-    original_search_threshold = cluster_module._SEARCH_SIMILARITY_THRESHOLD
     try:
         cluster_module._build_fpsim2_index = reuse_index
-        cluster_module._LEADER_DISTANCE_THRESHOLD = 1.0 - similarity_threshold
-        cluster_module._SEARCH_SIMILARITY_THRESHOLD = similarity_threshold
         return cluster_module.run_clustering(
             input_path,
             output_path,
             processes=processes,
+            similarity_threshold=similarity_threshold,
         )
     finally:
         cluster_module._build_fpsim2_index = original_builder
-        cluster_module._LEADER_DISTANCE_THRESHOLD = original_leader_threshold
-        cluster_module._SEARCH_SIMILARITY_THRESHOLD = original_search_threshold
 
 
 def parse_args() -> argparse.Namespace:

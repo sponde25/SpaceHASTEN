@@ -7,14 +7,17 @@ tarring the result back to the dock directory.
 
 from __future__ import annotations
 
+import csv
 import sqlite3
 import tarfile
 from pathlib import Path
 
+import pytest
+
 from spacehasten.config.settings import Settings
 from spacehasten.core.db import ClusterRow, Database
 from spacehasten.scheduler import LocalScheduler
-from spacehasten.stages.docking import dock
+from spacehasten.stages.docking import _build_dock_command_body, dock
 from spacehasten.workspace.layout import WorkDir
 
 # A bash body that replaces the Schrödinger pipeline. It reads
@@ -57,14 +60,48 @@ def _seed_db(db: Database, n_predicted: int = 12) -> None:
         )
     # Required blobs for write_glide_in / extracted grid.
     glide_template = (
-        b"GRIDFILE     /old.zip\n"
-        b"LIGANDFILE   /old.maegz\n"
-        b"FORCEFIELD   OPLS_2005\n"
-        b"PRECISION    SP\n"
+        b"GRIDFILE     /old.zip\nLIGANDFILE   /old.maegz\nFORCEFIELD   OPLS_2005\nPRECISION    SP\n"
     )
     db.store_dock_param(glide_template)
     db.store_dock_grid(b"PK\x05\x06" + b"\x00" * 18)  # minimum legal empty zip
     db.commit()
+
+
+def _seed_uncertainty_db(db: Database) -> list[int]:
+    db.create_schema()
+    db.insert_seed_docked("hd0", "CCO", "docked-seed", -8.0)
+    candidates = [
+        ("hu0", "CCCC", "candidate-0", -9.0, 2.0, 10),
+        ("hu1", "CCCCC", "candidate-1", -10.0, 0.0, 10),
+        ("hu2", "CCCCCC", "candidate-2", -9.8, 0.0, 20),
+    ]
+    identifiers: list[int] = []
+    predictions: list[tuple[int, int, float, float, float, float]] = []
+    clusters: list[ClusterRow] = []
+    for reghash, smiles, smilesid, mean, epistemic, clusterid in candidates:
+        sid = db.insert_seed_undocked(reghash, smiles, smilesid)
+        identifiers.append(sid)
+        predictions.append((sid, 1, mean, epistemic, 0.1, epistemic + 0.1))
+        clusters.append(ClusterRow(spacehastenid=sid, clusterid=clusterid))
+    db.apply_predictions(predictions)
+    db.replace_clusters(clusters)
+    db.store_dock_param(b"GRIDFILE /old.zip\nLIGANDFILE /old.maegz\nPRECISION SP\n")
+    db.store_dock_grid(b"PK\x05\x06" + b"\x00" * 18)
+    db.commit()
+    return identifiers
+
+
+def test_dock_command_uses_run_specific_scratch_and_fails_fast(
+    tmp_path: Path,
+) -> None:
+    settings = Settings()
+    settings.paths.scratch_default = "/wrk"
+    dock_dir = tmp_path / "shared" / "run-a" / "docking" / "iter2"
+
+    command = _build_dock_command_body(settings, dock_dir)
+
+    assert command.startswith("set -euo pipefail\n")
+    assert "/dock_run-a_iter2_chunk_${TASK_ID}" in command
 
 
 def test_dock_stage_local_stub(tmp_path: Path) -> None:
@@ -138,12 +175,13 @@ def test_dock_stage_clustering_strategy(tmp_path: Path) -> None:
     _seed_db(db, n_predicted=6)
     # Assign all undocked rows to two clusters so GROUP BY clusterid
     # collapses 6 candidates into 2.
-    sids = [r[0] for r in db.connection.execute(
-        "SELECT spacehastenid FROM data WHERE pred_score IS NOT NULL"
-    ).fetchall()]
-    db.replace_clusters([
-        ClusterRow(spacehastenid=sid, clusterid=(sid % 2)) for sid in sids
-    ])
+    sids = [
+        r[0]
+        for r in db.connection.execute(
+            "SELECT spacehastenid FROM data WHERE pred_score IS NOT NULL"
+        ).fetchall()
+    ]
+    db.replace_clusters([ClusterRow(spacehastenid=sid, clusterid=(sid % 2)) for sid in sids])
     db.commit()
 
     settings = Settings()
@@ -170,6 +208,61 @@ def test_dock_stage_clustering_strategy(tmp_path: Path) -> None:
     db2.close()
     # GROUP BY clusterid LIMIT 10 over 2 clusters → exactly 2 representatives.
     assert n_docked == 2
+
+
+@pytest.mark.parametrize(
+    ("strategy", "method_args"),
+    [
+        ("lcb", {"lcb_beta": 1.0}),
+        ("ei", {"ei_hit_threshold": -9.7}),
+    ],
+)
+def test_uncertainty_acquisition_with_dynamic_cluster_penalty(
+    tmp_path: Path,
+    strategy: str,
+    method_args: dict[str, float],
+) -> None:
+    workdir = WorkDir.bootstrap(tmp_path / strategy, name=f"dock-{strategy}")
+    db = Database(workdir.dbsh())
+    first, _same_cluster, other_cluster = _seed_uncertainty_db(db)
+
+    settings = Settings()
+    settings.paths.scratch_default = str(tmp_path / "scratch")
+    scheduler = LocalScheduler()
+    iteration = dock(
+        db,
+        workdir,
+        scheduler,
+        settings,
+        top_n=2,
+        strategy=strategy,  # type: ignore[arg-type]
+        cpus=1,
+        cluster_lambda=1.0,
+        dock_command_template=_STUB_BODY,
+        seed=0,
+        **method_args,
+    )
+    db.close()
+
+    assert iteration == 1
+    with Database(workdir.dbsh()) as result_db:
+        selected_ids = [
+            int(row[0])
+            for row in result_db.connection.execute(
+                "SELECT spacehastenid FROM data WHERE dock_iteration = 1 ORDER BY spacehastenid"
+            ).fetchall()
+        ]
+    assert selected_ids == sorted([first, other_cluster])
+
+    with (workdir.docking_dir(1) / "acquisition.csv").open(newline="") as handle:
+        acquisition_rows = list(csv.DictReader(handle))
+    assert [int(row["spacehastenid"]) for row in acquisition_rows] == [
+        first,
+        other_cluster,
+    ]
+    assert {row["method"] for row in acquisition_rows} == {strategy}
+    assert {float(row["cluster_lambda"]) for row in acquisition_rows} == {1.0}
+    assert {float(row["cluster_similarity_threshold"]) for row in acquisition_rows} == {0.4}
 
 
 def test_dock_stage_no_candidates_raises(tmp_path: Path) -> None:
@@ -264,8 +357,7 @@ def test_dock_stage_persists_a_valid_results_tar(tmp_path: Path) -> None:
 
     # Schema stayed intact (no accidental DDL).
     with sqlite3.connect(workdir.dbsh()) as conn:
-        tables = {r[0] for r in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        )}
-    assert {"data", "docking_param", "docking_grid", "models",
-            "properties", "clusters"}.issubset(tables)
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert {"data", "docking_param", "docking_grid", "models", "properties", "clusters"}.issubset(
+        tables
+    )

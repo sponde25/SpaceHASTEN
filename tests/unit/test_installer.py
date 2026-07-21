@@ -24,7 +24,14 @@ def test_installer_writes_training_and_prediction_defaults(tmp_path: Path) -> No
     assert settings.general.cpu_count_train == "8"
     assert settings.general.train_batch_size == 1024
     assert settings.general.train_num_workers == 8
-    assert settings.general.train_early_stopping_patience == 5
+    assert settings.general.train_early_stopping_patience == 8
+    assert settings.general.train_validation_fraction == 0.1
+    assert settings.general.train_gradient_clip_val == 5.0
+    assert settings.general.train_precision == "32-true"
+    assert settings.general.train_svdkl_grid_size == 64
+    assert settings.general.train_svdkl_feature_transform == "tanh"
+    assert settings.general.train_svdkl_tanh_temperature == 3.0
+    assert settings.general.train_seed == 42
     assert settings.general.cpu_count_predict == "1"
     assert settings.general.cpu_count_control == "1"
     assert settings.general.pred_batch_size == 32

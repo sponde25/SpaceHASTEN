@@ -39,6 +39,7 @@ def _install_stage_stubs(
         def _fn(db, workdir, scheduler, settings, **kwargs):  # type: ignore[no-untyped-def]
             calls.append((name, kwargs))
             return 1
+
         return _fn
 
     monkeypatch.setattr(cli_main.training, "train", _record("train"))
@@ -48,11 +49,16 @@ def _install_stage_stubs(
 
     # Stub DB methods used to decide whether to train.
     import spacehasten.core.db as db_mod
+
     monkeypatch.setattr(
-        db_mod.Database, "latest_dock_iteration", lambda self: dock_iteration,
+        db_mod.Database,
+        "latest_dock_iteration",
+        lambda self: dock_iteration,
     )
     monkeypatch.setattr(
-        db_mod.Database, "latest_model_version", lambda self: model_version,
+        db_mod.Database,
+        "latest_model_version",
+        lambda self: model_version,
     )
 
 
@@ -63,16 +69,25 @@ def test_screening_cycle_first_round_no_train(
     calls: list[tuple[str, dict[str, Any]]] = []
     _install_stage_stubs(monkeypatch, calls, dock_iteration=0)
 
-    rc = cli_main.main([
-        "-w", str(stub_workspace),
-        "--scheduler", "local",
-        "screening-cycle",
-        "--rounds", "1",
-        "--simsearch-top-n", "5",
-        "--simsearch-jobs", "2",
-        "--dock-top-n", "10",
-        "--dock-cpus", "2",
-    ])
+    rc = cli_main.main(
+        [
+            "-w",
+            str(stub_workspace),
+            "--scheduler",
+            "local",
+            "screening-cycle",
+            "--rounds",
+            "1",
+            "--simsearch-top-n",
+            "5",
+            "--simsearch-jobs",
+            "2",
+            "--dock-top-n",
+            "10",
+            "--dock-cpus",
+            "2",
+        ]
+    )
     assert rc == 0
     names = [c[0] for c in calls]
     # No train; then search(docked) → search(predicted) ×2 → dock
@@ -96,23 +111,38 @@ def test_screening_cycle_trains_after_first(
     calls: list[tuple[str, dict[str, Any]]] = []
     _install_stage_stubs(monkeypatch, calls, dock_iteration=1)
 
-    rc = cli_main.main([
-        "-w", str(stub_workspace),
-        "--scheduler", "local",
-        "screening-cycle",
-        "--rounds", "1",
-        "--simsearch-top-n", "5",
-        "--simsearch-jobs", "2",
-        "--dock-top-n", "10",
-        "--dock-cpus", "2",
-    ])
+    rc = cli_main.main(
+        [
+            "-w",
+            str(stub_workspace),
+            "--scheduler",
+            "local",
+            "screening-cycle",
+            "--rounds",
+            "1",
+            "--simsearch-top-n",
+            "5",
+            "--simsearch-jobs",
+            "2",
+            "--prediction-jobs",
+            "7",
+            "--dock-top-n",
+            "10",
+            "--dock-cpus",
+            "2",
+        ]
+    )
     assert rc == 0
     names = [c[0] for c in calls]
-    # Train first, then the search pipeline
+    # Train and refresh all undocked predictions before the search pipeline.
     assert names == [
         "train",
+        "predict",
         "simsearch",
         "simsearch",
         "simsearch",
         "dock",
     ]
+    predict_call = next(c for c in calls if c[0] == "predict")
+    assert predict_call[1]["model_version"] == 1
+    assert predict_call[1]["jobs"] == 7
