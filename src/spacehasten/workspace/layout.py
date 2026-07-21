@@ -102,6 +102,9 @@ class WorkDir:
     def export_dir(self) -> Path:
         return self.shared_root / "export"
 
+    def plots_dir(self) -> Path:
+        return self.shared_root / "plots"
+
     # --------------------------------------------------------------------- #
     # Bootstrap                                                             #
     # --------------------------------------------------------------------- #

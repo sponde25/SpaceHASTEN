@@ -469,6 +469,76 @@ class Database:
         ).fetchone()
         return int(row[0])
 
+    # ----- plotting support -----
+
+    def dock_scores_by_iteration(self) -> dict[int, list[float]]:
+        """All non-null ``dock_score`` values, grouped by ``dock_iteration``.
+
+        ``dock_iteration == 0`` is the seed/training batch; ``1..N`` are
+        later screening-cycle acquisition rounds (see
+        :meth:`select_seed_rows`).
+        """
+        rows = self._conn.execute(
+            "SELECT dock_iteration, dock_score FROM data\n"
+            " WHERE dock_score IS NOT NULL AND dock_iteration IS NOT NULL\n"
+            " ORDER BY dock_iteration"
+        ).fetchall()
+        out: dict[int, list[float]] = {}
+        for iteration, score in rows:
+            out.setdefault(int(iteration), []).append(float(score))
+        return out
+
+    def pred_scores_by_simsearch_cycle(self) -> dict[int, list[float]]:
+        """All non-null ``pred_score`` values, grouped by ``simsearch_cycle``.
+
+        Only simsearch-inserted rows carry a ``simsearch_cycle`` (seed
+        compounds do not), so this reflects the predicted-score
+        distribution of each round's freshly-acquired candidates.
+        """
+        rows = self._conn.execute(
+            "SELECT simsearch_cycle, pred_score FROM data\n"
+            " WHERE pred_score IS NOT NULL AND simsearch_cycle IS NOT NULL\n"
+            " ORDER BY simsearch_cycle"
+        ).fetchall()
+        out: dict[int, list[float]] = {}
+        for cycle, score in rows:
+            out.setdefault(int(cycle), []).append(float(score))
+        return out
+
+    def query_cycle1_score_cutoff(self) -> float | None:
+        """Worst (max) ``dock_score`` among compounds used as queries in
+        simsearch cycle 1, or ``None`` if cycle 1 has not run yet.
+
+        Cycle 1 is always the very first simsearch call, which selects
+        its queries from the seed-docked batch (``dock_iteration == 0``)
+        ordered by ``dock_score`` ascending — i.e. the top-scoring
+        compounds out of the initial random seed set. This threshold
+        (lower is better) is therefore distinct from later cycles, whose
+        queries are drawn from docking/prediction rounds already enriched
+        by earlier screening, and is not meant to be conflated with them
+        (hence filtering on ``query = 1`` specifically, not ``query IS
+        NOT NULL``).
+        """
+        row = self._conn.execute(
+            "SELECT MAX(dock_score) FROM data WHERE query = 1"
+        ).fetchone()
+        return float(row[0]) if row and row[0] is not None else None
+
+    def pred_vs_dock_pairs(self, dock_iteration: int) -> list[tuple[float, float]]:
+        """``(pred_score, dock_score)`` pairs for a given ``dock_iteration``.
+
+        Restricted to rows with both scores present, for comparing
+        chemprop's prediction against the actual Glide docking score of
+        compounds that were subsequently docked.
+        """
+        rows = self._conn.execute(
+            "SELECT pred_score, dock_score FROM data\n"
+            " WHERE dock_iteration = ? AND dock_score IS NOT NULL"
+            " AND pred_score IS NOT NULL",
+            (dock_iteration,),
+        ).fetchall()
+        return [(float(p), float(d)) for p, d in rows]
+
     # ----- model blob storage -----
 
     def store_model_blob(self, version: int, blob: bytes) -> None:

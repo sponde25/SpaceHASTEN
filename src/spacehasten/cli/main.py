@@ -22,6 +22,7 @@ from spacehasten.stages import (
     clustering,
     docking,
     export,
+    plotting,
     prediction,
     seeds,
     simsearch,
@@ -58,6 +59,7 @@ command groups:
     seed-training       Import seeds → dock → train
     screening-cycle     [train] → (search → predict)×3 → dock per round
     export              Export results (csv, poses, seeds)
+    plot                Plot docking/prediction score diagnostics
 
   manual stages (expert)
     import-seeds        Import seed compounds into the database (no training)
@@ -98,6 +100,7 @@ command groups:
     _add_dock(sub)
     _add_cluster(sub)
     _add_export(sub)
+    _add_plot(sub)
     _add_archive(sub)
     _add_status(sub)
     _add_resume(sub)
@@ -299,6 +302,49 @@ def _add_export(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> Non
     seeds_p.add_argument("--output", type=Path, required=True,
                          help="Output CSV file path.")
     seeds_p.set_defaults(func=_cmd_export_seeds)
+
+
+def _add_plot(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    p = sub.add_parser(
+        "plot",
+        help="Plot docking/prediction score diagnostics from the database so far.",
+    )
+    p.add_argument(
+        "--kind", choices=("dock-scores", "pred-scores", "accuracy", "all"),
+        default="all",
+        help="Optional. Which plot(s) to generate. Default: all.\n"
+             "  dock-scores: dock_score KDE, seed vs. each dock iteration.\n"
+             "  pred-scores: pred_score KDE per simsearch cycle vs. seed baseline.\n"
+             "  accuracy:    hexbin of predicted vs. actual dock_score.",
+    )
+    p.add_argument(
+        "--dock-iterations", default="1,2", metavar="N,N,...",
+        help="Optional. Comma-separated dock_iteration values for the"
+             " 'accuracy' plot. Default: 1,2.",
+    )
+    p.add_argument(
+        "--bw-adjust", type=float, default=2.0,
+        help="Optional. KDE bandwidth multiplier for the distribution"
+             " plots. Default: 2.0.",
+    )
+    p.add_argument(
+        "--max-dock-score", type=float, default=0.0, metavar="SCORE",
+        help="Optional. Cap the x-axis at this value on the dock-scores"
+             " and pred-scores plots, hiding the long positive-score"
+             " tail. Default: 0.0. Ignored if --show-all-scores is set.",
+    )
+    p.add_argument(
+        "--show-all-scores", action="store_true",
+        help="Optional. Show the full score range on the dock-scores and"
+             " pred-scores plots, including positive (unfavourable)"
+             " scores, instead of capping the x-axis at --max-dock-score.",
+    )
+    p.add_argument(
+        "--output-dir", type=Path, default=None,
+        help="Optional. Directory to write PNGs into."
+             " Default: <workspace>/plots (or shared_root/plots).",
+    )
+    p.set_defaults(func=_cmd_plot)
 
 
 def _add_archive(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -669,6 +715,44 @@ def _cmd_export_seeds(args: argparse.Namespace) -> int:
     with open_db(args) as db:
         n = export.export_seeds(db, args.output)
     print(f"Exported {n} seed rows to {args.output}")
+    return 0
+
+
+def _cmd_plot(args: argparse.Namespace) -> int:
+    workdir = workdir_from_args(args)
+    setup_logging(workdir, args)
+
+    try:
+        dock_iterations = tuple(int(x) for x in args.dock_iterations.split(","))
+    except ValueError:
+        raise SystemExit(
+            f"error: --dock-iterations must be a comma-separated list of"
+            f" integers, got {args.dock_iterations!r}"
+        )
+
+    outputs: list[Path] = []
+    max_dock_score = None if args.show_all_scores else args.max_dock_score
+    with open_db(args) as db:
+        if args.kind in ("dock-scores", "all"):
+            out = (args.output_dir / "dock_score_distribution.png") if args.output_dir else None
+            outputs.append(plotting.plot_dock_score_distribution(
+                db, workdir, bw_adjust=args.bw_adjust, output=out,
+                max_dock_score=max_dock_score,
+            ))
+        if args.kind in ("pred-scores", "all"):
+            out = (args.output_dir / "pred_score_distribution.png") if args.output_dir else None
+            outputs.append(plotting.plot_pred_score_distribution(
+                db, workdir, bw_adjust=args.bw_adjust, output=out,
+                max_dock_score=max_dock_score,
+            ))
+        if args.kind in ("accuracy", "all"):
+            out = (args.output_dir / "pred_vs_dock_accuracy.png") if args.output_dir else None
+            outputs.append(plotting.plot_pred_vs_dock_accuracy(
+                db, workdir, dock_iterations=dock_iterations, output=out,
+            ))
+
+    for out in outputs:
+        print(f"Wrote plot to {out}")
     return 0
 
 
