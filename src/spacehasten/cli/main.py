@@ -28,6 +28,9 @@ from spacehasten.stages import (
     simsearch,
     training,
 )
+from spacehasten.stages import (
+    atlas as atlas_stage,
+)
 from spacehasten.workspace.layout import WorkDir
 
 from ._banner import banner, print_banner
@@ -67,6 +70,7 @@ command groups:
     search              Run one simsearch cycle
     predict             Predict scores for undocked rows
     cluster             Run sphere-exclusion clustering
+    atlas               Persistent cluster-atlas operations
 
   utilities
     status              Print workspace manifest summary
@@ -99,6 +103,7 @@ command groups:
     _add_search(sub)
     _add_dock(sub)
     _add_cluster(sub)
+    _add_atlas(sub)
     _add_export(sub)
     _add_archive(sub)
     _add_status(sub)
@@ -394,6 +399,25 @@ def _add_cluster(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
         help="Optional. Minimum within-cluster Tanimoto similarity. Default: 0.3.",
     )
     p.set_defaults(func=_cmd_cluster)
+
+
+def _add_atlas(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    parser = sub.add_parser("atlas", help="Persistent cluster-atlas operations.")
+    atlas_sub = parser.add_subparsers(dest="atlas_operation", required=True)
+
+    init = atlas_sub.add_parser("init", help="Build or reuse the initial seed atlas.")
+    init.add_argument("--atlas-id", default=atlas_stage.DEFAULT_ATLAS_ID)
+    init.add_argument(
+        "--atlas-root",
+        type=Path,
+        default=None,
+        help="Optional shared reusable atlas directory.",
+    )
+    init.set_defaults(func=_cmd_atlas_init)
+
+    status = atlas_sub.add_parser("status", help="Show persistent atlas status.")
+    status.add_argument("--atlas-id", default=atlas_stage.DEFAULT_ATLAS_ID)
+    status.set_defaults(func=_cmd_atlas_status)
 
 
 def _add_screening_cycle(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -834,6 +858,50 @@ def _cmd_cluster(args: argparse.Namespace) -> int:
             similarity_threshold=args.similarity_threshold,
         )
     print(f"Clustered {n} compounds")
+    return 0
+
+
+def _cmd_atlas_init(args: argparse.Namespace) -> int:
+    workdir = workdir_from_args(args)
+    setup_logging(workdir, args)
+    settings = settings_from_args(args)
+    scheduler = scheduler_from_args(args, settings)
+    with open_db(args) as db:
+        version = atlas_stage.build_initial_seed_atlas(
+            db,
+            workdir,
+            scheduler,
+            settings,
+            atlas_id=args.atlas_id,
+            atlas_root=args.atlas_root,
+        )
+    print(
+        f"Atlas {version.atlas_id} v{version.version}: "
+        f"{version.compound_count} compounds, {version.centroid_count} centroids"
+    )
+    return 0
+
+
+def _cmd_atlas_status(args: argparse.Namespace) -> int:
+    setup_logging(workdir_from_args(args), args)
+    with open_db(args) as db:
+        version = db.latest_cluster_atlas_version(args.atlas_id)
+    if version is None:
+        print(f"Atlas {args.atlas_id}: not initialized")
+        return 1
+    print(
+        json.dumps(
+            {
+                "atlas_id": version.atlas_id,
+                "version": version.version,
+                "last_spacehastenid": version.last_spacehastenid,
+                "compound_count": version.compound_count,
+                "centroid_count": version.centroid_count,
+                "metadata_path": version.metadata_path,
+            },
+            indent=2,
+        )
+    )
     return 0
 
 

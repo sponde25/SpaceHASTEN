@@ -114,6 +114,29 @@ def test_import_csv_seeds_docked(tmp_path: Path) -> None:
         assert it == 0
 
 
+def test_parallel_seed_import_preserves_input_order(tmp_path: Path) -> None:
+    csv_path = tmp_path / "seeds.csv"
+    _write_csv(csv_path)
+    imported_rows = []
+    for name, processes in (("first", 2), ("second", 4)):
+        root = tmp_path / name
+        root.mkdir()
+        _workdir, db = _init_db(root)
+        import_seeds(
+            db,
+            csv_path=csv_path,
+            props=PropertyRanges(),
+            processes=processes,
+        )
+        imported_rows.append(
+            db.connection.execute(
+                "SELECT spacehastenid, smilesid, reghash FROM data ORDER BY spacehastenid"
+            ).fetchall()
+        )
+        db.close()
+    assert imported_rows[0] == imported_rows[1]
+
+
 def test_import_seeds_requires_exactly_one_input(tmp_path: Path) -> None:
     _workdir, db = _init_db(tmp_path)
     try:

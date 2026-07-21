@@ -48,10 +48,9 @@ def typed_to_db_props(props: TypedPropertyRanges) -> DbPropertyRanges:
 
 def typed_smarts_to_db(props: TypedPropertyRanges) -> list[tuple[str, str]]:
     """Extract SMARTS include/exclude pairs from a typed :class:`PropertyRanges`."""
-    return (
-        [("include", s) for s in props.smarts_include]
-        + [("exclude", s) for s in props.smarts_exclude]
-    )
+    return [("include", s) for s in props.smarts_include] + [
+        ("exclude", s) for s in props.smarts_exclude
+    ]
 
 
 # Worker function for ``mp.Pool``. Must be top-level (picklable).
@@ -94,14 +93,9 @@ def _read_csv(
         reader = csv.DictReader(fh)
         if reader.fieldnames is None:
             raise ValueError(f"{path}: empty CSV")
-        missing = [
-            c for c in (smiles_col, title_col, score_col) if c not in reader.fieldnames
-        ]
+        missing = [c for c in (smiles_col, title_col, score_col) if c not in reader.fieldnames]
         if missing:
-            raise ValueError(
-                f"{path}: missing columns {missing!r}"
-                f" (have {reader.fieldnames!r})"
-            )
+            raise ValueError(f"{path}: missing columns {missing!r} (have {reader.fieldnames!r})")
         for row in reader:
             smi = (row.get(smiles_col) or "").strip()
             title = (row.get(title_col) or "").strip()
@@ -111,9 +105,7 @@ def _read_csv(
             yield (smi, title, score)
 
 
-def _hash_in_parallel(
-    rows: Iterable[SeedRow], *, processes: int
-) -> list[HashedSeed]:
+def _hash_in_parallel(rows: Iterable[SeedRow], *, processes: int) -> list[HashedSeed]:
     """Map :func:`_hash_seed` over ``rows`` using a process pool."""
     rows_list = list(rows)
     if not rows_list:
@@ -122,7 +114,7 @@ def _hash_in_parallel(
         results = [_hash_seed(r) for r in rows_list]
     else:
         with mp.Pool(processes) as pool:
-            results = list(pool.imap_unordered(_hash_seed, rows_list))
+            results = list(pool.imap(_hash_seed, rows_list))
     return [r for r in results if r is not None]
 
 

@@ -91,3 +91,22 @@ def test_initial_seed_atlas_stage_is_resumable(tmp_path: Path) -> None:
     assert (workdir.atlas_dir() / "final" / "assignments.npz").is_file()
     assert db.latest_cluster_atlas_version(DEFAULT_ATLAS_ID) == version
     db.close()
+
+    second_workdir = WorkDir.bootstrap(
+        tmp_path / "local-second", shared_root=tmp_path / "shared-second"
+    )
+    second_db = Database(second_workdir.dbsh())
+    _seed_database(second_db)
+    second_scheduler = LocalScheduler()
+    reused = build_initial_seed_atlas(
+        second_db,
+        second_workdir,
+        second_scheduler,
+        settings,
+        atlas_root=workdir.atlas_dir(),
+        command_prefix=command_prefix,
+    )
+    assert reused.compound_count == seed_count
+    assert len(second_scheduler._jobs) == 0  # noqa: SLF001
+    assert second_db.connection.execute("SELECT COUNT(*) FROM clusters").fetchone()[0] == seed_count
+    second_db.close()

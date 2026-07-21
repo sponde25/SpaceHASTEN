@@ -47,6 +47,18 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _database_seed_digest(db: Database) -> tuple[int, str]:
+    digest = hashlib.sha256()
+    count = 0
+    rows = db.connection.execute(
+        "SELECT smiles, spacehastenid FROM data WHERE dock_iteration = 0 ORDER BY spacehastenid"
+    )
+    for smiles, identifier in rows:
+        digest.update(f"{str(smiles).strip()} {int(identifier)}\n".encode())
+        count += 1
+    return count, digest.hexdigest()
+
+
 def _export_seed_smiles(db: Database, path: Path) -> int:
     metadata_path = path.with_suffix(path.suffix + ".json")
     expected_count = int(
@@ -54,19 +66,29 @@ def _export_seed_smiles(db: Database, path: Path) -> int:
     )
     if path.is_file() and metadata_path.is_file():
         metadata = json.loads(metadata_path.read_text())
-        if metadata.get("seed_count") == expected_count and metadata.get("sha256") == _sha256(path):
+        database_count, database_hash = _database_seed_digest(db)
+        if (
+            metadata.get("seed_count") == expected_count
+            and database_count == expected_count
+            and metadata.get("content_sha256") == database_hash
+            and metadata.get("file_sha256") == _sha256(path)
+        ):
             LOGGER.info("Reusing exported seed atlas input: %s", path)
             return expected_count
+        raise ValueError(f"reusable atlas seed input does not match database seeds: {path}")
 
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.tmp")
     count = 0
+    content_digest = hashlib.sha256()
     with gzip.open(temporary, "wt", encoding="utf-8") as handle:
         rows = db.connection.execute(
             "SELECT smiles, spacehastenid FROM data WHERE dock_iteration = 0 ORDER BY spacehastenid"
         )
         for smiles, identifier in rows:
-            handle.write(f"{str(smiles).strip()} {int(identifier)}\n")
+            line = f"{str(smiles).strip()} {int(identifier)}\n"
+            handle.write(line)
+            content_digest.update(line.encode())
             count += 1
     if count != expected_count:
         temporary.unlink(missing_ok=True)
@@ -74,7 +96,11 @@ def _export_seed_smiles(db: Database, path: Path) -> int:
     temporary.replace(path)
     metadata_path.write_text(
         json.dumps(
-            {"seed_count": count, "sha256": _sha256(path)},
+            {
+                "seed_count": count,
+                "content_sha256": content_digest.hexdigest(),
+                "file_sha256": _sha256(path),
+            },
             indent=2,
         )
         + "\n"
@@ -298,6 +324,7 @@ def build_initial_seed_atlas(
     settings: Settings,
     *,
     atlas_id: str = DEFAULT_ATLAS_ID,
+    atlas_root: Path | None = None,
     command_prefix: Sequence[str] | None = None,
 ) -> ClusterAtlasVersionRow:
     """Build or resume atlas version 0 from all ``dock_iteration=0`` seeds."""
@@ -310,7 +337,7 @@ def build_initial_seed_atlas(
         LOGGER.info("Reusing persisted initial atlas %s", atlas_id)
         return existing
 
-    atlas_root = workdir.atlas_dir()
+    atlas_root = (atlas_root or workdir.atlas_dir()).resolve()
     atlas_root.mkdir(parents=True, exist_ok=True)
     source = atlas_root / "source" / "seeds.smi.gz"
     seed_count = _export_seed_smiles(db, source)
@@ -324,6 +351,42 @@ def build_initial_seed_atlas(
     clustering_cpus = max(1, int(g.cpu_count_clustering or 1))
     prefix = command_prefix or _default_atlas_command(settings)
     env_setup = _atlas_environment(settings)
+
+    seed_metadata = json.loads(source.with_suffix(source.suffix + ".json").read_text())
+    definition = {
+        "atlas_id": atlas_id,
+        "seed_count": seed_count,
+        "seed_sha256": seed_metadata["content_sha256"],
+        "similarity_threshold": threshold,
+        "fingerprint_type": FP_TYPE,
+        "fingerprint_parameters": FP_PARAMS,
+        "partition_count": partition_count,
+        "partition_rule": "spacehastenid_modulo",
+    }
+    definition_path = atlas_root / "atlas_definition.json"
+    if definition_path.is_file():
+        if json.loads(definition_path.read_text()) != definition:
+            raise ValueError(f"reusable atlas definition does not match this run: {atlas_root}")
+    else:
+        temporary = definition_path.with_name(f".{definition_path.name}.tmp")
+        temporary.write_text(json.dumps(definition, indent=2, sort_keys=True) + "\n")
+        temporary.replace(definition_path)
+
+    reusable_outputs = (
+        atlas_root / "final" / "assignments.npz",
+        atlas_root / "final" / "complete.json",
+        atlas_root / "reduced" / "centroids.smi.gz",
+        atlas_root / "repair" / "repair_centroids.smi.gz",
+    )
+    if all(path.is_file() for path in reusable_outputs):
+        LOGGER.info("Importing completed reusable seed atlas: %s", atlas_root)
+        return _ingest_initial_atlas(
+            db,
+            atlas_id=atlas_id,
+            atlas_root=atlas_root,
+            partition_count=partition_count,
+            threshold=threshold,
+        )
 
     partitions = atlas_root / "partitions"
     _submit(

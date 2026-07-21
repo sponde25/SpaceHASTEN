@@ -32,6 +32,9 @@ def test_top_level_help_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
         ["search"],
         ["dock"],
         ["cluster"],
+        ["atlas"],
+        ["atlas", "init"],
+        ["atlas", "status"],
         ["screening-cycle"],
         ["export"],
         ["export", "csv"],
@@ -104,6 +107,7 @@ def test_each_subcommand_parses_minimally(tmp_path) -> None:  # type: ignore[no-
         ["-w", str(ws), "search", "--source", "docked", "--top-n", "10", "--cpus", "4"],
         ["-w", str(ws), "dock", "--top-n", "10", "--cpus", "4"],
         ["-w", str(ws), "cluster"],
+        ["-w", str(ws), "atlas", "status"],
         [
             "-w",
             str(ws),
