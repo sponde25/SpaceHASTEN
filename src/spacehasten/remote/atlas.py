@@ -800,6 +800,51 @@ def apply_repair(
         raise
 
 
+def combine_centroids(
+    base_centroids: Path,
+    repair_centroids: Path,
+    output_dir: Path,
+) -> dict[str, Any]:
+    base_centroids = base_centroids.resolve()
+    repair_centroids = repair_centroids.resolve()
+    output_dir = output_dir.resolve()
+    inputs = {
+        "base": {**_identity(base_centroids), "sha256": _sha256(base_centroids)},
+        "repair": {
+            **_identity(repair_centroids),
+            "sha256": _sha256(repair_centroids),
+        },
+        "fingerprint_type": FP_TYPE,
+        "fingerprint_parameters": FP_PARAMS,
+    }
+    outputs = ("centroids.smi.gz", "centroids_fp.h5")
+    if _complete(output_dir, inputs, outputs):
+        LOGGER.info("Reusing combined centroid atlas: %s", output_dir)
+        return json.loads((output_dir / COMPLETE_FILE).read_text())
+    temp_dir = _new_temp_dir(output_dir)
+    started = time.monotonic()
+    try:
+        combined: dict[int, str] = {}
+        for path in (base_centroids, repair_centroids):
+            for smiles, identifier in read_smi(path):
+                if identifier in combined and combined[identifier] != smiles:
+                    raise ValueError(f"conflicting centroid SMILES for {identifier}")
+                combined[identifier] = smiles
+        rows = [(smiles, identifier) for identifier, smiles in sorted(combined.items())]
+        _write_smi(temp_dir / outputs[0], rows)
+        _build_fpsim2_index(rows, temp_dir / outputs[1])
+        metrics = {
+            "centroid_count": len(rows),
+            "elapsed_seconds": time.monotonic() - started,
+        }
+        _finish(temp_dir, inputs=inputs, outputs=outputs, metrics=metrics)
+        _commit_dir(temp_dir, output_dir)
+        return json.loads((output_dir / COMPLETE_FILE).read_text())
+    except Exception:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -868,6 +913,11 @@ def build_parser() -> argparse.ArgumentParser:
     apply.add_argument("--repair-assignments", type=Path, required=True)
     apply.add_argument("--output-dir", type=Path, required=True)
     apply.add_argument("--similarity-threshold", type=float, default=0.4)
+
+    combine = subparsers.add_parser("combine-centroids")
+    combine.add_argument("--base-centroids", type=Path, required=True)
+    combine.add_argument("--repair-centroids", type=Path, required=True)
+    combine.add_argument("--output-dir", type=Path, required=True)
     return parser
 
 
@@ -926,6 +976,12 @@ def main() -> int:
             args.repair_assignments,
             args.output_dir,
             args.similarity_threshold,
+        )
+    elif args.command == "combine-centroids":
+        combine_centroids(
+            args.base_centroids,
+            args.repair_centroids,
+            args.output_dir,
         )
     return 0
 

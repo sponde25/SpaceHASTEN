@@ -17,6 +17,7 @@ from rdkit.Chem import rdFingerprintGenerator
 from spacehasten.remote.atlas import (
     apply_repair,
     assign_centroid_shard,
+    combine_centroids,
     map_partition,
     merge_assignment_shards,
     partition_smiles,
@@ -116,6 +117,13 @@ def test_resumable_map_reduce_assignment_and_repair(tmp_path: Path) -> None:
         final,
         0.4,
     )
+    combined = tmp_path / "combined_centroids"
+    combine_centroids(
+        reduced / "centroids.smi.gz",
+        repair / "repair_centroids.smi.gz",
+        combined,
+    )
+    assert (combined / "centroids_fp.h5").is_file()
 
     with np.load(final / "assignments.npz") as assignments:
         assert assignments["spacehastenid"].tolist() == list(range(1, 21))

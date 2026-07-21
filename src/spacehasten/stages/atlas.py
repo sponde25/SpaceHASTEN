@@ -8,6 +8,7 @@ import json
 import logging
 import shlex
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -26,6 +27,26 @@ from spacehasten.workspace.layout import WorkDir
 
 LOGGER = logging.getLogger(__name__)
 DEFAULT_ATLAS_ID = "morgan-r2-1024-t040"
+
+
+@dataclass(frozen=True)
+class CentroidDiscoveryArtifacts:
+    centroids: Path
+    centroid_index: Path
+    molecule_index: Path
+
+
+@dataclass(frozen=True)
+class AssignmentArtifacts:
+    assignments: Path
+    uncovered: Path
+
+
+@dataclass(frozen=True)
+class AtlasVersionArtifacts:
+    assignments: Path
+    new_centroid_files: tuple[Path, ...]
+    metadata_path: Path
 
 
 def _default_atlas_command(settings: Settings) -> tuple[str, ...]:
@@ -269,6 +290,408 @@ def _intermediate_reducer_command(
     )
 
 
+def run_centroid_discovery(
+    scheduler: Scheduler,
+    settings: Settings,
+    *,
+    input_smiles: Path,
+    output_root: Path,
+    command_prefix: Sequence[str],
+    job_suffix: str,
+) -> CentroidDiscoveryArtifacts:
+    """Run the shared partition/map/hierarchical-reduce discovery pipeline."""
+    g = settings.general
+    partition_count = g.atlas_partition_count
+    intermediate_reducers = g.atlas_intermediate_reducers
+    threshold = g.atlas_similarity_threshold
+    clustering_cpus = max(1, int(g.cpu_count_clustering or 1))
+    if not 1 <= intermediate_reducers <= partition_count:
+        raise ValueError("atlas_intermediate_reducers must be between 1 and atlas_partition_count")
+    env_setup = _atlas_environment(settings)
+    output_root.mkdir(parents=True, exist_ok=True)
+
+    partitions = output_root / "partitions"
+    _submit(
+        scheduler,
+        name=f"atlas_partition_{job_suffix}",
+        workdir=output_root,
+        array_size=1,
+        max_concurrent=1,
+        cpus=1,
+        env_setup=env_setup,
+        command=_quote(
+            [
+                *command_prefix,
+                "partition",
+                "--input",
+                input_smiles,
+                "--output-dir",
+                partitions,
+                "--partition-count",
+                str(partition_count),
+            ]
+        ),
+    )
+
+    mapper_root = output_root / "mappers"
+    _submit(
+        scheduler,
+        name=f"atlas_map_{job_suffix}",
+        workdir=output_root,
+        array_size=partition_count,
+        max_concurrent=partition_count,
+        cpus=1,
+        env_setup=env_setup,
+        command=_mapper_command(
+            command_prefix,
+            partitions,
+            mapper_root,
+            partition_count,
+            threshold,
+        ),
+    )
+
+    intermediate_root = output_root / "intermediate_reducers"
+    _submit(
+        scheduler,
+        name=f"atlas_intermediate_{job_suffix}",
+        workdir=output_root,
+        array_size=intermediate_reducers,
+        max_concurrent=intermediate_reducers,
+        cpus=1,
+        env_setup=env_setup,
+        command=_intermediate_reducer_command(
+            command_prefix,
+            mapper_root,
+            intermediate_root,
+            intermediate_reducers,
+            threshold,
+        ),
+    )
+
+    pool = output_root / "pool"
+    reduced = output_root / "reduced"
+    molecule_index = output_root / "molecule_index"
+    reducer_command = "\n".join(
+        [
+            _quote(
+                [
+                    *command_prefix,
+                    "pool",
+                    "--map-root",
+                    intermediate_root,
+                    "--output-dir",
+                    pool,
+                ]
+            ),
+            _quote(
+                [
+                    *command_prefix,
+                    "reduce",
+                    "--input",
+                    pool / "pooled_centroids.smi.gz",
+                    "--output-dir",
+                    reduced,
+                    "--similarity-threshold",
+                    str(threshold),
+                    "--processes",
+                    str(clustering_cpus),
+                ]
+            ),
+            _quote(
+                [
+                    *command_prefix,
+                    "build-index",
+                    "--input",
+                    input_smiles,
+                    "--output-dir",
+                    molecule_index,
+                ]
+            ),
+        ]
+    )
+    _submit(
+        scheduler,
+        name=f"atlas_reduce_{job_suffix}",
+        workdir=output_root,
+        array_size=1,
+        max_concurrent=1,
+        cpus=clustering_cpus,
+        exclusive=True,
+        env_setup=env_setup,
+        command=reducer_command,
+    )
+    return CentroidDiscoveryArtifacts(
+        centroids=reduced / "centroids.smi.gz",
+        centroid_index=reduced / "centroids_fp.h5",
+        molecule_index=molecule_index / "molecules_fp.h5",
+    )
+
+
+def run_parallel_assignment(
+    scheduler: Scheduler,
+    settings: Settings,
+    *,
+    input_smiles: Path,
+    molecule_index: Path,
+    centroids: Path,
+    output_root: Path,
+    command_prefix: Sequence[str],
+    job_suffix: str,
+) -> AssignmentArtifacts:
+    """Run the shared centroid-sharded assignment and deterministic merge."""
+    shard_count = settings.general.atlas_assignment_shards
+    threshold = settings.general.atlas_similarity_threshold
+    env_setup = _atlas_environment(settings)
+    shard_root = output_root / "assignment_shards"
+    _submit(
+        scheduler,
+        name=f"atlas_assign_{job_suffix}",
+        workdir=output_root,
+        array_size=shard_count,
+        max_concurrent=shard_count,
+        cpus=1,
+        env_setup=env_setup,
+        command=_assignment_command(
+            command_prefix,
+            molecule_index,
+            centroids,
+            shard_root,
+            shard_count,
+            threshold,
+        ),
+    )
+    merged = output_root / "merged"
+    _submit(
+        scheduler,
+        name=f"atlas_merge_{job_suffix}",
+        workdir=output_root,
+        array_size=1,
+        max_concurrent=1,
+        cpus=1,
+        env_setup=env_setup,
+        command=_quote(
+            [
+                *command_prefix,
+                "merge-assignments",
+                "--molecule-index",
+                molecule_index,
+                "--input-smiles",
+                input_smiles,
+                "--shard-root",
+                shard_root,
+                "--output-dir",
+                merged,
+                "--similarity-threshold",
+                str(threshold),
+            ]
+        ),
+    )
+    return AssignmentArtifacts(
+        assignments=merged / "assignments.npz",
+        uncovered=merged / "uncovered.smi.gz",
+    )
+
+
+def run_coverage_repair(
+    scheduler: Scheduler,
+    settings: Settings,
+    *,
+    assignments: AssignmentArtifacts,
+    base_centroids: Path,
+    output_root: Path,
+    command_prefix: Sequence[str],
+    job_suffix: str,
+) -> AtlasVersionArtifacts:
+    """Run exact uncovered repair and publish combined final centroids."""
+    threshold = settings.general.atlas_similarity_threshold
+    clustering_cpus = max(1, int(settings.general.cpu_count_clustering or 1))
+    env_setup = _atlas_environment(settings)
+    repair = output_root / "repair"
+    final = output_root / "final"
+    command = "\n".join(
+        [
+            _quote(
+                [
+                    *command_prefix,
+                    "repair",
+                    "--uncovered",
+                    assignments.uncovered,
+                    "--output-dir",
+                    repair,
+                    "--similarity-threshold",
+                    str(threshold),
+                    "--processes",
+                    str(clustering_cpus),
+                ]
+            ),
+            _quote(
+                [
+                    *command_prefix,
+                    "apply-repair",
+                    "--base-assignments",
+                    assignments.assignments,
+                    "--repair-assignments",
+                    repair / "repair_assignments.npz",
+                    "--output-dir",
+                    final,
+                    "--similarity-threshold",
+                    str(threshold),
+                ]
+            ),
+            _quote(
+                [
+                    *command_prefix,
+                    "combine-centroids",
+                    "--base-centroids",
+                    base_centroids,
+                    "--repair-centroids",
+                    repair / "repair_centroids.smi.gz",
+                    "--output-dir",
+                    final / "centroids",
+                ]
+            ),
+        ]
+    )
+    _submit(
+        scheduler,
+        name=f"atlas_repair_{job_suffix}",
+        workdir=output_root,
+        array_size=1,
+        max_concurrent=1,
+        cpus=clustering_cpus,
+        exclusive=True,
+        env_setup=env_setup,
+        command=command,
+    )
+    return AtlasVersionArtifacts(
+        assignments=final / "assignments.npz",
+        new_centroid_files=(final / "centroids" / "centroids.smi.gz",),
+        metadata_path=final / "complete.json",
+    )
+
+
+def build_atlas_version(
+    scheduler: Scheduler,
+    settings: Settings,
+    *,
+    input_smiles: Path,
+    output_root: Path,
+    command_prefix: Sequence[str],
+    job_suffix: str,
+    existing_centroids: Path | None = None,
+) -> AtlasVersionArtifacts:
+    """Build one atlas version using shared discovery/assignment/repair steps."""
+    if existing_centroids is None:
+        discovery = run_centroid_discovery(
+            scheduler,
+            settings,
+            input_smiles=input_smiles,
+            output_root=output_root,
+            command_prefix=command_prefix,
+            job_suffix=job_suffix,
+        )
+        assignment = run_parallel_assignment(
+            scheduler,
+            settings,
+            input_smiles=input_smiles,
+            molecule_index=discovery.molecule_index,
+            centroids=discovery.centroids,
+            output_root=output_root,
+            command_prefix=command_prefix,
+            job_suffix=job_suffix,
+        )
+        return run_coverage_repair(
+            scheduler,
+            settings,
+            assignments=assignment,
+            base_centroids=discovery.centroids,
+            output_root=output_root,
+            command_prefix=command_prefix,
+            job_suffix=job_suffix,
+        )
+
+    env_setup = _atlas_environment(settings)
+    new_index_root = output_root / "new_molecule_index"
+    _submit(
+        scheduler,
+        name=f"atlas_index_{job_suffix}",
+        workdir=output_root,
+        array_size=1,
+        max_concurrent=1,
+        cpus=1,
+        env_setup=env_setup,
+        command=_quote(
+            [
+                *command_prefix,
+                "build-index",
+                "--input",
+                input_smiles,
+                "--output-dir",
+                new_index_root,
+            ]
+        ),
+    )
+    existing_assignment = run_parallel_assignment(
+        scheduler,
+        settings,
+        input_smiles=input_smiles,
+        molecule_index=new_index_root / "molecules_fp.h5",
+        centroids=existing_centroids,
+        output_root=output_root / "existing_assignment",
+        command_prefix=command_prefix,
+        job_suffix=f"{job_suffix}_existing",
+    )
+    merge_metadata = json.loads(
+        (existing_assignment.assignments.parent / "complete.json").read_text()
+    )
+    if int(merge_metadata["metrics"]["uncovered_count"]) == 0:
+        return AtlasVersionArtifacts(
+            assignments=existing_assignment.assignments,
+            new_centroid_files=(),
+            metadata_path=existing_assignment.assignments.parent / "complete.json",
+        )
+
+    novel_root = output_root / "novel"
+    novel = build_atlas_version(
+        scheduler,
+        settings,
+        input_smiles=existing_assignment.uncovered,
+        output_root=novel_root,
+        command_prefix=command_prefix,
+        job_suffix=f"{job_suffix}_novel",
+    )
+    final = output_root / "final"
+    _submit(
+        scheduler,
+        name=f"atlas_combine_{job_suffix}",
+        workdir=output_root,
+        array_size=1,
+        max_concurrent=1,
+        cpus=1,
+        env_setup=env_setup,
+        command=_quote(
+            [
+                *command_prefix,
+                "apply-repair",
+                "--base-assignments",
+                existing_assignment.assignments,
+                "--repair-assignments",
+                novel.assignments,
+                "--output-dir",
+                final,
+                "--similarity-threshold",
+                str(settings.general.atlas_similarity_threshold),
+            ]
+        ),
+    )
+    return AtlasVersionArtifacts(
+        assignments=final / "assignments.npz",
+        new_centroid_files=novel.new_centroid_files,
+        metadata_path=final / "complete.json",
+    )
+
+
 def _batched(values: Iterable, size: int):  # type: ignore[no-untyped-def]
     batch = []
     for value in values:
@@ -289,14 +712,18 @@ def _ingest_initial_atlas(
     threshold: float,
 ) -> ClusterAtlasVersionRow:
     final_assignments = atlas_root / "final" / "assignments.npz"
-    reduced_centroids = atlas_root / "reduced" / "centroids.smi.gz"
-    repair_centroids = atlas_root / "repair" / "repair_centroids.smi.gz"
-    if not all(path.is_file() for path in (final_assignments, reduced_centroids, repair_centroids)):
+    combined_centroids = atlas_root / "final" / "centroids" / "centroids.smi.gz"
+    if combined_centroids.is_file():
+        centroid_files = (combined_centroids,)
+    else:
+        centroid_files = (
+            atlas_root / "reduced" / "centroids.smi.gz",
+            atlas_root / "repair" / "repair_centroids.smi.gz",
+        )
+    if not final_assignments.is_file() or not all(path.is_file() for path in centroid_files):
         raise FileNotFoundError("initial atlas outputs are incomplete")
 
-    centroids = {
-        identifier for _, identifier in read_smi(reduced_centroids) + read_smi(repair_centroids)
-    }
+    centroids = {identifier for path in centroid_files for _, identifier in read_smi(path)}
     with np.load(final_assignments) as assignments:
         identifiers = assignments["spacehastenid"].copy()
         cluster_ids = assignments["clusterid"].copy()
@@ -383,11 +810,8 @@ def build_initial_seed_atlas(
     g = settings.general
     partition_count = g.atlas_partition_count
     intermediate_reducers = g.atlas_intermediate_reducers
-    shard_count = g.atlas_assignment_shards
     threshold = g.atlas_similarity_threshold
-    clustering_cpus = max(1, int(g.cpu_count_clustering or 1))
     prefix = command_prefix or _default_atlas_command(settings)
-    env_setup = _atlas_environment(settings)
     if not 1 <= intermediate_reducers <= partition_count:
         raise ValueError("atlas_intermediate_reducers must be between 1 and atlas_partition_count")
 
@@ -428,192 +852,13 @@ def build_initial_seed_atlas(
             threshold=threshold,
         )
 
-    partitions = atlas_root / "partitions"
-    _submit(
+    build_atlas_version(
         scheduler,
-        name="atlas_partition_v0",
-        workdir=atlas_root,
-        array_size=1,
-        max_concurrent=1,
-        cpus=1,
-        env_setup=env_setup,
-        command=_quote(
-            [
-                *prefix,
-                "partition",
-                "--input",
-                source,
-                "--output-dir",
-                partitions,
-                "--partition-count",
-                str(partition_count),
-            ]
-        ),
-    )
-
-    mapper_root = atlas_root / "mappers"
-    _submit(
-        scheduler,
-        name="atlas_map_v0",
-        workdir=atlas_root,
-        array_size=partition_count,
-        max_concurrent=partition_count,
-        cpus=1,
-        env_setup=env_setup,
-        command=_mapper_command(prefix, partitions, mapper_root, partition_count, threshold),
-    )
-
-    intermediate_root = atlas_root / "intermediate_reducers"
-    _submit(
-        scheduler,
-        name="atlas_intermediate_v0",
-        workdir=atlas_root,
-        array_size=intermediate_reducers,
-        max_concurrent=intermediate_reducers,
-        cpus=1,
-        env_setup=env_setup,
-        command=_intermediate_reducer_command(
-            prefix,
-            mapper_root,
-            intermediate_root,
-            intermediate_reducers,
-            threshold,
-        ),
-    )
-
-    pool = atlas_root / "pool"
-    reduced = atlas_root / "reduced"
-    molecule_index = atlas_root / "molecule_index"
-    reducer_command = "\n".join(
-        [
-            _quote(
-                [
-                    *prefix,
-                    "pool",
-                    "--map-root",
-                    intermediate_root,
-                    "--output-dir",
-                    pool,
-                ]
-            ),
-            _quote(
-                [
-                    *prefix,
-                    "reduce",
-                    "--input",
-                    pool / "pooled_centroids.smi.gz",
-                    "--output-dir",
-                    reduced,
-                    "--similarity-threshold",
-                    str(threshold),
-                    "--processes",
-                    str(clustering_cpus),
-                ]
-            ),
-            _quote(
-                [
-                    *prefix,
-                    "build-index",
-                    "--input",
-                    source,
-                    "--output-dir",
-                    molecule_index,
-                ]
-            ),
-        ]
-    )
-    _submit(
-        scheduler,
-        name="atlas_reduce_v0",
-        workdir=atlas_root,
-        array_size=1,
-        max_concurrent=1,
-        cpus=clustering_cpus,
-        exclusive=True,
-        env_setup=env_setup,
-        command=reducer_command,
-    )
-
-    shard_root = atlas_root / "assignment_shards"
-    _submit(
-        scheduler,
-        name="atlas_assign_v0",
-        workdir=atlas_root,
-        array_size=shard_count,
-        max_concurrent=shard_count,
-        cpus=1,
-        env_setup=env_setup,
-        command=_assignment_command(
-            prefix,
-            molecule_index / "molecules_fp.h5",
-            reduced / "centroids.smi.gz",
-            shard_root,
-            shard_count,
-            threshold,
-        ),
-    )
-
-    merged = atlas_root / "merged"
-    repair = atlas_root / "repair"
-    final = atlas_root / "final"
-    finalize_command = "\n".join(
-        [
-            _quote(
-                [
-                    *prefix,
-                    "merge-assignments",
-                    "--molecule-index",
-                    molecule_index / "molecules_fp.h5",
-                    "--input-smiles",
-                    source,
-                    "--shard-root",
-                    shard_root,
-                    "--output-dir",
-                    merged,
-                    "--similarity-threshold",
-                    str(threshold),
-                ]
-            ),
-            _quote(
-                [
-                    *prefix,
-                    "repair",
-                    "--uncovered",
-                    merged / "uncovered.smi.gz",
-                    "--output-dir",
-                    repair,
-                    "--similarity-threshold",
-                    str(threshold),
-                    "--processes",
-                    str(clustering_cpus),
-                ]
-            ),
-            _quote(
-                [
-                    *prefix,
-                    "apply-repair",
-                    "--base-assignments",
-                    merged / "assignments.npz",
-                    "--repair-assignments",
-                    repair / "repair_assignments.npz",
-                    "--output-dir",
-                    final,
-                    "--similarity-threshold",
-                    str(threshold),
-                ]
-            ),
-        ]
-    )
-    _submit(
-        scheduler,
-        name="atlas_finalize_v0",
-        workdir=atlas_root,
-        array_size=1,
-        max_concurrent=1,
-        cpus=clustering_cpus,
-        exclusive=True,
-        env_setup=env_setup,
-        command=finalize_command,
+        settings,
+        input_smiles=source,
+        output_root=atlas_root,
+        command_prefix=prefix,
+        job_suffix="v0",
     )
     version = _ingest_initial_atlas(
         db,

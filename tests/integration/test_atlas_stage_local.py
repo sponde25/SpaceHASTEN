@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import gzip
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 pytest.importorskip("FPSim2")
@@ -13,7 +15,11 @@ pytest.importorskip("rdkit")
 from spacehasten.config.settings import GeneralSettings, Settings
 from spacehasten.core.db import Database
 from spacehasten.scheduler import LocalScheduler
-from spacehasten.stages.atlas import DEFAULT_ATLAS_ID, build_initial_seed_atlas
+from spacehasten.stages.atlas import (
+    DEFAULT_ATLAS_ID,
+    build_atlas_version,
+    build_initial_seed_atlas,
+)
 from spacehasten.workspace.layout import WorkDir
 
 
@@ -78,7 +84,7 @@ def test_initial_seed_atlas_stage_is_resumable(tmp_path: Path) -> None:
     assert 1 <= version.centroid_count <= seed_count
     assert db.connection.execute("SELECT COUNT(*) FROM clusters").fetchone()[0] == seed_count
     first_job_count = len(scheduler._jobs)  # noqa: SLF001
-    assert first_job_count == 6
+    assert first_job_count == 7
 
     resumed = build_initial_seed_atlas(
         db,
@@ -90,6 +96,7 @@ def test_initial_seed_atlas_stage_is_resumable(tmp_path: Path) -> None:
     assert resumed == version
     assert len(scheduler._jobs) == first_job_count  # noqa: SLF001
     assert (workdir.atlas_dir() / "final" / "assignments.npz").is_file()
+    assert (workdir.atlas_dir() / "final" / "centroids" / "centroids_fp.h5").is_file()
     assert db.latest_cluster_atlas_version(DEFAULT_ATLAS_ID) == version
     db.close()
 
@@ -111,3 +118,22 @@ def test_initial_seed_atlas_stage_is_resumable(tmp_path: Path) -> None:
     assert len(second_scheduler._jobs) == 0  # noqa: SLF001
     assert second_db.connection.execute("SELECT COUNT(*) FROM clusters").fetchone()[0] == seed_count
     second_db.close()
+
+    new_input = tmp_path / "new_compounds.smi.gz"
+    with gzip.open(new_input, "wt", encoding="utf-8") as handle:
+        handle.write("N#N 21\n")
+        handle.write("OP(=O)(O)O 22\n")
+        handle.write("Cl[Si](Cl)(Cl)Cl 23\n")
+    update = build_atlas_version(
+        scheduler,
+        settings,
+        input_smiles=new_input,
+        output_root=workdir.atlas_dir() / "update_test",
+        command_prefix=command_prefix,
+        job_suffix="update_test",
+        existing_centroids=(workdir.atlas_dir() / "final" / "centroids" / "centroids.smi.gz"),
+    )
+    with np.load(update.assignments) as assignments:
+        assert assignments["spacehastenid"].tolist() == [21, 22, 23]
+        assert np.all(assignments["clusterid"] >= 0)
+        assert np.all(assignments["centroid_similarity"] >= 0.4)
