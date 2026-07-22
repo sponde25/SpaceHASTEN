@@ -1028,6 +1028,19 @@ def _ingest_incremental_atlas(
         raise
 
 
+def _initial_atlas_outputs(atlas_root: Path) -> tuple[Path, ...]:
+    source = atlas_root / "source" / "seeds.smi.gz"
+    return (
+        atlas_root / "atlas_definition.json",
+        source,
+        source.with_suffix(source.suffix + ".json"),
+        atlas_root / "final" / "assignments.npz",
+        atlas_root / "final" / "complete.json",
+        atlas_root / "reduced" / "centroids.smi.gz",
+        atlas_root / "repair" / "repair_centroids.smi.gz",
+    )
+
+
 def build_initial_seed_atlas(
     db: Database,
     workdir: WorkDir,
@@ -1082,12 +1095,7 @@ def build_initial_seed_atlas(
         temporary.write_text(json.dumps(definition, indent=2, sort_keys=True) + "\n")
         temporary.replace(definition_path)
 
-    reusable_outputs = (
-        atlas_root / "final" / "assignments.npz",
-        atlas_root / "final" / "complete.json",
-        atlas_root / "reduced" / "centroids.smi.gz",
-        atlas_root / "repair" / "repair_centroids.smi.gz",
-    )
+    reusable_outputs = _initial_atlas_outputs(atlas_root)[3:]
     if all(path.is_file() for path in reusable_outputs):
         LOGGER.info("Importing completed reusable seed atlas: %s", atlas_root)
         return _ingest_initial_atlas(
@@ -1120,6 +1128,38 @@ def build_initial_seed_atlas(
         version.centroid_count,
     )
     return version
+
+
+def import_initial_seed_atlas(
+    db: Database,
+    workdir: WorkDir,
+    scheduler: Scheduler,
+    settings: Settings,
+    *,
+    atlas_root: Path,
+    atlas_id: str = DEFAULT_ATLAS_ID,
+    command_prefix: Sequence[str] | None = None,
+) -> ClusterAtlasVersionRow:
+    """Import a completed seed atlas without allowing an implicit build."""
+    existing = db.latest_cluster_atlas_version(atlas_id)
+    if existing is not None:
+        return existing
+    atlas_root = atlas_root.resolve()
+    missing = [path for path in _initial_atlas_outputs(atlas_root) if not path.is_file()]
+    if missing:
+        missing_names = ", ".join(str(path.relative_to(atlas_root)) for path in missing)
+        raise FileNotFoundError(
+            f"no completed seed atlas at {atlas_root}; missing: {missing_names}"
+        )
+    return build_initial_seed_atlas(
+        db,
+        workdir,
+        scheduler,
+        settings,
+        atlas_id=atlas_id,
+        atlas_root=atlas_root,
+        command_prefix=command_prefix,
+    )
 
 
 def update_cluster_atlas(
@@ -1264,6 +1304,7 @@ __all__ = [
     "DEFAULT_ATLAS_ID",
     "build_atlas_version",
     "build_initial_seed_atlas",
+    "import_initial_seed_atlas",
     "run_centroid_discovery",
     "run_coverage_repair",
     "run_parallel_assignment",

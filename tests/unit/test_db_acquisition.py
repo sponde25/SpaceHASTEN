@@ -16,7 +16,12 @@ from pathlib import Path
 
 import pytest
 
-from spacehasten.core.db import ClusterRow, Database
+from spacehasten.core.db import (
+    ClusterAtlasAssignmentRow,
+    ClusterAtlasRow,
+    ClusterRow,
+    Database,
+)
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 LEGACY_BASELINE = FIXTURES / "legacy_baseline.dbsh"
@@ -94,15 +99,46 @@ def test_uncertainty_candidates_use_each_rows_current_prediction_version(
             ClusterRow(spacehastenid=second, clusterid=20),
         ]
     )
+    database.upsert_cluster_atlas(ClusterAtlasRow("atlas", 0.4, "Morgan", "{}", 64))
+    database.append_cluster_atlas_assignments(
+        [
+            ClusterAtlasAssignmentRow("atlas", first, 100, 0.8, 0),
+            ClusterAtlasAssignmentRow("atlas", second, 200, 0.9, 0),
+        ]
+    )
     database.commit()
 
-    candidates = database.select_uncertainty_docking_candidates()
+    candidates_without_atlas = database.select_uncertainty_docking_candidates()
+    candidates = database.select_uncertainty_docking_candidates(atlas_id="atlas")
     database.close()
 
+    assert [candidate.clusterid for candidate in candidates_without_atlas] == [None, None]
     assert [candidate.model_version for candidate in candidates] == [2, 2]
     assert [candidate.pred_score for candidate in candidates] == [-8.0, -7.0]
     assert [candidate.epistemic_std for candidate in candidates] == [0.2, 0.4]
-    assert [candidate.clusterid for candidate in candidates] == [10, 20]
+    assert [candidate.clusterid for candidate in candidates] == [100, 200]
+
+
+def test_uncertainty_candidates_require_selected_atlas_coverage(tmp_path: Path) -> None:
+    database = Database(tmp_path / "missing-atlas.dbsh")
+    database.create_schema()
+    first = database.insert_seed_undocked("h1", "CC", "first")
+    second = database.insert_seed_undocked("h2", "CCC", "second")
+    database.apply_predictions(
+        [
+            (first, 1, -8.0, 0.2, 0.1, 0.3),
+            (second, 1, -7.0, 0.4, 0.1, 0.5),
+        ]
+    )
+    database.upsert_cluster_atlas(ClusterAtlasRow("atlas", 0.4, "Morgan", "{}", 64))
+    database.append_cluster_atlas_assignments(
+        [ClusterAtlasAssignmentRow("atlas", first, first, 1.0, 0)]
+    )
+    database.commit()
+
+    with pytest.raises(ValueError, match="lack assignments in atlas 'atlas'"):
+        database.select_uncertainty_docking_candidates(atlas_id="atlas")
+    database.close()
 
 
 def test_uncertainty_candidates_reject_missing_epistemic_uncertainty(

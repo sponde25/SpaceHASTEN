@@ -15,10 +15,19 @@ from pathlib import Path
 import pytest
 
 from spacehasten.config.settings import Settings
-from spacehasten.core.db import ClusterRow, Database
+from spacehasten.core.db import (
+    ClusterAtlasAssignmentRow,
+    ClusterAtlasCentroidRow,
+    ClusterAtlasRow,
+    ClusterAtlasVersionRow,
+    ClusterRow,
+    Database,
+)
 from spacehasten.scheduler import LocalScheduler
 from spacehasten.stages.docking import _build_dock_command_body, dock
 from spacehasten.workspace.layout import WorkDir
+
+TEST_ATLAS_ID = "test-atlas"
 
 # A bash body that replaces the Schrödinger pipeline. It reads
 # ``chunk_${TASK_ID}.smi`` (each line: ``<smiles> <spacehastenid>``),
@@ -69,7 +78,7 @@ def _seed_db(db: Database, n_predicted: int = 12) -> None:
 
 def _seed_uncertainty_db(db: Database) -> list[int]:
     db.create_schema()
-    db.insert_seed_docked("hd0", "CCO", "docked-seed", -8.0)
+    seed_id = db.insert_seed_docked("hd0", "CCO", "docked-seed", -8.0)
     candidates = [
         ("hu0", "CCCC", "candidate-0", -9.0, 2.0, 10),
         ("hu1", "CCCCC", "candidate-1", -10.0, 0.0, 10),
@@ -77,14 +86,41 @@ def _seed_uncertainty_db(db: Database) -> list[int]:
     ]
     identifiers: list[int] = []
     predictions: list[tuple[int, int, float, float, float, float]] = []
-    clusters: list[ClusterRow] = []
-    for reghash, smiles, smilesid, mean, epistemic, clusterid in candidates:
+    for reghash, smiles, smilesid, mean, epistemic, _clusterid in candidates:
         sid = db.insert_seed_undocked(reghash, smiles, smilesid)
         identifiers.append(sid)
         predictions.append((sid, 1, mean, epistemic, 0.1, epistemic + 0.1))
-        clusters.append(ClusterRow(spacehastenid=sid, clusterid=clusterid))
     db.apply_predictions(predictions)
-    db.replace_clusters(clusters)
+    first, same_cluster, other_cluster = identifiers
+    db.replace_clusters(
+        [ClusterRow(spacehastenid=identifier, clusterid=999) for identifier in identifiers]
+    )
+    db.upsert_cluster_atlas(ClusterAtlasRow(TEST_ATLAS_ID, 0.4, "Morgan", "{}", 64))
+    db.append_cluster_atlas_centroids(
+        [
+            ClusterAtlasCentroidRow(TEST_ATLAS_ID, seed_id, seed_id, 0),
+            ClusterAtlasCentroidRow(TEST_ATLAS_ID, first, first, 0),
+            ClusterAtlasCentroidRow(TEST_ATLAS_ID, other_cluster, other_cluster, 0),
+        ]
+    )
+    db.append_cluster_atlas_assignments(
+        [
+            ClusterAtlasAssignmentRow(TEST_ATLAS_ID, seed_id, seed_id, 1.0, 0),
+            ClusterAtlasAssignmentRow(TEST_ATLAS_ID, first, first, 1.0, 0),
+            ClusterAtlasAssignmentRow(TEST_ATLAS_ID, same_cluster, first, 0.8, 0),
+            ClusterAtlasAssignmentRow(TEST_ATLAS_ID, other_cluster, other_cluster, 1.0, 0),
+        ]
+    )
+    db.record_cluster_atlas_version(
+        ClusterAtlasVersionRow(
+            TEST_ATLAS_ID,
+            0,
+            other_cluster,
+            4,
+            3,
+            "test-atlas/final/complete.json",
+        )
+    )
     db.store_dock_param(b"GRIDFILE /old.zip\nLIGANDFILE /old.maegz\nPRECISION SP\n")
     db.store_dock_grid(b"PK\x05\x06" + b"\x00" * 18)
     db.commit()
@@ -238,6 +274,7 @@ def test_uncertainty_acquisition_with_dynamic_cluster_penalty(
         strategy=strategy,  # type: ignore[arg-type]
         cpus=1,
         cluster_lambda=1.0,
+        atlas_id=TEST_ATLAS_ID,
         dock_command_template=_STUB_BODY,
         seed=0,
         **method_args,
@@ -263,6 +300,30 @@ def test_uncertainty_acquisition_with_dynamic_cluster_penalty(
     assert {row["method"] for row in acquisition_rows} == {strategy}
     assert {float(row["cluster_lambda"]) for row in acquisition_rows} == {1.0}
     assert {float(row["cluster_similarity_threshold"]) for row in acquisition_rows} == {0.4}
+
+
+def test_uncertainty_acquisition_rejects_stale_atlas(tmp_path: Path) -> None:
+    workdir = WorkDir.bootstrap(tmp_path / "stale", name="dock-stale")
+    db = Database(workdir.dbsh())
+    _seed_uncertainty_db(db)
+    sid = db.insert_seed_undocked("new", "CCCCCCC", "new-candidate")
+    db.apply_predictions([(sid, 1, -8.0, 0.2, 0.1, 0.3)])
+    db.commit()
+
+    with pytest.raises(ValueError, match="atlas 'test-atlas' is stale"):
+        dock(
+            db,
+            workdir,
+            LocalScheduler(),
+            Settings(),
+            top_n=2,
+            strategy="lcb",
+            cpus=1,
+            cluster_lambda=1.0,
+            atlas_id=TEST_ATLAS_ID,
+            dock_command_template=_STUB_BODY,
+        )
+    db.close()
 
 
 def test_dock_stage_no_candidates_raises(tmp_path: Path) -> None:

@@ -315,12 +315,25 @@ class Database:
     )
     _SQL_DOCK_UNCERTAINTY_CANDIDATES: Final[str] = (
         "SELECT d.smiles, d.spacehastenid, p.pred_score, p.epistemic_std,"
-        " d.pred_version, c.clusterid\n"
+        " d.pred_version, NULL AS clusterid\n"
         " FROM data AS d\n"
         " LEFT JOIN predictions AS p"
         " ON p.spacehastenid = d.spacehastenid"
         " AND p.model_version = d.pred_version\n"
-        " LEFT JOIN clusters AS c ON c.spacehastenid = d.spacehastenid\n"
+        " WHERE d.dock_score IS NULL"
+        " AND d.pred_score IS NOT NULL"
+        " AND d.pred_version IS NOT NULL\n"
+        " ORDER BY d.spacehastenid"
+    )
+    _SQL_DOCK_ATLAS_UNCERTAINTY_CANDIDATES: Final[str] = (
+        "SELECT d.smiles, d.spacehastenid, p.pred_score, p.epistemic_std,"
+        " d.pred_version, a.clusterid\n"
+        " FROM data AS d\n"
+        " LEFT JOIN predictions AS p"
+        " ON p.spacehastenid = d.spacehastenid"
+        " AND p.model_version = d.pred_version\n"
+        " LEFT JOIN cluster_atlas_assignments AS a"
+        " ON a.spacehastenid = d.spacehastenid AND a.atlas_id = ?\n"
         " WHERE d.dock_score IS NULL"
         " AND d.pred_score IS NOT NULL"
         " AND d.pred_version IS NOT NULL\n"
@@ -519,6 +532,10 @@ class Database:
         row = self._conn.execute("SELECT MAX(dock_iteration) FROM data").fetchone()
         return int(row[0]) if row and row[0] is not None else None
 
+    def latest_spacehastenid(self) -> int:
+        row = self._conn.execute("SELECT COALESCE(MAX(spacehastenid), 0) FROM data").fetchone()
+        return int(row[0])
+
     def latest_search_attempt_cycle(self) -> int | None:
         """Return the highest simsearch cycle number *attempted* so far.
 
@@ -595,6 +612,21 @@ class Database:
                 "its hit compound(s) have already been used as queries for a later "
                 f"cycle, so cycle {cycle} is not actually the latest search attempt. "
                 "Undo the later cycle first."
+            )
+        self.ensure_extension_schema()
+        n_atlas_hits = int(
+            self._conn.execute(
+                "SELECT COUNT(DISTINCT d.spacehastenid) FROM data AS d "
+                "JOIN cluster_atlas_assignments AS a "
+                "ON a.spacehastenid = d.spacehastenid "
+                "WHERE d.simsearch_cycle = ?",
+                (cycle,),
+            ).fetchone()[0]
+        )
+        if n_atlas_hits:
+            raise ValueError(
+                f"cannot undo simsearch cycle {cycle}: {n_atlas_hits} hit compound(s) "
+                "are assigned to an append-only cluster atlas"
             )
         hit_ids = [
             row[0]
@@ -769,6 +801,16 @@ class Database:
             (row.atlas_id, *values),
         )
 
+    def cluster_atlas(self, atlas_id: str) -> ClusterAtlasRow | None:
+        self.ensure_extension_schema()
+        row = self._conn.execute(
+            "SELECT atlas_id, similarity_threshold, fingerprint_type, "
+            "fingerprint_parameters, partition_count FROM cluster_atlases "
+            "WHERE atlas_id = ?",
+            (atlas_id,),
+        ).fetchone()
+        return ClusterAtlasRow(*row) if row is not None else None
+
     def record_cluster_atlas_version(self, row: ClusterAtlasVersionRow) -> None:
         self.ensure_extension_schema()
         self._conn.execute(
@@ -831,6 +873,17 @@ class Database:
             (atlas_id,),
         ).fetchone()
         return ClusterAtlasVersionRow(*row) if row is not None else None
+
+    def count_missing_cluster_atlas_assignments(self, atlas_id: str) -> int:
+        self.ensure_extension_schema()
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM data AS d "
+            "LEFT JOIN cluster_atlas_assignments AS a "
+            "ON a.atlas_id = ? AND a.spacehastenid = d.spacehastenid "
+            "WHERE a.spacehastenid IS NULL",
+            (atlas_id,),
+        ).fetchone()
+        return int(row[0])
 
     def materialize_cluster_atlas(self, atlas_id: str) -> int:
         """Replace the legacy clusters table from a persistent atlas."""
@@ -938,11 +991,20 @@ class Database:
         sql = self._SQL_DOCK_GREEDY if strategy == "greedy" else self._SQL_DOCK_CLUSTERING
         return [(s, i) for s, i in self._conn.execute(sql, (limit,)).fetchall()]
 
-    def select_uncertainty_docking_candidates(self) -> list[AcquisitionCandidate]:
+    def select_uncertainty_docking_candidates(
+        self, *, atlas_id: str | None = None
+    ) -> list[AcquisitionCandidate]:
         """Return undocked candidates with version-matched epistemic uncertainty."""
         self.ensure_extension_schema()
-        rows = self._conn.execute(self._SQL_DOCK_UNCERTAINTY_CANDIDATES).fetchall()
+        if atlas_id is None:
+            rows = self._conn.execute(self._SQL_DOCK_UNCERTAINTY_CANDIDATES).fetchall()
+        else:
+            rows = self._conn.execute(
+                self._SQL_DOCK_ATLAS_UNCERTAINTY_CANDIDATES,
+                (atlas_id,),
+            ).fetchall()
         missing: list[int] = []
+        missing_atlas: list[int] = []
         candidates: list[AcquisitionCandidate] = []
         for smiles, sid, mean, epistemic_std, version, clusterid in rows:
             if mean is None or epistemic_std is None:
@@ -950,6 +1012,9 @@ class Database:
                 continue
             if smiles is None:
                 raise ValueError(f"acquisition candidate {sid} has no SMILES")
+            if atlas_id is not None and clusterid is None:
+                missing_atlas.append(int(sid))
+                continue
             candidates.append(
                 AcquisitionCandidate(
                     smiles=str(smiles),
@@ -965,6 +1030,12 @@ class Database:
             raise ValueError(
                 f"{len(missing)} predicted undocked compounds lack version-matched "
                 f"epistemic uncertainty (first IDs: {preview})"
+            )
+        if missing_atlas:
+            preview = ", ".join(str(identifier) for identifier in missing_atlas[:5])
+            raise ValueError(
+                f"{len(missing_atlas)} predicted undocked compounds lack assignments "
+                f"in atlas {atlas_id!r} (first IDs: {preview})"
             )
         return candidates
 

@@ -16,6 +16,7 @@ from spacehasten.scheduler import LocalScheduler
 from spacehasten.stages.atlas import (
     DEFAULT_ATLAS_ID,
     build_initial_seed_atlas,
+    import_initial_seed_atlas,
     update_cluster_atlas,
 )
 from spacehasten.workspace.layout import WorkDir
@@ -207,7 +208,7 @@ def test_initial_seed_atlas_stage_is_resumable(tmp_path: Path) -> None:
     second_db = Database(second_workdir.dbsh())
     _seed_database(second_db)
     second_scheduler = LocalScheduler()
-    reused = build_initial_seed_atlas(
+    reused = import_initial_seed_atlas(
         second_db,
         second_workdir,
         second_scheduler,
@@ -219,3 +220,19 @@ def test_initial_seed_atlas_stage_is_resumable(tmp_path: Path) -> None:
     assert len(second_scheduler._jobs) == 0  # noqa: SLF001
     assert second_db.connection.execute("SELECT COUNT(*) FROM clusters").fetchone()[0] == 0
     second_db.close()
+
+    missing_workdir = WorkDir.bootstrap(
+        tmp_path / "local-missing", shared_root=tmp_path / "shared-missing"
+    )
+    missing_db = Database(missing_workdir.dbsh())
+    _seed_database(missing_db)
+    with pytest.raises(FileNotFoundError, match="no completed seed atlas"):
+        import_initial_seed_atlas(
+            missing_db,
+            missing_workdir,
+            LocalScheduler(),
+            settings,
+            atlas_root=tmp_path / "does-not-exist",
+            command_prefix=command_prefix,
+        )
+    missing_db.close()

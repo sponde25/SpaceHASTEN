@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from spacehasten.core.db import ClusterRow, Database
+from spacehasten.core.db import ClusterAtlasAssignmentRow, ClusterRow, Database
 
 
 @pytest.fixture
@@ -164,5 +164,27 @@ def test_undo_simsearch_cycle_refuses_when_hit_used_as_later_query(db: Database)
     db.commit()
 
     with pytest.raises(ValueError, match="not actually the latest search attempt"):
+        db.undo_simsearch_cycle(1)
+    assert db.simsearch_cycle_stats(1).n_hits == 1
+
+
+def test_undo_simsearch_cycle_refuses_append_only_atlas_hits(db: Database) -> None:
+    seed_id = db.insert_seed_docked("h1", "CCO", "SEED1", dock_score=-7.0)
+    db.mark_as_query(seed_id, cycle=1)
+    hit_id = db.insert_simsearch_hit(
+        "h2",
+        "c1ccccc1",
+        "HIT1",
+        spacelight=0.9,
+        ftrees=0.8,
+        pred_score=-6.0,
+        simsearch_cycle=1,
+    )
+    db.append_cluster_atlas_assignments(
+        [ClusterAtlasAssignmentRow("atlas", hit_id, hit_id, 1.0, 1)]
+    )
+    db.commit()
+
+    with pytest.raises(ValueError, match="append-only cluster atlas"):
         db.undo_simsearch_cycle(1)
     assert db.simsearch_cycle_stats(1).n_hits == 1

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import csv
 import logging
+import math
 import os
 import random
 import shutil
@@ -30,7 +31,7 @@ import subprocess
 from collections import Counter
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Final, Literal, cast
+from typing import Final, Literal
 
 from spacehasten.config.settings import Settings
 from spacehasten.core.acquisition import (
@@ -231,6 +232,42 @@ def _ingest_dock_results(extract_root: Path) -> dict[str, float]:
     return results
 
 
+def _require_current_cluster_atlas(db: Database, atlas_id: str) -> None:
+    atlas = db.cluster_atlas(atlas_id)
+    if atlas is None:
+        raise ValueError(
+            f"atlas {atlas_id!r} is not initialized; run `spacehasten atlas init "
+            f"--atlas-id {atlas_id} --atlas-root PATH`"
+        )
+    if not math.isclose(
+        atlas.similarity_threshold,
+        PENALTY_CLUSTER_SIMILARITY,
+        rel_tol=0.0,
+        abs_tol=1e-12,
+    ):
+        raise ValueError(
+            f"atlas {atlas_id!r} uses similarity threshold "
+            f"{atlas.similarity_threshold}, expected {PENALTY_CLUSTER_SIMILARITY}"
+        )
+    version = db.latest_cluster_atlas_version(atlas_id)
+    if version is None:
+        raise ValueError(f"atlas {atlas_id!r} has no completed version")
+    database_max = db.latest_spacehastenid()
+    database_count = db.count_total()
+    if version.last_spacehastenid != database_max or version.compound_count != database_count:
+        raise ValueError(
+            f"atlas {atlas_id!r} is stale at watermark {version.last_spacehastenid} "
+            f"for database maximum {database_max}; run `spacehasten atlas update "
+            f"--atlas-id {atlas_id}`"
+        )
+    missing = db.count_missing_cluster_atlas_assignments(atlas_id)
+    if missing:
+        raise ValueError(
+            f"atlas {atlas_id!r} is incomplete: {missing} database compounds "
+            "lack assignments; restore or rebuild the atlas"
+        )
+
+
 def dock(
     db: Database,
     workdir: WorkDir,
@@ -244,6 +281,7 @@ def dock(
     ei_hit_threshold: float | None = None,
     ei_xi: float = 0.0,
     cluster_lambda: float = 0.0,
+    atlas_id: str | None = None,
     dock_command_template: str | None = None,
     seed: int | None = None,
 ) -> int:
@@ -261,6 +299,8 @@ def dock(
     :param strategy: docking acquisition method. ``lcb`` and ``ei`` use
         version-matched epistemic uncertainty and optionally apply a dynamic
         within-batch cluster penalty.
+    :param atlas_id: persistent cluster atlas used when ``cluster_lambda`` is
+        positive. The atlas must cover the current database exactly.
     :param cpus: maximum concurrent docking tasks (also the chunk-count
         cap — chunks scale down toward the CPU count when N is small).
     :param dock_command_template: per-task bash body. If ``None``, the
@@ -284,12 +324,19 @@ def dock(
         )
 
     selections: list[AcquisitionSelection] = []
+    acquisition_method: DockAcquisition | None = None
     if strategy in {"lcb", "ei"}:
-        method = cast(DockAcquisition, strategy)
-        candidates = db.select_uncertainty_docking_candidates()
+        acquisition_method = strategy
+        if cluster_lambda > 0:
+            if atlas_id is None:
+                raise ValueError("a cluster atlas ID is required when cluster_lambda > 0")
+            _require_current_cluster_atlas(db, atlas_id)
+        candidates = db.select_uncertainty_docking_candidates(
+            atlas_id=atlas_id if cluster_lambda > 0 else None
+        )
         selections = select_penalized_batch(
             candidates,
-            method=method,
+            method=acquisition_method,
             batch_size=top_n,
             cluster_lambda=cluster_lambda,
             beta=lcb_beta,
@@ -324,24 +371,32 @@ def dock(
     dock_dir = workdir.docking_dir(iteration)
     dock_dir.mkdir(parents=True, exist_ok=True)
     if selections:
+        assert acquisition_method is not None
         _write_acquisition_csv(
             dock_dir / "acquisition.csv",
             selections,
-            method=cast(DockAcquisition, strategy),
+            method=acquisition_method,
             lcb_beta=lcb_beta,
             ei_hit_threshold=ei_hit_threshold,
             ei_xi=ei_xi,
             cluster_lambda=cluster_lambda,
         )
-        selected_clusters = Counter(selection.candidate.clusterid for selection in selections)
-        logger.info(
-            "%s acquisition selected %d compounds across %d clusters "
-            "(largest cluster contribution=%d)",
-            strategy.upper(),
-            len(selections),
-            len(selected_clusters),
-            max(selected_clusters.values()),
+        selected_clusters = Counter(
+            selection.candidate.clusterid
+            for selection in selections
+            if selection.candidate.clusterid is not None
         )
+        if selected_clusters:
+            logger.info(
+                "%s acquisition selected %d compounds across %d clusters "
+                "(largest cluster contribution=%d)",
+                strategy.upper(),
+                len(selections),
+                len(selected_clusters),
+                max(selected_clusters.values()),
+            )
+        else:
+            logger.info("%s acquisition selected %d compounds", strategy.upper(), len(selections))
     logger.info(
         "Docking iter%d: %d compounds, %d chunks of <=%d (cpus=%d)",
         iteration,

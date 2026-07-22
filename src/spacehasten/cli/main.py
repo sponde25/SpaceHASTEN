@@ -330,7 +330,14 @@ def _add_uncertainty_dock_options(p: argparse.ArgumentParser) -> None:
         default=0.0,
         help=(
             "Optional. Weight for the dynamic within-batch cluster penalty. "
-            "Values above zero trigger Tanimoto-0.4 clustering before docking."
+            "Values above zero require a current Tanimoto-0.4 cluster atlas."
+        ),
+    )
+    p.add_argument(
+        "--atlas-id",
+        default=atlas_stage.DEFAULT_ATLAS_ID,
+        help=(
+            f"Persistent atlas used for cluster penalties. Default: {atlas_stage.DEFAULT_ATLAS_ID}."
         ),
     )
 
@@ -495,6 +502,12 @@ def _add_screening_cycle(sub: argparse._SubParsersAction[argparse.ArgumentParser
         ),
     )
     _add_uncertainty_dock_options(p)
+    p.add_argument(
+        "--atlas-root",
+        type=Path,
+        default=None,
+        help="Existing completed seed-atlas directory used when the run has no registered atlas.",
+    )
     p.add_argument(
         "--space",
         type=Path,
@@ -826,27 +839,23 @@ def _cmd_dock(args: argparse.Namespace) -> int:
     scheduler = scheduler_from_args(args, settings)
     _validate_dock_acquisition_args(args.strategy, args)
     with open_db(args) as db:
-        if args.strategy in {"lcb", "ei"} and args.cluster_lambda > 0:
-            clustering.cluster(
+        try:
+            iteration = docking.dock(
                 db,
                 workdir,
                 scheduler,
                 settings,
-                similarity_threshold=docking.PENALTY_CLUSTER_SIMILARITY,
+                top_n=args.top_n,
+                strategy=args.strategy,
+                cpus=args.cpus,
+                lcb_beta=args.lcb_beta,
+                ei_hit_threshold=args.ei_hit_threshold,
+                ei_xi=args.ei_xi,
+                cluster_lambda=args.cluster_lambda,
+                atlas_id=args.atlas_id,
             )
-        iteration = docking.dock(
-            db,
-            workdir,
-            scheduler,
-            settings,
-            top_n=args.top_n,
-            strategy=args.strategy,
-            cpus=args.cpus,
-            lcb_beta=args.lcb_beta,
-            ei_hit_threshold=args.ei_hit_threshold,
-            ei_xi=args.ei_xi,
-            cluster_lambda=args.cluster_lambda,
-        )
+        except ValueError as exc:
+            raise SystemExit(f"error: {exc}") from exc
     print(f"Dock iteration {iteration} complete")
     return 0
 
@@ -948,6 +957,7 @@ def _cmd_screening_cycle(args: argparse.Namespace) -> int:
     strategy: Literal["greedy", "clustering"] = args.strategy
     dock_strategy: docking.DockStrategy = args.dock_acquisition or strategy
     _validate_dock_acquisition_args(dock_strategy, args)
+    use_cluster_atlas = dock_strategy in {"lcb", "ei"} and args.cluster_lambda > 0
 
     def _maybe_cluster_queries(db: Database) -> None:
         """Refresh assignments only for hard-clustered simsearch queries."""
@@ -957,16 +967,37 @@ def _cmd_screening_cycle(args: argparse.Namespace) -> int:
     def _maybe_cluster_docking(db: Database) -> None:
         if dock_strategy == "clustering":
             clustering.cluster(db, workdir, scheduler, settings)
-        elif dock_strategy in {"lcb", "ei"} and args.cluster_lambda > 0:
-            clustering.cluster(
+        elif use_cluster_atlas:
+            atlas_stage.update_cluster_atlas(
                 db,
                 workdir,
                 scheduler,
                 settings,
-                similarity_threshold=docking.PENALTY_CLUSTER_SIMILARITY,
+                atlas_id=args.atlas_id,
             )
 
     with open_db(args) as db:
+        if use_cluster_atlas and db.latest_cluster_atlas_version(args.atlas_id) is None:
+            if args.atlas_root is None:
+                raise SystemExit(
+                    "error: clustered LCB/EI acquisition requires an existing seed atlas; "
+                    "pass --atlas-root PATH or run `spacehasten atlas init "
+                    "--atlas-root PATH` first"
+                )
+            try:
+                atlas_stage.import_initial_seed_atlas(
+                    db,
+                    workdir,
+                    scheduler,
+                    settings,
+                    atlas_root=args.atlas_root,
+                    atlas_id=args.atlas_id,
+                )
+            except (FileNotFoundError, ValueError) as exc:
+                raise SystemExit(
+                    f"error: {exc}; run `spacehasten atlas init --atlas-root "
+                    f"{args.atlas_root}` first"
+                ) from exc
         if args.props_toml is not None:
             props = PropertyRanges.from_toml(args.props_toml)
             db.replace_properties(seeds.typed_to_db_props(props))
@@ -1040,6 +1071,7 @@ def _cmd_screening_cycle(args: argparse.Namespace) -> int:
                 ei_hit_threshold=args.ei_hit_threshold,
                 ei_xi=args.ei_xi,
                 cluster_lambda=args.cluster_lambda,
+                atlas_id=args.atlas_id,
             )
     print(f"Completed {args.rounds} screening round(s)")
     return 0

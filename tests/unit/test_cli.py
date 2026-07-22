@@ -154,12 +154,15 @@ def test_dock_parses_uncertainty_acquisition_options() -> None:
             "0.1",
             "--cluster-lambda",
             "0.5",
+            "--atlas-id",
+            "custom-atlas",
         ]
     )
     assert args.strategy == "ei"
     assert args.ei_hit_threshold == -9.7
     assert args.ei_xi == 0.1
     assert args.cluster_lambda == 0.5
+    assert args.atlas_id == "custom-atlas"
 
 
 def test_search_rejects_uncertainty_acquisition() -> None:
@@ -228,6 +231,26 @@ def _init_workspace(tmp_path) -> Path:  # type: ignore[no-untyped-def]
     )
     assert rc == 0
     return Path(ws)
+
+
+def test_standalone_clustered_lcb_requires_current_atlas(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    ws = _init_workspace(tmp_path)
+    with pytest.raises(SystemExit, match="atlas 'morgan-r2-1024-t040' is not initialized"):
+        main(
+            [
+                "-w",
+                str(ws),
+                "dock",
+                "--top-n",
+                "1",
+                "--cpus",
+                "1",
+                "--strategy",
+                "lcb",
+                "--cluster-lambda",
+                "0.5",
+            ]
+        )
 
 
 def test_screening_cycle_clustering_strategy_autoclusters(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -303,10 +326,14 @@ def test_screening_cycle_greedy_strategy_never_clusters(tmp_path, monkeypatch) -
 
 
 def test_screening_cycle_lcb_only_changes_docking_acquisition(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    from spacehasten.stages import clustering, docking, simsearch, training
+    from spacehasten.stages import atlas, clustering, docking, simsearch, training
 
     ws = _init_workspace(tmp_path)
+    atlas_root = tmp_path / "seed-atlas"
+    atlas_root.mkdir()
     cluster_calls: list[dict[str, object]] = []
+    atlas_import_calls: list[dict[str, object]] = []
+    atlas_update_calls: list[dict[str, object]] = []
     search_calls: list[dict[str, object]] = []
     dock_calls: list[dict[str, object]] = []
     monkeypatch.setattr(
@@ -323,6 +350,16 @@ def test_screening_cycle_lcb_only_changes_docking_acquisition(tmp_path, monkeypa
         docking,
         "dock",
         lambda *a, **kwargs: dock_calls.append(kwargs) or 1,
+    )
+    monkeypatch.setattr(
+        atlas,
+        "import_initial_seed_atlas",
+        lambda *a, **kwargs: atlas_import_calls.append(kwargs),
+    )
+    monkeypatch.setattr(
+        atlas,
+        "update_cluster_atlas",
+        lambda *a, **kwargs: atlas_update_calls.append(kwargs),
     )
     monkeypatch.setattr(training, "train", lambda *a, **k: 1)
 
@@ -345,6 +382,10 @@ def test_screening_cycle_lcb_only_changes_docking_acquisition(tmp_path, monkeypa
             "2.0",
             "--cluster-lambda",
             "0.5",
+            "--atlas-id",
+            "test-atlas",
+            "--atlas-root",
+            str(atlas_root),
         ]
     )
 
@@ -354,8 +395,50 @@ def test_screening_cycle_lcb_only_changes_docking_acquisition(tmp_path, monkeypa
         "greedy",
         "greedy",
     ]
-    assert len(cluster_calls) == 1
-    assert cluster_calls[0]["similarity_threshold"] == 0.4
+    assert cluster_calls == []
+    assert len(atlas_import_calls) == 1
+    assert atlas_import_calls[0]["atlas_id"] == "test-atlas"
+    assert atlas_import_calls[0]["atlas_root"] == atlas_root
+    assert len(atlas_update_calls) == 1
+    assert atlas_update_calls[0]["atlas_id"] == "test-atlas"
     assert dock_calls[0]["strategy"] == "lcb"
     assert dock_calls[0]["lcb_beta"] == 2.0
     assert dock_calls[0]["cluster_lambda"] == 0.5
+    assert dock_calls[0]["atlas_id"] == "test-atlas"
+
+
+def test_screening_cycle_cluster_penalty_requires_seed_atlas_root(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from spacehasten.stages import docking, simsearch
+
+    ws = _init_workspace(tmp_path)
+    monkeypatch.setattr(
+        simsearch,
+        "simsearch",
+        lambda *a, **k: pytest.fail("search should not run before atlas validation"),
+    )
+    monkeypatch.setattr(
+        docking,
+        "dock",
+        lambda *a, **k: pytest.fail("dock should not run before atlas validation"),
+    )
+
+    with pytest.raises(SystemExit, match="pass --atlas-root PATH"):
+        main(
+            [
+                "-w",
+                str(ws),
+                "screening-cycle",
+                "--simsearch-top-n",
+                "10",
+                "--simsearch-jobs",
+                "1",
+                "--dock-top-n",
+                "10",
+                "--dock-cpus",
+                "1",
+                "--dock-acquisition",
+                "lcb",
+                "--cluster-lambda",
+                "0.5",
+            ]
+        )
