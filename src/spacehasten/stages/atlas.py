@@ -310,6 +310,8 @@ def _assignment_command(
                     "assign-shard",
                     "--molecule-index",
                     "${SCRATCH}/molecules_fp.h5",
+                    "--identity-molecule-index",
+                    molecule_index,
                     "--centroids",
                     centroids,
                     "--output-dir",

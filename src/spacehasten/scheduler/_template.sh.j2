@@ -17,7 +17,7 @@
 #SBATCH --dependency=afterok:{{ depends_on | join(":") }}
 {%- endif %}
 
-set -u
+set -euo pipefail
 export TASK_ID="${SLURM_ARRAY_TASK_ID}"
 {%- for line in env_setup %}
 {{ line }}

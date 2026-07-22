@@ -423,8 +423,11 @@ def _dense_row_lookup(molecule_ids: np.ndarray) -> np.ndarray:
     if len(molecule_ids) == 0:
         return np.empty(0, dtype=np.int32)
     maximum = int(molecule_ids.max())
-    if maximum > max(1_000_000, 4 * len(molecule_ids)):
-        raise ValueError("molecule identifiers are too sparse for dense atlas assignment lookup")
+    lookup_bytes = (maximum + 1) * np.dtype(np.int32).itemsize
+    if lookup_bytes > 512 * 1024 * 1024:
+        raise ValueError(
+            "molecule identifiers require more than 512 MiB for dense atlas assignment lookup"
+        )
     lookup = np.full(maximum + 1, -1, dtype=np.int32)
     lookup[molecule_ids] = np.arange(len(molecule_ids), dtype=np.int32)
     return lookup
@@ -437,16 +440,18 @@ def assign_centroid_shard(
     shard_index: int,
     shard_count: int,
     similarity_threshold: float,
+    identity_molecule_index: Path | None = None,
 ) -> dict[str, Any]:
     from FPSim2 import FPSim2Engine
 
     molecule_index = molecule_index.resolve()
     centroids_path = centroids_path.resolve()
     output_dir = output_dir.resolve()
+    identity_molecule_index = (identity_molecule_index or molecule_index).resolve()
     if not 0 <= shard_index < shard_count:
         raise ValueError("shard_index must be in [0, shard_count)")
     inputs = {
-        "molecule_index": _identity(molecule_index),
+        "molecule_index": _identity(identity_molecule_index),
         "centroids": {**_identity(centroids_path), "sha256": _sha256(centroids_path)},
         "shard_index": shard_index,
         "shard_count": shard_count,
@@ -889,6 +894,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     assign = subparsers.add_parser("assign-shard")
     assign.add_argument("--molecule-index", type=Path, required=True)
+    assign.add_argument("--identity-molecule-index", type=Path)
     assign.add_argument("--centroids", type=Path, required=True)
     assign.add_argument("--output-dir", type=Path, required=True)
     assign.add_argument("--shard-index", type=int, required=True)
@@ -954,6 +960,7 @@ def main() -> int:
             args.shard_index,
             args.shard_count,
             args.similarity_threshold,
+            args.identity_molecule_index,
         )
     elif args.command == "merge-assignments":
         merge_assignment_shards(

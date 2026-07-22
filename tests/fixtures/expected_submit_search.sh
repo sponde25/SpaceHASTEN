@@ -6,7 +6,7 @@
 #SBATCH --cpus-per-task=2
 #SBATCH --array=1-4%2
 
-set -u
+set -euo pipefail
 export TASK_ID="${SLURM_ARRAY_TASK_ID}"
 source /data/programs/oce/actoce
 conda activate chemprop-2.1.2

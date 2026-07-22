@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gzip
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -15,6 +16,7 @@ from rdkit import Chem, DataStructs
 from rdkit.Chem import rdFingerprintGenerator
 
 from spacehasten.remote.atlas import (
+    _dense_row_lookup,
     apply_repair,
     assign_centroid_shard,
     combine_centroids,
@@ -62,6 +64,14 @@ def _write_input(path: Path, rows: list[tuple[str, int]]) -> None:
             handle.write(f"{smiles} {identifier}\n")
 
 
+def test_dense_row_lookup_supports_sparse_spacehasten_ids() -> None:
+    identifiers = np.asarray([1_000_001, 2_000_000], dtype=np.int64)
+    lookup = _dense_row_lookup(identifiers)
+    assert lookup[1_000_001] == 0
+    assert lookup[2_000_000] == 1
+    assert lookup[0] == -1
+
+
 def test_resumable_map_reduce_assignment_and_repair(tmp_path: Path) -> None:
     rows = _molecules()
     input_path = tmp_path / "molecules.smi.gz"
@@ -104,7 +114,23 @@ def test_resumable_map_reduce_assignment_and_repair(tmp_path: Path) -> None:
             index,
             2,
             0.4,
+            identity_molecule_index=molecule_index,
         )
+
+    staged_index = tmp_path / "staged-molecules.h5"
+    shutil.copy2(molecule_index, staged_index)
+    marker = shard_root / "shard_0000" / "complete.json"
+    marker_mtime = marker.stat().st_mtime_ns
+    assign_centroid_shard(
+        staged_index,
+        reduced / "centroids.smi.gz",
+        shard_root / "shard_0000",
+        0,
+        2,
+        0.4,
+        identity_molecule_index=molecule_index,
+    )
+    assert marker.stat().st_mtime_ns == marker_mtime
 
     merged = tmp_path / "merged"
     merge_assignment_shards(molecule_index, input_path, shard_root, merged, 0.4)

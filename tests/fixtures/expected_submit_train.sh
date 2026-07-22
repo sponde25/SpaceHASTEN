@@ -8,7 +8,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --exclusive
 
-set -u
+set -euo pipefail
 export TASK_ID="${SLURM_ARRAY_TASK_ID}"
 source /data/programs/oce/actoce
 conda activate chemprop-2.1.2
