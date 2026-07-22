@@ -7,9 +7,10 @@ import hashlib
 import json
 import logging
 import shlex
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypeVar
 
 import numpy as np
 
@@ -27,6 +28,7 @@ from spacehasten.workspace.layout import WorkDir
 
 LOGGER = logging.getLogger(__name__)
 DEFAULT_ATLAS_ID = "morgan-r2-1024-t040"
+T = TypeVar("T")
 
 
 @dataclass(frozen=True)
@@ -120,6 +122,80 @@ def _export_seed_smiles(db: Database, path: Path) -> int:
             {
                 "seed_count": count,
                 "content_sha256": content_digest.hexdigest(),
+                "file_sha256": _sha256(path),
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    return count
+
+
+def _database_range_digest(
+    db: Database, lower_exclusive: int, upper_inclusive: int
+) -> tuple[int, str]:
+    digest = hashlib.sha256()
+    count = 0
+    rows = db.connection.execute(
+        "SELECT smiles, spacehastenid FROM data "
+        "WHERE spacehastenid > ? AND spacehastenid <= ? ORDER BY spacehastenid",
+        (lower_exclusive, upper_inclusive),
+    )
+    for smiles, identifier in rows:
+        digest.update(f"{str(smiles).strip()} {int(identifier)}\n".encode())
+        count += 1
+    return count, digest.hexdigest()
+
+
+def _export_incremental_smiles(
+    db: Database,
+    path: Path,
+    *,
+    lower_exclusive: int,
+    upper_inclusive: int,
+) -> int:
+    metadata_path = path.with_suffix(path.suffix + ".json")
+    expected_count, expected_hash = _database_range_digest(db, lower_exclusive, upper_inclusive)
+    if path.is_file() and metadata_path.is_file():
+        metadata = json.loads(metadata_path.read_text())
+        if (
+            metadata.get("lower_exclusive") == lower_exclusive
+            and metadata.get("upper_inclusive") == upper_inclusive
+            and metadata.get("compound_count") == expected_count
+            and metadata.get("content_sha256") == expected_hash
+            and metadata.get("file_sha256") == _sha256(path)
+        ):
+            LOGGER.info("Reusing exported incremental atlas input: %s", path)
+            return expected_count
+        raise ValueError(f"incremental atlas input does not match database: {path}")
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    digest = hashlib.sha256()
+    count = 0
+    with gzip.open(temporary, "wt", encoding="utf-8") as handle:
+        rows = db.connection.execute(
+            "SELECT smiles, spacehastenid FROM data "
+            "WHERE spacehastenid > ? AND spacehastenid <= ? "
+            "ORDER BY spacehastenid",
+            (lower_exclusive, upper_inclusive),
+        )
+        for smiles, identifier in rows:
+            line = f"{str(smiles).strip()} {int(identifier)}\n"
+            handle.write(line)
+            digest.update(line.encode())
+            count += 1
+    if count != expected_count or digest.hexdigest() != expected_hash:
+        temporary.unlink(missing_ok=True)
+        raise RuntimeError("incremental atlas export changed during streaming")
+    temporary.replace(path)
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "lower_exclusive": lower_exclusive,
+                "upper_inclusive": upper_inclusive,
+                "compound_count": count,
+                "content_sha256": expected_hash,
                 "file_sha256": _sha256(path),
             },
             indent=2,
@@ -692,8 +768,8 @@ def build_atlas_version(
     )
 
 
-def _batched(values: Iterable, size: int):  # type: ignore[no-untyped-def]
-    batch = []
+def _batched(values: Iterable[T], size: int) -> Iterator[list[T]]:
+    batch: list[T] = []
     for value in values:
         batch.append(value)
         if len(batch) == size:
@@ -713,6 +789,7 @@ def _ingest_initial_atlas(
 ) -> ClusterAtlasVersionRow:
     final_assignments = atlas_root / "final" / "assignments.npz"
     combined_centroids = atlas_root / "final" / "centroids" / "centroids.smi.gz"
+    centroid_files: tuple[Path, ...]
     if combined_centroids.is_file():
         centroid_files = (combined_centroids,)
     else:
@@ -745,9 +822,9 @@ def _ingest_initial_atlas(
         )
     )
     try:
-        for batch in _batched(sorted(centroids), 10_000):
+        for centroid_batch in _batched(sorted(centroids), 10_000):
             db.append_cluster_atlas_centroids(
-                ClusterAtlasCentroidRow(atlas_id, sid, sid, 0) for sid in batch
+                ClusterAtlasCentroidRow(atlas_id, sid, sid, 0) for sid in centroid_batch
             )
         rows = (
             ClusterAtlasAssignmentRow(
@@ -761,8 +838,8 @@ def _ingest_initial_atlas(
                 identifiers, cluster_ids, similarities, strict=True
             )
         )
-        for batch in _batched(rows, 50_000):
-            db.append_cluster_atlas_assignments(batch)
+        for assignment_batch in _batched(rows, 50_000):
+            db.append_cluster_atlas_assignments(assignment_batch)
         version = ClusterAtlasVersionRow(
             atlas_id=atlas_id,
             version=0,
@@ -772,7 +849,178 @@ def _ingest_initial_atlas(
             metadata_path=str(atlas_root / "final" / "complete.json"),
         )
         db.record_cluster_atlas_version(version)
-        db.materialize_cluster_atlas(atlas_id)
+        db.commit()
+        return version
+    except Exception:
+        db.connection.rollback()
+        raise
+
+
+def _version_root(version: ClusterAtlasVersionRow) -> Path:
+    return Path(version.metadata_path).resolve().parent.parent
+
+
+def _existing_centroids_path(version: ClusterAtlasVersionRow) -> Path | None:
+    root = _version_root(version)
+    for candidate in (
+        root / "centroids" / "centroids.smi.gz",
+        root / "final" / "centroids" / "centroids.smi.gz",
+    ):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _combine_centroid_versions(
+    scheduler: Scheduler,
+    settings: Settings,
+    *,
+    existing_centroids: Path,
+    new_centroids: Path,
+    output_root: Path,
+    command_prefix: Sequence[str],
+    job_suffix: str,
+) -> Path:
+    env_setup = _atlas_environment(settings)
+    _submit(
+        scheduler,
+        name=f"atlas_centroids_{job_suffix}",
+        workdir=output_root,
+        array_size=1,
+        max_concurrent=1,
+        cpus=1,
+        env_setup=env_setup,
+        command=_quote(
+            [
+                *command_prefix,
+                "combine-centroids",
+                "--base-centroids",
+                existing_centroids,
+                "--repair-centroids",
+                new_centroids,
+                "--output-dir",
+                output_root / "centroids",
+            ]
+        ),
+    )
+    return output_root / "centroids" / "centroids.smi.gz"
+
+
+def _ensure_initial_centroid_index(
+    scheduler: Scheduler,
+    settings: Settings,
+    *,
+    version: ClusterAtlasVersionRow,
+    command_prefix: Sequence[str],
+) -> Path:
+    existing = _existing_centroids_path(version)
+    if existing is not None:
+        return existing
+    root = _version_root(version)
+    reduced = root / "reduced" / "centroids.smi.gz"
+    repair = root / "repair" / "repair_centroids.smi.gz"
+    if not reduced.is_file() or not repair.is_file():
+        raise FileNotFoundError("atlas version has no reusable centroid artifacts")
+    return _combine_centroid_versions(
+        scheduler,
+        settings,
+        existing_centroids=reduced,
+        new_centroids=repair,
+        output_root=root / "final",
+        command_prefix=command_prefix,
+        job_suffix=f"v{version.version}_upgrade",
+    )
+
+
+def _ingest_incremental_atlas(
+    db: Database,
+    *,
+    atlas_id: str,
+    previous: ClusterAtlasVersionRow,
+    artifacts: AtlasVersionArtifacts,
+    combined_centroids: Path,
+    version_root: Path,
+    upper_spacehastenid: int,
+    similarity_threshold: float,
+) -> ClusterAtlasVersionRow:
+    with np.load(artifacts.assignments) as assignments:
+        identifiers = assignments["spacehastenid"].copy()
+        cluster_ids = assignments["clusterid"].copy()
+        similarities = assignments["centroid_similarity"].copy()
+    if len(identifiers) == 0 or np.any(cluster_ids < 0):
+        raise ValueError("incremental atlas assignments are empty or incomplete")
+    if np.any(similarities < similarity_threshold):
+        raise ValueError("incremental atlas contains below-threshold assignments")
+    new_centroids = {
+        identifier for path in artifacts.new_centroid_files for _, identifier in read_smi(path)
+    }
+    all_centroids = {identifier for _, identifier in read_smi(combined_centroids)}
+    if not set(np.unique(cluster_ids)).issubset(all_centroids):
+        raise ValueError("incremental assignments reference unknown centroids")
+    version_number = previous.version + 1
+    version_metadata = version_root / "final" / "atlas_version.json"
+    version_metadata.parent.mkdir(parents=True, exist_ok=True)
+    temporary_metadata = version_metadata.with_name(f".{version_metadata.name}.tmp")
+    temporary_metadata.write_text(
+        json.dumps(
+            {
+                "atlas_id": atlas_id,
+                "version": version_number,
+                "previous_version": previous.version,
+                "lower_exclusive": previous.last_spacehastenid,
+                "upper_inclusive": upper_spacehastenid,
+                "assignment_count": len(identifiers),
+                "new_centroid_count": len(new_centroids),
+                "assignments": {
+                    "path": str(artifacts.assignments.resolve()),
+                    "sha256": _sha256(artifacts.assignments),
+                },
+                "centroids": {
+                    "path": str(combined_centroids.resolve()),
+                    "sha256": _sha256(combined_centroids),
+                },
+                "component_metadata_path": str(artifacts.metadata_path.resolve()),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    temporary_metadata.replace(version_metadata)
+    try:
+        for centroid_batch in _batched(sorted(new_centroids), 10_000):
+            db.append_cluster_atlas_centroids(
+                ClusterAtlasCentroidRow(
+                    atlas_id,
+                    identifier,
+                    identifier,
+                    version_number,
+                )
+                for identifier in centroid_batch
+            )
+        rows = (
+            ClusterAtlasAssignmentRow(
+                atlas_id,
+                int(identifier),
+                int(cluster_id),
+                float(similarity),
+                version_number,
+            )
+            for identifier, cluster_id, similarity in zip(
+                identifiers, cluster_ids, similarities, strict=True
+            )
+        )
+        for assignment_batch in _batched(rows, 50_000):
+            db.append_cluster_atlas_assignments(assignment_batch)
+        version = ClusterAtlasVersionRow(
+            atlas_id=atlas_id,
+            version=version_number,
+            last_spacehastenid=upper_spacehastenid,
+            compound_count=previous.compound_count + len(identifiers),
+            centroid_count=len(all_centroids),
+            metadata_path=str(version_metadata),
+        )
+        db.record_cluster_atlas_version(version)
         db.commit()
         return version
     except Exception:
@@ -795,8 +1043,6 @@ def build_initial_seed_atlas(
     if existing is not None:
         if existing.version != 0:
             raise ValueError(f"atlas {atlas_id!r} is already beyond version 0")
-        db.materialize_cluster_atlas(atlas_id)
-        db.commit()
         LOGGER.info("Reusing persisted initial atlas %s", atlas_id)
         return existing
 
@@ -876,4 +1122,150 @@ def build_initial_seed_atlas(
     return version
 
 
-__all__ = ["DEFAULT_ATLAS_ID", "build_initial_seed_atlas"]
+def update_cluster_atlas(
+    db: Database,
+    workdir: WorkDir,
+    scheduler: Scheduler,
+    settings: Settings,
+    *,
+    atlas_id: str = DEFAULT_ATLAS_ID,
+    through_spacehastenid: int | None = None,
+    command_prefix: Sequence[str] | None = None,
+) -> ClusterAtlasVersionRow:
+    """Append one atlas version for compounds beyond the persisted watermark."""
+    previous = db.latest_cluster_atlas_version(atlas_id)
+    if previous is None:
+        raise ValueError(f"atlas {atlas_id!r} is not initialized")
+    atlas_config = db.connection.execute(
+        "SELECT similarity_threshold, fingerprint_type, fingerprint_parameters, "
+        "partition_count FROM cluster_atlases WHERE atlas_id = ?",
+        (atlas_id,),
+    ).fetchone()
+    expected_config = (
+        settings.general.atlas_similarity_threshold,
+        FP_TYPE,
+        json.dumps(FP_PARAMS, sort_keys=True),
+        settings.general.atlas_partition_count,
+    )
+    if atlas_config is None or tuple(atlas_config) != expected_config:
+        raise ValueError("atlas configuration does not match current settings")
+
+    database_max = int(
+        db.connection.execute("SELECT COALESCE(MAX(spacehastenid), 0) FROM data").fetchone()[0]
+    )
+    upper = database_max if through_spacehastenid is None else through_spacehastenid
+    if upper > database_max:
+        raise ValueError(f"through_spacehastenid {upper} exceeds database maximum {database_max}")
+
+    database_existing = int(
+        db.connection.execute(
+            "SELECT COUNT(*) FROM data WHERE spacehastenid <= ?",
+            (previous.last_spacehastenid,),
+        ).fetchone()[0]
+    )
+    if database_existing != previous.compound_count:
+        raise ValueError("database compound count does not match the latest atlas version")
+    missing_existing = int(
+        db.connection.execute(
+            "SELECT COUNT(*) FROM data AS d "
+            "LEFT JOIN cluster_atlas_assignments AS a "
+            "ON a.atlas_id = ? AND a.spacehastenid = d.spacehastenid "
+            "WHERE d.spacehastenid <= ? AND a.spacehastenid IS NULL",
+            (atlas_id, previous.last_spacehastenid),
+        ).fetchone()[0]
+    )
+    if missing_existing:
+        raise ValueError(
+            f"{missing_existing} compounds at or below the atlas watermark are unassigned"
+        )
+    assigned_existing = int(
+        db.connection.execute(
+            "SELECT COUNT(*) FROM cluster_atlas_assignments "
+            "WHERE atlas_id = ? AND spacehastenid <= ?",
+            (atlas_id, previous.last_spacehastenid),
+        ).fetchone()[0]
+    )
+    if assigned_existing != previous.compound_count:
+        raise ValueError("atlas assignment count does not match the latest version")
+    if upper <= previous.last_spacehastenid:
+        LOGGER.info("Atlas %s is already current through %d", atlas_id, upper)
+        return previous
+
+    version_number = previous.version + 1
+    update_root = workdir.atlas_dir() / "updates" / f"version_{version_number:03d}"
+    source = update_root / "source" / "new_compounds.smi.gz"
+    new_count = _export_incremental_smiles(
+        db,
+        source,
+        lower_exclusive=previous.last_spacehastenid,
+        upper_inclusive=upper,
+    )
+    if new_count == 0:
+        LOGGER.info("No new compounds require atlas assignment")
+        return previous
+
+    prefix = command_prefix or _default_atlas_command(settings)
+    existing_centroids = _ensure_initial_centroid_index(
+        scheduler,
+        settings,
+        version=previous,
+        command_prefix=prefix,
+    )
+    artifacts = build_atlas_version(
+        scheduler,
+        settings,
+        input_smiles=source,
+        output_root=update_root,
+        command_prefix=prefix,
+        job_suffix=f"v{version_number}",
+        existing_centroids=existing_centroids,
+    )
+
+    if artifacts.new_centroid_files:
+        if len(artifacts.new_centroid_files) != 1:
+            raise ValueError("incremental atlas produced multiple centroid bundles")
+        new_centroids = artifacts.new_centroid_files[0]
+    else:
+        new_centroids = update_root / "empty_centroids.smi.gz"
+        if not new_centroids.exists():
+            with gzip.open(new_centroids, "wt", encoding="utf-8"):
+                pass
+    combined_centroids = _combine_centroid_versions(
+        scheduler,
+        settings,
+        existing_centroids=existing_centroids,
+        new_centroids=new_centroids,
+        output_root=update_root,
+        command_prefix=prefix,
+        job_suffix=f"v{version_number}",
+    )
+    version = _ingest_incremental_atlas(
+        db,
+        atlas_id=atlas_id,
+        previous=previous,
+        artifacts=artifacts,
+        combined_centroids=combined_centroids,
+        version_root=update_root,
+        upper_spacehastenid=upper,
+        similarity_threshold=settings.general.atlas_similarity_threshold,
+    )
+    LOGGER.info(
+        "Updated atlas %s to v%d: +%d compounds, total centroids=%d, watermark=%d",
+        atlas_id,
+        version.version,
+        new_count,
+        version.centroid_count,
+        version.last_spacehastenid,
+    )
+    return version
+
+
+__all__ = [
+    "DEFAULT_ATLAS_ID",
+    "build_atlas_version",
+    "build_initial_seed_atlas",
+    "run_centroid_discovery",
+    "run_coverage_repair",
+    "run_parallel_assignment",
+    "update_cluster_atlas",
+]

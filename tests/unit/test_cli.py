@@ -34,6 +34,7 @@ def test_top_level_help_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
         ["cluster"],
         ["atlas"],
         ["atlas", "init"],
+        ["atlas", "update"],
         ["atlas", "status"],
         ["screening-cycle"],
         ["export"],

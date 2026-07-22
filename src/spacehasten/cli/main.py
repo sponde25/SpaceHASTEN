@@ -415,6 +415,18 @@ def _add_atlas(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None
     )
     init.set_defaults(func=_cmd_atlas_init)
 
+    update = atlas_sub.add_parser(
+        "update", help="Assign compounds beyond the current atlas watermark."
+    )
+    update.add_argument("--atlas-id", default=atlas_stage.DEFAULT_ATLAS_ID)
+    update.add_argument(
+        "--through-spacehastenid",
+        type=int,
+        default=None,
+        help="Optional upper ID bound for replay or controlled updates.",
+    )
+    update.set_defaults(func=_cmd_atlas_update)
+
     status = atlas_sub.add_parser("status", help="Show persistent atlas status.")
     status.add_argument("--atlas-id", default=atlas_stage.DEFAULT_ATLAS_ID)
     status.set_defaults(func=_cmd_atlas_status)
@@ -901,6 +913,28 @@ def _cmd_atlas_status(args: argparse.Namespace) -> int:
             },
             indent=2,
         )
+    )
+    return 0
+
+
+def _cmd_atlas_update(args: argparse.Namespace) -> int:
+    workdir = workdir_from_args(args)
+    setup_logging(workdir, args)
+    settings = settings_from_args(args)
+    scheduler = scheduler_from_args(args, settings)
+    with open_db(args) as db:
+        version = atlas_stage.update_cluster_atlas(
+            db,
+            workdir,
+            scheduler,
+            settings,
+            atlas_id=args.atlas_id,
+            through_spacehastenid=args.through_spacehastenid,
+        )
+    print(
+        f"Atlas {version.atlas_id} v{version.version}: "
+        f"{version.compound_count} compounds, {version.centroid_count} centroids, "
+        f"watermark={version.last_spacehastenid}"
     )
     return 0
 

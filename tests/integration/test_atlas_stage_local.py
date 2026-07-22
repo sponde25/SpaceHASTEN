@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import gzip
 import sys
 from pathlib import Path
 
-import numpy as np
 import pytest
 
 pytest.importorskip("FPSim2")
@@ -17,8 +15,8 @@ from spacehasten.core.db import Database
 from spacehasten.scheduler import LocalScheduler
 from spacehasten.stages.atlas import (
     DEFAULT_ATLAS_ID,
-    build_atlas_version,
     build_initial_seed_atlas,
+    update_cluster_atlas,
 )
 from spacehasten.workspace.layout import WorkDir
 
@@ -82,7 +80,7 @@ def test_initial_seed_atlas_stage_is_resumable(tmp_path: Path) -> None:
     assert version.version == 0
     assert version.compound_count == seed_count
     assert 1 <= version.centroid_count <= seed_count
-    assert db.connection.execute("SELECT COUNT(*) FROM clusters").fetchone()[0] == seed_count
+    assert db.connection.execute("SELECT COUNT(*) FROM clusters").fetchone()[0] == 0
     first_job_count = len(scheduler._jobs)  # noqa: SLF001
     assert first_job_count == 7
 
@@ -98,6 +96,109 @@ def test_initial_seed_atlas_stage_is_resumable(tmp_path: Path) -> None:
     assert (workdir.atlas_dir() / "final" / "assignments.npz").is_file()
     assert (workdir.atlas_dir() / "final" / "centroids" / "centroids_fp.h5").is_file()
     assert db.latest_cluster_atlas_version(DEFAULT_ATLAS_ID) == version
+
+    original_assignments = db.connection.execute(
+        "SELECT spacehastenid, clusterid FROM cluster_atlas_assignments "
+        "WHERE atlas_id = ? ORDER BY spacehastenid",
+        (DEFAULT_ATLAS_ID,),
+    ).fetchall()
+    for index, smile in enumerate(("N#N", "OP(=O)(O)O", "Cl[Si](Cl)(Cl)Cl"), start=1):
+        db.insert_simsearch_hit(
+            f"new-hash-{index}",
+            smile,
+            f"new-{index}",
+            None,
+            None,
+            -7.0,
+            1,
+            pred_version=0,
+        )
+    db.commit()
+    updated = update_cluster_atlas(
+        db,
+        workdir,
+        scheduler,
+        settings,
+        through_spacehastenid=23,
+        command_prefix=command_prefix,
+    )
+    assert updated.version == 1
+    assert updated.last_spacehastenid == 23
+    assert updated.compound_count == 23
+    assert (
+        db.connection.execute(
+            "SELECT COUNT(*) FROM cluster_atlas_assignments WHERE atlas_id = ?",
+            (DEFAULT_ATLAS_ID,),
+        ).fetchone()[0]
+        == 23
+    )
+    assert db.connection.execute("SELECT COUNT(*) FROM clusters").fetchone()[0] == 0
+    assert (
+        db.connection.execute(
+            "SELECT spacehastenid, clusterid FROM cluster_atlas_assignments "
+            "WHERE atlas_id = ? AND spacehastenid <= 20 ORDER BY spacehastenid",
+            (DEFAULT_ATLAS_ID,),
+        ).fetchall()
+        == original_assignments
+    )
+    previous_centroid_count = updated.centroid_count
+    for expected_version, smile in ((2, "CCO"), (3, "CCN")):
+        identifier = db.insert_simsearch_hit(
+            f"covered-hash-{expected_version}",
+            smile,
+            f"covered-{expected_version}",
+            None,
+            None,
+            -7.0,
+            expected_version,
+            pred_version=0,
+        )
+        db.commit()
+        updated = update_cluster_atlas(
+            db,
+            workdir,
+            scheduler,
+            settings,
+            through_spacehastenid=identifier,
+            command_prefix=command_prefix,
+        )
+        assert updated.version == expected_version
+        assert updated.last_spacehastenid == identifier
+        assert updated.centroid_count == previous_centroid_count
+        assert Path(updated.metadata_path).name == "atlas_version.json"
+
+    assert (
+        db.connection.execute(
+            "SELECT COUNT(*) FROM cluster_atlas_assignments WHERE atlas_id = ?",
+            (DEFAULT_ATLAS_ID,),
+        ).fetchone()[0]
+        == 25
+    )
+    assert db.connection.execute("SELECT COUNT(*) FROM clusters").fetchone()[0] == 0
+    update_job_count = len(scheduler._jobs)  # noqa: SLF001
+    assert (
+        update_cluster_atlas(
+            db,
+            workdir,
+            scheduler,
+            settings,
+            through_spacehastenid=25,
+            command_prefix=command_prefix,
+        )
+        == updated
+    )
+    assert len(scheduler._jobs) == update_job_count  # noqa: SLF001
+    db.connection.execute("DELETE FROM data WHERE spacehastenid = 25")
+    db.commit()
+    with pytest.raises(ValueError, match="compound count"):
+        update_cluster_atlas(
+            db,
+            workdir,
+            scheduler,
+            settings,
+            through_spacehastenid=24,
+            command_prefix=command_prefix,
+        )
     db.close()
 
     second_workdir = WorkDir.bootstrap(
@@ -116,24 +217,5 @@ def test_initial_seed_atlas_stage_is_resumable(tmp_path: Path) -> None:
     )
     assert reused.compound_count == seed_count
     assert len(second_scheduler._jobs) == 0  # noqa: SLF001
-    assert second_db.connection.execute("SELECT COUNT(*) FROM clusters").fetchone()[0] == seed_count
+    assert second_db.connection.execute("SELECT COUNT(*) FROM clusters").fetchone()[0] == 0
     second_db.close()
-
-    new_input = tmp_path / "new_compounds.smi.gz"
-    with gzip.open(new_input, "wt", encoding="utf-8") as handle:
-        handle.write("N#N 21\n")
-        handle.write("OP(=O)(O)O 22\n")
-        handle.write("Cl[Si](Cl)(Cl)Cl 23\n")
-    update = build_atlas_version(
-        scheduler,
-        settings,
-        input_smiles=new_input,
-        output_root=workdir.atlas_dir() / "update_test",
-        command_prefix=command_prefix,
-        job_suffix="update_test",
-        existing_centroids=(workdir.atlas_dir() / "final" / "centroids" / "centroids.smi.gz"),
-    )
-    with np.load(update.assignments) as assignments:
-        assert assignments["spacehastenid"].tolist() == [21, 22, 23]
-        assert np.all(assignments["clusterid"] >= 0)
-        assert np.all(assignments["centroid_similarity"] >= 0.4)
