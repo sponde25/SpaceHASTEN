@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from spacehasten.cli.main import _build_parser, main
+from spacehasten.cli.main import _build_parser, _cluster_alpha_schedule, main
 
 
 def test_no_command_errors() -> None:
@@ -162,7 +162,69 @@ def test_dock_parses_uncertainty_acquisition_options() -> None:
     assert args.ei_hit_threshold == -9.7
     assert args.ei_xi == 0.1
     assert args.cluster_lambda == 0.5
+    assert args.cluster_alpha is None
     assert args.atlas_id == "custom-atlas"
+
+
+def test_screening_cycle_parses_cluster_alpha_schedule() -> None:
+    parser = _build_parser()
+    args = parser.parse_args(
+        [
+            "screening-cycle",
+            "--simsearch-top-n",
+            "10",
+            "--simsearch-jobs",
+            "1",
+            "--dock-top-n",
+            "10",
+            "--dock-cpus",
+            "1",
+            "--rounds",
+            "2",
+            "--dock-acquisition",
+            "ei",
+            "--ei-hit-threshold",
+            "-9.7",
+            "--cluster-alpha",
+            "0.2",
+            "0.1",
+        ]
+    )
+
+    assert args.cluster_alpha == [0.2, 0.1]
+
+
+def test_cluster_alpha_schedule_broadcasts_and_validates_length() -> None:
+    assert _cluster_alpha_schedule([0.2], 2) == [0.2, 0.2]
+    assert _cluster_alpha_schedule([0.2, 0.1], 2) == [0.2, 0.1]
+    with pytest.raises(SystemExit, match="2 expected, got 3"):
+        _cluster_alpha_schedule([0.2, 0.1, 0.05], 2)
+    with pytest.raises(SystemExit, match="must be at least 1"):
+        _cluster_alpha_schedule(None, 0)
+
+
+def test_dock_rejects_cluster_alpha_with_fixed_lambda(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    ws = _init_workspace(tmp_path)
+    with pytest.raises(SystemExit, match="cannot be used together"):
+        main(
+            [
+                "-w",
+                str(ws),
+                "dock",
+                "--top-n",
+                "10",
+                "--cpus",
+                "1",
+                "--strategy",
+                "ei",
+                "--ei-hit-threshold",
+                "-9.7",
+                "--cluster-lambda",
+                "0.5",
+                "--cluster-alpha",
+                "0.2",
+            ]
+        )
 
 
 def test_search_rejects_uncertainty_acquisition() -> None:
@@ -404,7 +466,70 @@ def test_screening_cycle_lcb_only_changes_docking_acquisition(tmp_path, monkeypa
     assert dock_calls[0]["strategy"] == "lcb"
     assert dock_calls[0]["lcb_beta"] == 2.0
     assert dock_calls[0]["cluster_lambda"] == 0.5
+    assert dock_calls[0]["cluster_alpha"] is None
     assert dock_calls[0]["atlas_id"] == "test-atlas"
+
+
+def test_screening_cycle_applies_cluster_alpha_schedule(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from spacehasten.stages import atlas, docking, simsearch
+
+    ws = _init_workspace(tmp_path)
+    atlas_root = tmp_path / "seed-atlas"
+    atlas_root.mkdir()
+    atlas_import_calls: list[dict[str, object]] = []
+    atlas_update_calls: list[dict[str, object]] = []
+    dock_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(simsearch, "simsearch", lambda *a, **k: 1)
+    monkeypatch.setattr(
+        docking,
+        "dock",
+        lambda *a, **kwargs: dock_calls.append(kwargs) or 1,
+    )
+    monkeypatch.setattr(
+        atlas,
+        "import_initial_seed_atlas",
+        lambda *a, **kwargs: atlas_import_calls.append(kwargs),
+    )
+    monkeypatch.setattr(
+        atlas,
+        "update_cluster_atlas",
+        lambda *a, **kwargs: atlas_update_calls.append(kwargs),
+    )
+
+    rc = main(
+        [
+            "-w",
+            str(ws),
+            "screening-cycle",
+            "--simsearch-top-n",
+            "10",
+            "--simsearch-jobs",
+            "1",
+            "--dock-top-n",
+            "10",
+            "--dock-cpus",
+            "1",
+            "--rounds",
+            "2",
+            "--dock-acquisition",
+            "ei",
+            "--ei-hit-threshold",
+            "-9.7",
+            "--cluster-alpha",
+            "0.2",
+            "0.1",
+            "--atlas-id",
+            "test-atlas",
+            "--atlas-root",
+            str(atlas_root),
+        ]
+    )
+
+    assert rc == 0
+    assert len(atlas_import_calls) == 1
+    assert len(atlas_update_calls) == 2
+    assert [call["cluster_alpha"] for call in dock_calls] == [0.2, 0.1]
+    assert {call["cluster_lambda"] for call in dock_calls} == {0.0}
 
 
 def test_screening_cycle_cluster_penalty_requires_seed_atlas_root(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]

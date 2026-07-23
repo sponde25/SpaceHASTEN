@@ -37,6 +37,8 @@ from spacehasten.config.settings import Settings
 from spacehasten.core.acquisition import (
     AcquisitionSelection,
     DockAcquisition,
+    NormalizedPenalty,
+    select_normalized_penalized_batch,
     select_penalized_batch,
 )
 from spacehasten.core.db import Database
@@ -75,6 +77,11 @@ def _write_acquisition_csv(
     ei_hit_threshold: float | None,
     ei_xi: float,
     cluster_lambda: float,
+    candidate_count: int,
+    batch_size: int,
+    atlas_id: str | None,
+    atlas_version: int | None,
+    normalized_penalty: NormalizedPenalty | None,
 ) -> None:
     with path.open("wt", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
@@ -97,6 +104,16 @@ def _write_acquisition_csv(
                 "ei_xi",
                 "cluster_lambda",
                 "cluster_similarity_threshold",
+                "candidate_count",
+                "batch_size",
+                "cluster_atlas_id",
+                "cluster_atlas_version",
+                "cluster_alpha",
+                "frontier_start_rank",
+                "frontier_stop_rank",
+                "frontier_q10",
+                "frontier_q90",
+                "frontier_scale",
             ]
         )
         for rank, selection in enumerate(selections, start=1):
@@ -120,6 +137,24 @@ def _write_acquisition_csv(
                     ei_xi,
                     cluster_lambda,
                     PENALTY_CLUSTER_SIMILARITY if cluster_lambda > 0 else "",
+                    candidate_count,
+                    batch_size,
+                    atlas_id if atlas_id is not None else "",
+                    atlas_version if atlas_version is not None else "",
+                    normalized_penalty.cluster_alpha if normalized_penalty is not None else "",
+                    (
+                        normalized_penalty.frontier_start_rank
+                        if normalized_penalty is not None
+                        else ""
+                    ),
+                    (
+                        normalized_penalty.frontier_stop_rank
+                        if normalized_penalty is not None
+                        else ""
+                    ),
+                    normalized_penalty.frontier_q10 if normalized_penalty is not None else "",
+                    normalized_penalty.frontier_q90 if normalized_penalty is not None else "",
+                    normalized_penalty.frontier_scale if normalized_penalty is not None else "",
                 ]
             )
 
@@ -232,7 +267,7 @@ def _ingest_dock_results(extract_root: Path) -> dict[str, float]:
     return results
 
 
-def _require_current_cluster_atlas(db: Database, atlas_id: str) -> None:
+def _require_current_cluster_atlas(db: Database, atlas_id: str) -> int:
     atlas = db.cluster_atlas(atlas_id)
     if atlas is None:
         raise ValueError(
@@ -266,6 +301,7 @@ def _require_current_cluster_atlas(db: Database, atlas_id: str) -> None:
             f"atlas {atlas_id!r} is incomplete: {missing} database compounds "
             "lack assignments; restore or rebuild the atlas"
         )
+    return version.version
 
 
 def dock(
@@ -281,6 +317,7 @@ def dock(
     ei_hit_threshold: float | None = None,
     ei_xi: float = 0.0,
     cluster_lambda: float = 0.0,
+    cluster_alpha: float | None = None,
     atlas_id: str | None = None,
     dock_command_template: str | None = None,
     seed: int | None = None,
@@ -299,7 +336,9 @@ def dock(
     :param strategy: docking acquisition method. ``lcb`` and ``ei`` use
         version-matched epistemic uncertainty and optionally apply a dynamic
         within-batch cluster penalty.
-    :param atlas_id: persistent cluster atlas used when ``cluster_lambda`` is
+    :param cluster_alpha: optional dimensionless EI cluster penalty. The
+        corresponding lambda is derived from the live acquisition-score frontier.
+    :param atlas_id: persistent cluster atlas used when a cluster penalty is
         positive. The atlas must cover the current database exactly.
     :param cpus: maximum concurrent docking tasks (also the chunk-count
         cap — chunks scale down toward the CPU count when N is small).
@@ -316,6 +355,12 @@ def dock(
         raise ValueError(f"top_n must be >= 1, got {top_n}")
     if cpus < 1:
         raise ValueError(f"cpus must be >= 1, got {cpus}")
+    if cluster_alpha is not None and strategy != "ei":
+        raise ValueError("cluster_alpha requires EI acquisition")
+    if cluster_alpha is not None and cluster_lambda != 0:
+        raise ValueError("cluster_alpha and cluster_lambda cannot be used together")
+    if cluster_alpha is not None and (not math.isfinite(cluster_alpha) or cluster_alpha < 0):
+        raise ValueError(f"cluster_alpha must be finite and non-negative, got {cluster_alpha}")
     if strategy == "clustering" and not db.has_clusters():
         raise ValueError(
             "strategy='clustering' requires cluster assignments, but none exist yet;"
@@ -325,24 +370,56 @@ def dock(
 
     selections: list[AcquisitionSelection] = []
     acquisition_method: DockAcquisition | None = None
+    normalized_penalty: NormalizedPenalty | None = None
+    effective_cluster_lambda = cluster_lambda
+    acquisition_candidate_count = 0
+    penalty_atlas_version: int | None = None
     if strategy in {"lcb", "ei"}:
         acquisition_method = strategy
-        if cluster_lambda > 0:
+        use_cluster_penalty = cluster_lambda > 0 or (
+            cluster_alpha is not None and cluster_alpha > 0
+        )
+        if use_cluster_penalty:
             if atlas_id is None:
-                raise ValueError("a cluster atlas ID is required when cluster_lambda > 0")
-            _require_current_cluster_atlas(db, atlas_id)
+                raise ValueError("a cluster atlas ID is required for a positive cluster penalty")
+            penalty_atlas_version = _require_current_cluster_atlas(db, atlas_id)
         candidates = db.select_uncertainty_docking_candidates(
-            atlas_id=atlas_id if cluster_lambda > 0 else None
+            atlas_id=atlas_id if use_cluster_penalty else None
         )
-        selections = select_penalized_batch(
-            candidates,
-            method=acquisition_method,
-            batch_size=top_n,
-            cluster_lambda=cluster_lambda,
-            beta=lcb_beta,
-            hit_threshold=ei_hit_threshold,
-            xi=ei_xi,
-        )
+        acquisition_candidate_count = len(candidates)
+        if cluster_alpha is None:
+            selections = select_penalized_batch(
+                candidates,
+                method=acquisition_method,
+                batch_size=top_n,
+                cluster_lambda=cluster_lambda,
+                beta=lcb_beta,
+                hit_threshold=ei_hit_threshold,
+                xi=ei_xi,
+            )
+        else:
+            selections, normalized_penalty = select_normalized_penalized_batch(
+                candidates,
+                method=acquisition_method,
+                batch_size=top_n,
+                cluster_alpha=cluster_alpha,
+                beta=lcb_beta,
+                hit_threshold=ei_hit_threshold,
+                xi=ei_xi,
+            )
+            effective_cluster_lambda = normalized_penalty.cluster_lambda
+            logger.info(
+                "EI normalized cluster penalty: alpha=%.6g, frontier ranks=%d-%d, "
+                "q10=%.9g, q90=%.9g, scale=%.9g, lambda=%.9g",
+                normalized_penalty.cluster_alpha,
+                normalized_penalty.frontier_start_rank,
+                normalized_penalty.frontier_stop_rank,
+                normalized_penalty.frontier_q10,
+                normalized_penalty.frontier_q90,
+                normalized_penalty.frontier_scale,
+                normalized_penalty.cluster_lambda,
+            )
+        del candidates
         rows = [
             (selection.candidate.smiles, selection.candidate.spacehastenid)
             for selection in selections
@@ -379,7 +456,12 @@ def dock(
             lcb_beta=lcb_beta,
             ei_hit_threshold=ei_hit_threshold,
             ei_xi=ei_xi,
-            cluster_lambda=cluster_lambda,
+            cluster_lambda=effective_cluster_lambda,
+            candidate_count=acquisition_candidate_count,
+            batch_size=top_n,
+            atlas_id=atlas_id if use_cluster_penalty else None,
+            atlas_version=penalty_atlas_version,
+            normalized_penalty=normalized_penalty,
         )
         selected_clusters = Counter(
             selection.candidate.clusterid

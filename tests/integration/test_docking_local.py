@@ -8,6 +8,7 @@ tarring the result back to the dock directory.
 from __future__ import annotations
 
 import csv
+import math
 import sqlite3
 import tarfile
 from pathlib import Path
@@ -300,6 +301,53 @@ def test_uncertainty_acquisition_with_dynamic_cluster_penalty(
     assert {row["method"] for row in acquisition_rows} == {strategy}
     assert {float(row["cluster_lambda"]) for row in acquisition_rows} == {1.0}
     assert {float(row["cluster_similarity_threshold"]) for row in acquisition_rows} == {0.4}
+    assert {int(row["candidate_count"]) for row in acquisition_rows} == {3}
+    assert {int(row["batch_size"]) for row in acquisition_rows} == {2}
+    assert {row["cluster_atlas_id"] for row in acquisition_rows} == {TEST_ATLAS_ID}
+    assert {int(row["cluster_atlas_version"]) for row in acquisition_rows} == {0}
+
+
+def test_ei_acquisition_with_normalized_cluster_penalty(tmp_path: Path) -> None:
+    workdir = WorkDir.bootstrap(tmp_path / "ei-normalized", name="dock-ei-normalized")
+    db = Database(workdir.dbsh())
+    first, _same_cluster, other_cluster = _seed_uncertainty_db(db)
+
+    settings = Settings()
+    settings.paths.scratch_default = str(tmp_path / "scratch")
+    iteration = dock(
+        db,
+        workdir,
+        LocalScheduler(),
+        settings,
+        top_n=2,
+        strategy="ei",
+        cpus=1,
+        ei_hit_threshold=-9.7,
+        cluster_alpha=2.0,
+        atlas_id=TEST_ATLAS_ID,
+        dock_command_template=_STUB_BODY,
+        seed=0,
+    )
+    db.close()
+
+    assert iteration == 1
+    with (workdir.docking_dir(1) / "acquisition.csv").open(newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert [int(row["spacehastenid"]) for row in rows] == [first, other_cluster]
+    assert {float(row["cluster_alpha"]) for row in rows} == {2.0}
+    assert {int(row["frontier_start_rank"]) for row in rows} == {2}
+    assert {int(row["frontier_stop_rank"]) for row in rows} == {3}
+    assert {int(row["candidate_count"]) for row in rows} == {3}
+    assert {int(row["batch_size"]) for row in rows} == {2}
+    assert {row["cluster_atlas_id"] for row in rows} == {TEST_ATLAS_ID}
+    assert {int(row["cluster_atlas_version"]) for row in rows} == {0}
+    assert [float(row["frontier_q10"]) for row in rows] == pytest.approx([-0.28, -0.28])
+    assert [float(row["frontier_q90"]) for row in rows] == pytest.approx([-0.12, -0.12])
+    assert [float(row["frontier_scale"]) for row in rows] == pytest.approx([0.16, 0.16])
+    expected_lambda = 2.0 * 0.16 / math.log(2.0)
+    assert [float(row["cluster_lambda"]) for row in rows] == pytest.approx(
+        [expected_lambda, expected_lambda]
+    )
 
 
 def test_uncertainty_acquisition_rejects_stale_atlas(tmp_path: Path) -> None:
