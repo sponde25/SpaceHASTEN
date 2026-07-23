@@ -58,19 +58,22 @@ def combine(args: argparse.Namespace) -> None:
     if not np.isfinite(embedding).all():
         raise ValueError("non-finite UMAP coordinates found in chunks")
 
-    bundle = joblib.load(model_path)
-    centroid_ids = np.asarray(bundle["centroid_ids"], dtype=np.uint64)
-    centroid_coordinates = np.asarray(bundle["centroid_coordinates"], dtype=np.float32)
-    if centroid_coordinates.shape != (len(centroid_ids), 2):
-        raise ValueError("model centroid identifiers and coordinates are inconsistent")
     order = np.argsort(compound_ids)
     sorted_ids = compound_ids[order]
-    positions = np.searchsorted(sorted_ids, centroid_ids)
-    if np.any(positions == len(sorted_ids)) or not np.array_equal(
-        sorted_ids[positions], centroid_ids
-    ):
-        raise ValueError("centroid IDs are missing from transformed chunks")
-    embedding[order[positions]] = centroid_coordinates
+    landmark_count = 0
+    if not args.skip_landmark_overwrite:
+        bundle = joblib.load(model_path)
+        centroid_ids = np.asarray(bundle["centroid_ids"], dtype=np.uint64)
+        centroid_coordinates = np.asarray(bundle["centroid_coordinates"], dtype=np.float32)
+        if centroid_coordinates.shape != (len(centroid_ids), 2):
+            raise ValueError("model centroid identifiers and coordinates are inconsistent")
+        positions = np.searchsorted(sorted_ids, centroid_ids)
+        if np.any(positions == len(sorted_ids)) or not np.array_equal(
+            sorted_ids[positions], centroid_ids
+        ):
+            raise ValueError("centroid IDs are missing from transformed chunks")
+        embedding[order[positions]] = centroid_coordinates
+        landmark_count = len(centroid_ids)
 
     temporary = coordinates_path.with_name(f".{coordinates_path.name}.tmp")
     with temporary.open("wb") as handle:
@@ -88,7 +91,8 @@ def combine(args: argparse.Namespace) -> None:
         "coordinates": str(coordinates_path),
         "task_count": args.task_count,
         "compound_count": int(len(compound_ids)),
-        "landmark_count": int(len(centroid_ids)),
+        "landmark_count_overwritten": landmark_count,
+        "landmark_overwrite_skipped": args.skip_landmark_overwrite,
         "coordinate_min": embedding.min(axis=0).tolist(),
         "coordinate_max": embedding.max(axis=0).tolist(),
     }
@@ -103,6 +107,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--task-count", type=int, required=True)
     parser.add_argument("--expected-count", type=int, required=True)
+    parser.add_argument(
+        "--skip-landmark-overwrite",
+        action="store_true",
+        help="Keep transformed coordinates when applying a model to a different ID namespace.",
+    )
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
     if min(args.task_count, args.expected_count) < 1:

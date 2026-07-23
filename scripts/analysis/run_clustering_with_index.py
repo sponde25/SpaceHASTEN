@@ -42,7 +42,7 @@ def run_with_existing_index(
             row_count = int(handle.root.fps.nrows)
             fp_type = str(handle.root.config[0])
             fp_params = dict(handle.root.config[1])
-            index_ids = np.asarray(handle.root.fps[:, 0], dtype=np.int64)
+            index_ids = np.asarray(handle.root.fps.col("fp_id"), dtype=np.int64)
         if row_count != len(rows):
             raise ValueError(f"index contains {row_count} rows but input contains {len(rows)}")
         if fp_type != EXPECTED_FP_TYPE or fp_params != EXPECTED_FP_PARAMS:
