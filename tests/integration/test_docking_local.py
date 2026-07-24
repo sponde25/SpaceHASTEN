@@ -324,6 +324,7 @@ def test_ei_acquisition_with_normalized_cluster_penalty(tmp_path: Path) -> None:
         cpus=1,
         ei_hit_threshold=-9.7,
         cluster_alpha=2.0,
+        cluster_cap=1,
         atlas_id=TEST_ATLAS_ID,
         dock_command_template=_STUB_BODY,
         seed=0,
@@ -335,6 +336,8 @@ def test_ei_acquisition_with_normalized_cluster_penalty(tmp_path: Path) -> None:
         rows = list(csv.DictReader(handle))
     assert [int(row["spacehastenid"]) for row in rows] == [first, other_cluster]
     assert {float(row["cluster_alpha"]) for row in rows} == {2.0}
+    assert {int(row["cluster_cap"]) for row in rows} == {1}
+    assert {float(row["cluster_similarity_threshold"]) for row in rows} == {0.4}
     assert {int(row["frontier_start_rank"]) for row in rows} == {2}
     assert {int(row["frontier_stop_rank"]) for row in rows} == {3}
     assert {int(row["candidate_count"]) for row in rows} == {3}

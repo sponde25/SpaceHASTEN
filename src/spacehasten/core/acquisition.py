@@ -81,6 +81,7 @@ def select_penalized_batch(
     method: DockAcquisition,
     batch_size: int,
     cluster_lambda: float,
+    cluster_cap: int | None = None,
     beta: float = 1.0,
     hit_threshold: float | None = None,
     xi: float = 0.0,
@@ -90,6 +91,7 @@ def select_penalized_batch(
         raise ValueError(f"batch_size must be at least 1, got {batch_size}")
     if not math.isfinite(cluster_lambda) or cluster_lambda < 0:
         raise ValueError(f"cluster_lambda must be finite and non-negative, got {cluster_lambda}")
+    _validate_cluster_cap(cluster_cap)
     scored = _score_candidates(
         candidates,
         method=method,
@@ -101,6 +103,7 @@ def select_penalized_batch(
         scored,
         batch_size=batch_size,
         cluster_lambda=cluster_lambda,
+        cluster_cap=cluster_cap,
     )
 
 
@@ -110,6 +113,7 @@ def select_normalized_penalized_batch(
     method: DockAcquisition,
     batch_size: int,
     cluster_alpha: float,
+    cluster_cap: int | None = None,
     beta: float = 1.0,
     hit_threshold: float | None = None,
     xi: float = 0.0,
@@ -119,6 +123,7 @@ def select_normalized_penalized_batch(
         raise ValueError(f"batch_size must be at least 1, got {batch_size}")
     if not math.isfinite(cluster_alpha) or cluster_alpha < 0:
         raise ValueError(f"cluster_alpha must be finite and non-negative, got {cluster_alpha}")
+    _validate_cluster_cap(cluster_cap)
 
     scored = _score_candidates(
         candidates,
@@ -166,6 +171,7 @@ def select_normalized_penalized_batch(
         scored,
         batch_size=batch_size,
         cluster_lambda=cluster_lambda,
+        cluster_cap=cluster_cap,
     )
     return selections, normalization
 
@@ -231,11 +237,12 @@ def _select_scored_batch(
     *,
     batch_size: int,
     cluster_lambda: float,
+    cluster_cap: int | None = None,
     scores_are_sorted: bool = False,
 ) -> list[AcquisitionSelection]:
     selection_count = min(batch_size, len(scored))
 
-    if cluster_lambda == 0:
+    if cluster_lambda == 0 and cluster_cap is None:
         if not scores_are_sorted:
             scored.sort(key=lambda item: (item[0], item[1].spacehastenid))
         unpenalized_selections: list[AcquisitionSelection] = []
@@ -307,7 +314,9 @@ def _select_scored_batch(
         cluster_counts[clusterid] += 1
         next_index = member_index + 1
         members = by_cluster[clusterid]
-        if next_index < len(members):
+        if next_index < len(members) and (
+            cluster_cap is None or cluster_counts[clusterid] < cluster_cap
+        ):
             next_base, next_candidate = members[next_index]
             next_penalty = cluster_lambda * math.log1p(cluster_counts[clusterid])
             heapq.heappush(
@@ -321,7 +330,16 @@ def _select_scored_batch(
                 ),
             )
 
+    if len(selections) != selection_count:
+        raise ValueError(
+            f"cluster cap permits only {len(selections)} of {selection_count} requested selections"
+        )
     return selections
+
+
+def _validate_cluster_cap(cluster_cap: int | None) -> None:
+    if cluster_cap is not None and cluster_cap < 1:
+        raise ValueError(f"cluster_cap must be at least 1, got {cluster_cap}")
 
 
 def _validate_prediction(mean: float, epistemic_std: float) -> None:

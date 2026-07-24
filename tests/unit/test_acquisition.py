@@ -80,6 +80,42 @@ def test_dynamic_cluster_penalty_changes_batch_order() -> None:
     assert selected[2].penalized_score == pytest.approx(-9.9 + math.log(2.0))
 
 
+def test_hard_cluster_cap_limits_contribution() -> None:
+    candidates = [
+        _candidate(1, -10.0, 0.0, 10),
+        _candidate(2, -9.9, 0.0, 10),
+        _candidate(3, -9.8, 0.0, 10),
+        _candidate(4, -9.7, 0.0, 20),
+        _candidate(5, -9.6, 0.0, 20),
+    ]
+    selected = select_penalized_batch(
+        candidates,
+        method="lcb",
+        batch_size=4,
+        cluster_lambda=0.0,
+        cluster_cap=2,
+        beta=0.0,
+    )
+    assert [row.candidate.spacehastenid for row in selected] == [1, 2, 4, 5]
+    assert [row.cluster_count_before for row in selected] == [0, 1, 0, 1]
+
+
+def test_hard_cluster_cap_rejects_insufficient_capacity() -> None:
+    with pytest.raises(ValueError, match="permits only 2 of 3"):
+        select_penalized_batch(
+            [
+                _candidate(1, -10.0, 0.0, 10),
+                _candidate(2, -9.9, 0.0, 10),
+                _candidate(3, -9.8, 0.0, 10),
+            ],
+            method="lcb",
+            batch_size=3,
+            cluster_lambda=0.0,
+            cluster_cap=2,
+            beta=0.0,
+        )
+
+
 def test_normalized_penalty_uses_live_frontier_scale() -> None:
     candidates = [
         _candidate(1, -10.2, 0.0, 10),

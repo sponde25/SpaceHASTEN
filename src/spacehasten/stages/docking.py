@@ -81,6 +81,7 @@ def _write_acquisition_csv(
     batch_size: int,
     atlas_id: str | None,
     atlas_version: int | None,
+    cluster_cap: int | None,
     normalized_penalty: NormalizedPenalty | None,
 ) -> None:
     with path.open("wt", encoding="utf-8", newline="") as handle:
@@ -108,6 +109,7 @@ def _write_acquisition_csv(
                 "batch_size",
                 "cluster_atlas_id",
                 "cluster_atlas_version",
+                "cluster_cap",
                 "cluster_alpha",
                 "frontier_start_rank",
                 "frontier_stop_rank",
@@ -136,11 +138,16 @@ def _write_acquisition_csv(
                     ei_hit_threshold if ei_hit_threshold is not None else "",
                     ei_xi,
                     cluster_lambda,
-                    PENALTY_CLUSTER_SIMILARITY if cluster_lambda > 0 else "",
+                    (
+                        PENALTY_CLUSTER_SIMILARITY
+                        if cluster_lambda > 0 or cluster_cap is not None
+                        else ""
+                    ),
                     candidate_count,
                     batch_size,
                     atlas_id if atlas_id is not None else "",
                     atlas_version if atlas_version is not None else "",
+                    cluster_cap if cluster_cap is not None else "",
                     normalized_penalty.cluster_alpha if normalized_penalty is not None else "",
                     (
                         normalized_penalty.frontier_start_rank
@@ -318,6 +325,7 @@ def dock(
     ei_xi: float = 0.0,
     cluster_lambda: float = 0.0,
     cluster_alpha: float | None = None,
+    cluster_cap: int | None = None,
     atlas_id: str | None = None,
     dock_command_template: str | None = None,
     seed: int | None = None,
@@ -338,8 +346,10 @@ def dock(
         within-batch cluster penalty.
     :param cluster_alpha: optional dimensionless EI cluster penalty. The
         corresponding lambda is derived from the live acquisition-score frontier.
-    :param atlas_id: persistent cluster atlas used when a cluster penalty is
-        positive. The atlas must cover the current database exactly.
+    :param cluster_cap: optional maximum selections from any persistent-atlas
+        cluster within this batch.
+    :param atlas_id: persistent cluster atlas used by cluster penalties or caps.
+        The atlas must cover the current database exactly.
     :param cpus: maximum concurrent docking tasks (also the chunk-count
         cap — chunks scale down toward the CPU count when N is small).
     :param dock_command_template: per-task bash body. If ``None``, the
@@ -361,6 +371,8 @@ def dock(
         raise ValueError("cluster_alpha and cluster_lambda cannot be used together")
     if cluster_alpha is not None and (not math.isfinite(cluster_alpha) or cluster_alpha < 0):
         raise ValueError(f"cluster_alpha must be finite and non-negative, got {cluster_alpha}")
+    if cluster_cap is not None and cluster_cap < 1:
+        raise ValueError(f"cluster_cap must be at least 1, got {cluster_cap}")
     if strategy == "clustering" and not db.has_clusters():
         raise ValueError(
             "strategy='clustering' requires cluster assignments, but none exist yet;"
@@ -376,12 +388,14 @@ def dock(
     penalty_atlas_version: int | None = None
     if strategy in {"lcb", "ei"}:
         acquisition_method = strategy
-        use_cluster_penalty = cluster_lambda > 0 or (
-            cluster_alpha is not None and cluster_alpha > 0
+        use_cluster_penalty = (
+            cluster_lambda > 0
+            or cluster_cap is not None
+            or (cluster_alpha is not None and cluster_alpha > 0)
         )
         if use_cluster_penalty:
             if atlas_id is None:
-                raise ValueError("a cluster atlas ID is required for a positive cluster penalty")
+                raise ValueError("a cluster atlas ID is required for a cluster constraint")
             penalty_atlas_version = _require_current_cluster_atlas(db, atlas_id)
         candidates = db.select_uncertainty_docking_candidates(
             atlas_id=atlas_id if use_cluster_penalty else None
@@ -393,6 +407,7 @@ def dock(
                 method=acquisition_method,
                 batch_size=top_n,
                 cluster_lambda=cluster_lambda,
+                cluster_cap=cluster_cap,
                 beta=lcb_beta,
                 hit_threshold=ei_hit_threshold,
                 xi=ei_xi,
@@ -403,6 +418,7 @@ def dock(
                 method=acquisition_method,
                 batch_size=top_n,
                 cluster_alpha=cluster_alpha,
+                cluster_cap=cluster_cap,
                 beta=lcb_beta,
                 hit_threshold=ei_hit_threshold,
                 xi=ei_xi,
@@ -461,6 +477,7 @@ def dock(
             batch_size=top_n,
             atlas_id=atlas_id if use_cluster_penalty else None,
             atlas_version=penalty_atlas_version,
+            cluster_cap=cluster_cap,
             normalized_penalty=normalized_penalty,
         )
         selected_clusters = Counter(

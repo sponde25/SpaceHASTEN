@@ -6,7 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from spacehasten.cli.main import _build_parser, _cluster_alpha_schedule, main
+from spacehasten.cli.main import (
+    _build_parser,
+    _cluster_alpha_schedule,
+    _cluster_cap_schedule,
+    main,
+)
 
 
 def test_no_command_errors() -> None:
@@ -201,6 +206,16 @@ def test_cluster_alpha_schedule_broadcasts_and_validates_length() -> None:
         _cluster_alpha_schedule([0.2, 0.1, 0.05], 2)
     with pytest.raises(SystemExit, match="must be at least 1"):
         _cluster_alpha_schedule(None, 0)
+
+
+def test_cluster_cap_schedule_broadcasts_and_validates_length() -> None:
+    assert _cluster_cap_schedule([50], 2) == [50, 50]
+    assert _cluster_cap_schedule([100, 50], 2) == [100, 50]
+    assert _cluster_cap_schedule([0, 50], 2) == [None, 50]
+    with pytest.raises(SystemExit, match="2 expected, got 3"):
+        _cluster_cap_schedule([200, 100, 50], 2)
+    with pytest.raises(SystemExit, match="must be at least 1"):
+        _cluster_cap_schedule(None, 0)
 
 
 def test_dock_rejects_cluster_alpha_with_fixed_lambda(tmp_path) -> None:  # type: ignore[no-untyped-def]
@@ -467,6 +482,7 @@ def test_screening_cycle_lcb_only_changes_docking_acquisition(tmp_path, monkeypa
     assert dock_calls[0]["lcb_beta"] == 2.0
     assert dock_calls[0]["cluster_lambda"] == 0.5
     assert dock_calls[0]["cluster_alpha"] is None
+    assert dock_calls[0]["cluster_cap"] is None
     assert dock_calls[0]["atlas_id"] == "test-atlas"
 
 
@@ -518,6 +534,9 @@ def test_screening_cycle_applies_cluster_alpha_schedule(tmp_path, monkeypatch) -
             "--cluster-alpha",
             "0.2",
             "0.1",
+            "--cluster-cap",
+            "0",
+            "50",
             "--atlas-id",
             "test-atlas",
             "--atlas-root",
@@ -529,6 +548,7 @@ def test_screening_cycle_applies_cluster_alpha_schedule(tmp_path, monkeypatch) -
     assert len(atlas_import_calls) == 1
     assert len(atlas_update_calls) == 2
     assert [call["cluster_alpha"] for call in dock_calls] == [0.2, 0.1]
+    assert [call["cluster_cap"] for call in dock_calls] == [None, 50]
     assert {call["cluster_lambda"] for call in dock_calls} == {0.0}
 
 

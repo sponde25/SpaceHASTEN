@@ -344,6 +344,17 @@ def _add_uncertainty_dock_options(p: argparse.ArgumentParser) -> None:
         ),
     )
     p.add_argument(
+        "--cluster-cap",
+        type=int,
+        nargs="+",
+        default=None,
+        help=(
+            "Optional. Maximum selections from one persistent-atlas cluster. "
+            "Pass one value, or one value per screening round; use 0 to disable "
+            "the cap for a round."
+        ),
+    )
+    p.add_argument(
         "--atlas-id",
         default=atlas_stage.DEFAULT_ATLAS_ID,
         help=(
@@ -368,6 +379,11 @@ def _validate_dock_acquisition_args(strategy: str, args: argparse.Namespace) -> 
         raise SystemExit("error: --cluster-alpha requires EI acquisition")
     if cluster_alphas and args.cluster_lambda != 0:
         raise SystemExit("error: --cluster-alpha and --cluster-lambda cannot be used together")
+    cluster_caps = args.cluster_cap or []
+    if any(cap < 0 for cap in cluster_caps):
+        raise SystemExit("error: --cluster-cap values must be non-negative")
+    if any(cap > 0 for cap in cluster_caps) and strategy not in {"lcb", "ei"}:
+        raise SystemExit("error: --cluster-cap requires LCB or EI acquisition")
     if args.ei_hit_threshold is not None and not math.isfinite(args.ei_hit_threshold):
         raise SystemExit("error: --ei-hit-threshold must be finite")
     if strategy == "ei" and args.ei_hit_threshold is None:
@@ -393,6 +409,29 @@ def _cluster_alpha_schedule(
         )
     schedule = []
     schedule.extend(values)
+    return schedule
+
+
+def _cluster_cap_schedule(
+    values: list[int] | None,
+    rounds: int,
+) -> list[int | None]:
+    if rounds < 1:
+        raise SystemExit(f"error: --rounds must be at least 1, got {rounds}")
+    if values is None:
+        return [None] * rounds
+    normalized = [None if value == 0 else value for value in values]
+    if len(values) == 1:
+        schedule: list[int | None] = []
+        schedule.extend(normalized * rounds)
+        return schedule
+    if len(values) != rounds:
+        raise SystemExit(
+            "error: --cluster-cap requires one value or exactly one value per round "
+            f"({rounds} expected, got {len(values)})"
+        )
+    schedule = []
+    schedule.extend(normalized)
     return schedule
 
 
@@ -878,6 +917,7 @@ def _cmd_dock(args: argparse.Namespace) -> int:
     scheduler = scheduler_from_args(args, settings)
     _validate_dock_acquisition_args(args.strategy, args)
     cluster_alpha = _cluster_alpha_schedule(args.cluster_alpha, 1)[0]
+    cluster_cap = _cluster_cap_schedule(args.cluster_cap, 1)[0]
     with open_db(args) as db:
         try:
             iteration = docking.dock(
@@ -893,6 +933,7 @@ def _cmd_dock(args: argparse.Namespace) -> int:
                 ei_xi=args.ei_xi,
                 cluster_lambda=args.cluster_lambda,
                 cluster_alpha=cluster_alpha,
+                cluster_cap=cluster_cap,
                 atlas_id=args.atlas_id,
             )
         except ValueError as exc:
@@ -999,8 +1040,11 @@ def _cmd_screening_cycle(args: argparse.Namespace) -> int:
     dock_strategy: docking.DockStrategy = args.dock_acquisition or strategy
     _validate_dock_acquisition_args(dock_strategy, args)
     cluster_alphas = _cluster_alpha_schedule(args.cluster_alpha, args.rounds)
+    cluster_caps = _cluster_cap_schedule(args.cluster_cap, args.rounds)
     use_cluster_atlas = dock_strategy in {"lcb", "ei"} and (
-        args.cluster_lambda > 0 or any(alpha is not None and alpha > 0 for alpha in cluster_alphas)
+        args.cluster_lambda > 0
+        or any(alpha is not None and alpha > 0 for alpha in cluster_alphas)
+        or any(cap is not None for cap in cluster_caps)
     )
 
     def _maybe_cluster_queries(db: Database) -> None:
@@ -1008,10 +1052,18 @@ def _cmd_screening_cycle(args: argparse.Namespace) -> int:
         if strategy == "clustering":
             clustering.cluster(db, workdir, scheduler, settings)
 
-    def _maybe_cluster_docking(db: Database, cluster_alpha: float | None) -> None:
+    def _maybe_cluster_docking(
+        db: Database,
+        cluster_alpha: float | None,
+        cluster_cap: int | None,
+    ) -> None:
         if dock_strategy == "clustering":
             clustering.cluster(db, workdir, scheduler, settings)
-        elif args.cluster_lambda > 0 or (cluster_alpha is not None and cluster_alpha > 0):
+        elif (
+            args.cluster_lambda > 0
+            or (cluster_alpha is not None and cluster_alpha > 0)
+            or cluster_cap is not None
+        ):
             atlas_stage.update_cluster_atlas(
                 db,
                 workdir,
@@ -1050,6 +1102,7 @@ def _cmd_screening_cycle(args: argparse.Namespace) -> int:
         for round_n in range(1, args.rounds + 1):
             logger.info("Screening round %d/%d", round_n, args.rounds)
             round_cluster_alpha = cluster_alphas[round_n - 1]
+            round_cluster_cap = cluster_caps[round_n - 1]
 
             # Train if there are newly docked compounds from a previous
             # screening cycle (i.e. not the very first round ever run).
@@ -1104,7 +1157,7 @@ def _cmd_screening_cycle(args: argparse.Namespace) -> int:
                 )
 
             # dock
-            _maybe_cluster_docking(db, round_cluster_alpha)
+            _maybe_cluster_docking(db, round_cluster_alpha, round_cluster_cap)
             docking.dock(
                 db,
                 workdir,
@@ -1118,6 +1171,7 @@ def _cmd_screening_cycle(args: argparse.Namespace) -> int:
                 ei_xi=args.ei_xi,
                 cluster_lambda=args.cluster_lambda,
                 cluster_alpha=round_cluster_alpha,
+                cluster_cap=round_cluster_cap,
                 atlas_id=args.atlas_id,
             )
     print(f"Completed {args.rounds} screening round(s)")
