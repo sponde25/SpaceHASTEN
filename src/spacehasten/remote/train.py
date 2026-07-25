@@ -9,11 +9,13 @@ import json
 import logging
 import os
 import random
+import resource
 import sys
 import time
 from dataclasses import asdict
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -39,7 +41,9 @@ try:  # script path execution on compute nodes does not import the package root
         SVDKLConfig,
         SVDKLHead,
         build_chemprop_mpnn,
+        enable_batch_mol_graph_pinning,
         fit_target_scaler,
+        load_chemprop_svdkl_checkpoint,
         move_batch_to_device,
         save_chemprop_svdkl_checkpoint,
         scale_targets,
@@ -51,7 +55,9 @@ except ImportError:  # pragma: no cover - exercised by file-path remote executio
         SVDKLConfig,
         SVDKLHead,
         build_chemprop_mpnn,
+        enable_batch_mol_graph_pinning,
         fit_target_scaler,
+        load_chemprop_svdkl_checkpoint,
         move_batch_to_device,
         save_chemprop_svdkl_checkpoint,
         scale_targets,
@@ -102,6 +108,33 @@ def deterministic_split_indices(
     return train_indices, validation_indices
 
 
+def identify_new_row_indices(
+    current: pd.DataFrame,
+    previous: pd.DataFrame,
+) -> np.ndarray:
+    """Return current-row indices whose SMILES were absent from the previous dataset."""
+
+    required_columns = {"smiles", "docking_score"}
+    if not required_columns <= set(current.columns) or not required_columns <= set(
+        previous.columns
+    ):
+        raise ValueError("current and previous training data require smiles and docking_score")
+    if current["smiles"].duplicated().any() or previous["smiles"].duplicated().any():
+        raise ValueError("warm-start training requires unique SMILES in both datasets")
+
+    previous_scores = previous.set_index("smiles")["docking_score"]
+    previous_mask = current["smiles"].isin(previous_scores.index).to_numpy()
+    if int(previous_mask.sum()) != len(previous):
+        raise ValueError("current training data does not contain every previous SMILES")
+    preserved_scores = current.loc[previous_mask, "smiles"].map(previous_scores).to_numpy()
+    if not np.array_equal(
+        preserved_scores,
+        current.loc[previous_mask, "docking_score"].to_numpy(),
+    ):
+        raise ValueError("docking scores changed for previously trained SMILES")
+    return np.flatnonzero(~previous_mask).astype(np.int64)
+
+
 def _format_optional(value: object | None) -> str:
     if value is None:
         return "nan"
@@ -115,6 +148,32 @@ def _package_version(package: str) -> str:
         return version(package)
     except PackageNotFoundError:
         return "unknown"
+
+
+def _max_rss_bytes() -> int:
+    """Return peak resident memory for the training process on Linux."""
+
+    return int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024)
+
+
+def _mean_batch_metric(
+    *,
+    count: int,
+    host_sum: float,
+    device_sum: torch.Tensor | None,
+) -> float:
+    if count == 0:
+        return float("nan")
+    if device_sum is not None:
+        return float((device_sum / count).detach().cpu())
+    return host_sum / count
+
+
+def _cuda_event_seconds(event_pairs: list[tuple[Any, Any]]) -> float | None:
+    if not event_pairs:
+        return None
+    torch.cuda.synchronize()
+    return sum(start.elapsed_time(stop) for start, stop in event_pairs) / 1000.0
 
 
 def train_model(
@@ -148,14 +207,46 @@ def train_model(
     validation_fraction: float = 0.1,
     gradient_clip_val: float = 5.0,
     precision: str = "32-true",
+    cache_molgraphs: bool = False,
+    persistent_workers: bool = False,
+    pin_memory: bool = False,
+    non_blocking: bool = False,
+    defer_batch_metrics: bool = False,
+    prefetch_factor: int = 2,
+    profile: bool = False,
+    parent_checkpoint: str | None = None,
+    previous_data_path: str | None = None,
+    new_data_repeat: int = 1,
 ) -> int:
+    profile_started = time.monotonic()
+    timing_profile: dict[str, Any] = {
+        "settings": {
+            "batch_size": batch_size,
+            "epochs": epochs,
+            "num_workers": num_workers,
+            "cache_molgraphs": cache_molgraphs,
+            "persistent_workers": persistent_workers,
+            "pin_memory": pin_memory,
+            "non_blocking": non_blocking,
+            "defer_batch_metrics": defer_batch_metrics,
+            "prefetch_factor": prefetch_factor,
+            "warm_start": parent_checkpoint is not None,
+            "parent_checkpoint": parent_checkpoint,
+            "previous_data_path": previous_data_path,
+            "new_data_repeat": new_data_repeat,
+        },
+        "phases": {},
+        "epochs": [],
+    }
     _seed_everything(seed)
     torch.set_float32_matmul_precision("medium")
 
     save_dir_path = Path(save_dir)
     save_dir_path.mkdir(parents=True, exist_ok=True)
 
+    phase_started = time.monotonic()
     df = pd.read_csv(data_path)
+    timing_profile["phases"]["csv_read_s"] = time.monotonic() - phase_started
     if "smiles" not in df.columns or "docking_score" not in df.columns:
         logger.error("Training CSV must have 'smiles' and 'docking_score' columns")
         return 1
@@ -187,21 +278,100 @@ def train_model(
     if precision not in {"32", "32-true"}:
         logger.error("only float32 training is supported; got precision=%s", precision)
         return 1
+    if persistent_workers and num_workers == 0:
+        logger.error("persistent_workers requires num_workers > 0")
+        return 1
+    if prefetch_factor < 1:
+        logger.error("prefetch_factor must be at least 1")
+        return 1
+    if (parent_checkpoint is None) != (previous_data_path is None):
+        logger.error("parent_checkpoint and previous_data_path must be provided together")
+        return 1
+    if new_data_repeat < 1:
+        logger.error("new_data_repeat must be at least 1")
+        return 1
+    if parent_checkpoint is None and new_data_repeat != 1:
+        logger.error("new_data_repeat requires warm-start inputs")
+        return 1
 
     logger.info("Loaded %d molecules for training", len(smiles))
 
+    phase_started = time.monotonic()
     train_indices, val_indices = deterministic_split_indices(
         len(smiles), validation_fraction=validation_fraction, seed=seed
     )
-    train_smiles, raw_train_targets = smiles[train_indices], targets[train_indices]
+    warm_start = parent_checkpoint is not None
+    model: ChempropSVDKLModel | None = None
+    chemprop_config: ChempropConfig | None = None
+    parent_metadata: dict[str, Any] = {}
+    new_source_indices = np.array([], dtype=np.int64)
+    new_train_indices = np.array([], dtype=np.int64)
+    if warm_start:
+        assert parent_checkpoint is not None
+        assert previous_data_path is not None
+        parent_path = Path(parent_checkpoint)
+        previous_path = Path(previous_data_path)
+        if not parent_path.exists() or not previous_path.exists():
+            logger.error(
+                "Warm-start input missing: checkpoint=%s previous_data=%s",
+                parent_path,
+                previous_path,
+            )
+            return 1
+        try:
+            model, target_scaler, parent_metadata = load_chemprop_svdkl_checkpoint(
+                parent_path
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            logger.error("Could not load warm-start checkpoint %s: %s", parent_path, error)
+            return 1
+        try:
+            chemprop_config = ChempropConfig(**parent_metadata["chemprop_config"])
+        except (KeyError, TypeError) as error:
+            logger.error("Parent checkpoint lacks Chemprop configuration: %s", error)
+            return 1
+        previous_df = pd.read_csv(previous_path)
+        try:
+            new_source_indices = identify_new_row_indices(df, previous_df)
+        except ValueError as error:
+            logger.error("Warm-start dataset validation failed: %s", error)
+            return 1
+        new_train_indices = np.intersect1d(
+            train_indices,
+            new_source_indices,
+            assume_unique=True,
+        )
+        effective_train_indices = np.concatenate(
+            [train_indices, *([new_train_indices] * (new_data_repeat - 1))]
+        )
+        logger.info(
+            "Warm start: parent_rows=%d new_rows=%d new_train_rows=%d repeat=%d ",
+            len(previous_df),
+            len(new_source_indices),
+            len(new_train_indices),
+            new_data_repeat,
+        )
+    else:
+        effective_train_indices = train_indices
+        raw_scaler_targets = targets[train_indices].reshape(-1)
+        target_scaler = fit_target_scaler(raw_scaler_targets)
+
+    train_smiles = smiles[effective_train_indices]
+    raw_train_targets = targets[effective_train_indices]
     val_smiles, raw_val_targets = smiles[val_indices], targets[val_indices]
-    target_scaler = fit_target_scaler(raw_train_targets.reshape(-1))
     train_targets = scale_targets(raw_train_targets.reshape(-1), target_scaler).reshape(-1, 1)
     val_targets = scale_targets(raw_val_targets.reshape(-1), target_scaler).reshape(-1, 1)
-    logger.info("Split: %d train / %d val", len(train_smiles), len(val_smiles))
+    timing_profile["phases"]["split_and_scale_s"] = time.monotonic() - phase_started
+    logger.info(
+        "Split: %d unique train / %d effective train / %d val",
+        len(train_indices),
+        len(train_smiles),
+        len(val_smiles),
+    )
 
     featurizer = featurizers.SimpleMoleculeMolGraphFeaturizer()
 
+    phase_started = time.monotonic()
     train_data = [
         data.MoleculeDatapoint.from_smi(smi=smi, y=np.asarray(y, dtype=float))
         for smi, y in zip(train_smiles, train_targets, strict=False)
@@ -210,57 +380,88 @@ def train_model(
         data.MoleculeDatapoint.from_smi(smi=smi, y=np.asarray(y, dtype=float))
         for smi, y in zip(val_smiles, val_targets, strict=False)
     ]
+    timing_profile["phases"]["datapoint_build_s"] = time.monotonic() - phase_started
 
+    phase_started = time.monotonic()
     train_ds = data.MoleculeDataset(train_data, featurizer)
     val_ds = data.MoleculeDataset(val_data, featurizer)
+    timing_profile["phases"]["dataset_init_s"] = time.monotonic() - phase_started
 
-    drop_last_train = batch_norm and len(train_ds) % batch_size == 1
+    cache_started = time.monotonic()
+    if cache_molgraphs:
+        logger.info(
+            "Caching MolGraphs for %d train and %d validation molecules",
+            len(train_ds),
+            len(val_ds),
+        )
+        train_ds.cache = True
+        val_ds.cache = True
+        logger.info("MolGraph caching completed in %.1f seconds", time.monotonic() - cache_started)
+    timing_profile["phases"]["molgraph_cache_s"] = time.monotonic() - cache_started
+    timing_profile["phases"]["rss_after_dataset_bytes"] = _max_rss_bytes()
+
+    if pin_memory:
+        enable_batch_mol_graph_pinning()
+
+    effective_batch_norm = (
+        chemprop_config.batch_norm if chemprop_config is not None else batch_norm
+    )
+    drop_last_train = effective_batch_norm and len(train_ds) % batch_size == 1
+    loader_options: dict[str, Any] = {
+        "num_workers": num_workers,
+        "collate_fn": collate_batch,
+        "pin_memory": pin_memory,
+    }
+    if num_workers > 0:
+        loader_options["persistent_workers"] = persistent_workers
+        loader_options["prefetch_factor"] = prefetch_factor
     train_loader = DataLoader(
         train_ds,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=num_workers,
-        collate_fn=collate_batch,
         drop_last=drop_last_train,
         worker_init_fn=_seed_worker,
         generator=torch.Generator().manual_seed(seed),
+        **loader_options,
     )
     val_loader = DataLoader(
         val_ds,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=num_workers,
-        collate_fn=collate_batch,
         drop_last=False,
+        **loader_options,
     )
 
-    chemprop_config = ChempropConfig(
-        mp_hidden_size=mp_hidden_size,
-        mp_depth=mp_depth,
-        ffn_hidden_size=ffn_hidden_size,
-        ffn_layers=ffn_layers,
-        dropout=dropout,
-        activation=activation,
-        batch_norm=batch_norm,
-        warmup_epochs=warmup_epochs,
-        init_lr=init_lr,
-        max_lr=max_lr,
-        final_lr=final_lr,
-    )
-    mpnn = build_chemprop_mpnn(chemprop_config)
-    head = SVDKLHead(
-        SVDKLConfig(
-            input_dim=ffn_hidden_size,
-            gp_dim=svdkl_gp_dim,
-            grid_size=svdkl_grid_size,
-            grid_lower=svdkl_grid_lower,
-            grid_upper=svdkl_grid_upper,
-            cholesky_jitter=svdkl_cholesky_jitter,
-            feature_transform=svdkl_feature_transform,
-            tanh_temperature=svdkl_tanh_temperature,
+    phase_started = time.monotonic()
+    if model is None:
+        chemprop_config = ChempropConfig(
+            mp_hidden_size=mp_hidden_size,
+            mp_depth=mp_depth,
+            ffn_hidden_size=ffn_hidden_size,
+            ffn_layers=ffn_layers,
+            dropout=dropout,
+            activation=activation,
+            batch_norm=batch_norm,
+            warmup_epochs=warmup_epochs,
+            init_lr=init_lr,
+            max_lr=max_lr,
+            final_lr=final_lr,
         )
-    )
-    model = ChempropSVDKLModel(mpnn, head, embedding_i=chemprop_config.embedding_i)
+        mpnn = build_chemprop_mpnn(chemprop_config)
+        head = SVDKLHead(
+            SVDKLConfig(
+                input_dim=ffn_hidden_size,
+                gp_dim=svdkl_gp_dim,
+                grid_size=svdkl_grid_size,
+                grid_lower=svdkl_grid_lower,
+                grid_upper=svdkl_grid_upper,
+                cholesky_jitter=svdkl_cholesky_jitter,
+                feature_transform=svdkl_feature_transform,
+                tanh_temperature=svdkl_tanh_temperature,
+            )
+        )
+        model = ChempropSVDKLModel(mpnn, head, embedding_i=chemprop_config.embedding_i)
+    assert chemprop_config is not None
 
     try:
         n_devices = int(devices)
@@ -269,6 +470,7 @@ def train_model(
 
     device = _select_device(n_devices)
     model.to(device)
+    timing_profile["phases"]["model_init_s"] = time.monotonic() - phase_started
     logger.info("Training SVDKL model on %s", device)
 
     mll = gpytorch.mlls.PredictiveLogLikelihood(
@@ -287,6 +489,8 @@ def train_model(
         final_lr=final_lr,
     )
 
+    timing_profile["phases"]["setup_total_s"] = time.monotonic() - profile_started
+    timing_profile["phases"]["rss_before_training_bytes"] = _max_rss_bytes()
     training_started = time.monotonic()
     best_val_nll = float("inf")
     best_epoch = 0
@@ -296,41 +500,139 @@ def train_model(
     stop_reason = "max_epochs"
     for epoch in range(epochs):
         epoch_started = time.monotonic()
+        if device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(device)
         model.train()
         model.likelihood.train()
-        train_losses: list[float] = []
-        gradient_norms: list[float] = []
-        for batch in train_loader:
-            batch = move_batch_to_device(batch, device)
+        train_loss_host_sum = 0.0
+        gradient_norm_host_sum = 0.0
+        train_loss_device_sum = (
+            torch.zeros((), device=device) if defer_batch_metrics else None
+        )
+        gradient_norm_device_sum = (
+            torch.zeros((), device=device) if defer_batch_metrics else None
+        )
+        train_batch_count = 0
+        train_row_count = 0
+        train_data_wait_s = 0.0
+        train_transfer_enqueue_s = 0.0
+        train_cuda_events: list[tuple[Any, Any]] = []
+        train_started = time.monotonic()
+        iterator_started = time.monotonic()
+        train_iterator = iter(train_loader)
+        train_iterator_start_s = time.monotonic() - iterator_started
+        while True:
+            fetch_started = time.monotonic() if profile else 0.0
+            try:
+                batch = next(train_iterator)
+            except StopIteration:
+                break
+            if profile:
+                train_data_wait_s += time.monotonic() - fetch_started
+            cuda_start = cuda_stop = None
+            if profile and device.type == "cuda":
+                cuda_start = torch.cuda.Event(enable_timing=True)
+                cuda_stop = torch.cuda.Event(enable_timing=True)
+                cuda_start.record()
+            transfer_started = time.monotonic() if profile else 0.0
+            batch = move_batch_to_device(batch, device, non_blocking=non_blocking)
+            if profile:
+                train_transfer_enqueue_s += time.monotonic() - transfer_started
             target = _batch_targets(batch, device)
-            optimizer.zero_grad()
+            train_row_count += int(target.shape[0])
+            optimizer.zero_grad(set_to_none=True)
             loss = -mll(model(batch), target)
-            if not torch.isfinite(loss):
+            if not defer_batch_metrics and not torch.isfinite(loss):
                 logger.error("Non-finite training loss at epoch %d", epoch + 1)
                 return 1
             loss.backward()
             gradient_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip_val)
             optimizer.step()
             scheduler.step()
-            train_losses.append(float(loss.detach().cpu()))
-            gradient_norms.append(float(gradient_norm.detach().cpu()))
+            if cuda_stop is not None and cuda_start is not None:
+                cuda_stop.record()
+                train_cuda_events.append((cuda_start, cuda_stop))
+            if defer_batch_metrics:
+                assert train_loss_device_sum is not None
+                assert gradient_norm_device_sum is not None
+                train_loss_device_sum.add_(loss.detach())
+                gradient_norm_device_sum.add_(gradient_norm.detach())
+            else:
+                train_loss_host_sum += float(loss.detach().cpu())
+                gradient_norm_host_sum += float(gradient_norm.detach().cpu())
+            train_batch_count += 1
+        train_gpu_batch_s = _cuda_event_seconds(train_cuda_events) if profile else None
+        train_wall_s = time.monotonic() - train_started
+        train_loss = _mean_batch_metric(
+            count=train_batch_count,
+            host_sum=train_loss_host_sum,
+            device_sum=train_loss_device_sum,
+        )
+        mean_gradient_norm = _mean_batch_metric(
+            count=train_batch_count,
+            host_sum=gradient_norm_host_sum,
+            device_sum=gradient_norm_device_sum,
+        )
+        if not np.isfinite(train_loss):
+            logger.error("Non-finite training loss at epoch %d", epoch + 1)
+            return 1
 
-        val_losses: list[float] = []
+        val_loss_host_sum = 0.0
+        val_loss_device_sum = torch.zeros((), device=device) if defer_batch_metrics else None
+        val_batch_count = 0
+        val_row_count = 0
+        val_data_wait_s = 0.0
+        val_transfer_enqueue_s = 0.0
+        val_cuda_events: list[tuple[Any, Any]] = []
         model.eval()
         model.likelihood.eval()
+        val_started = time.monotonic()
+        iterator_started = time.monotonic()
+        val_iterator = iter(val_loader)
+        val_iterator_start_s = time.monotonic() - iterator_started
         with torch.no_grad():
-            for batch in val_loader:
-                batch = move_batch_to_device(batch, device)
+            while True:
+                fetch_started = time.monotonic() if profile else 0.0
+                try:
+                    batch = next(val_iterator)
+                except StopIteration:
+                    break
+                if profile:
+                    val_data_wait_s += time.monotonic() - fetch_started
+                cuda_start = cuda_stop = None
+                if profile and device.type == "cuda":
+                    cuda_start = torch.cuda.Event(enable_timing=True)
+                    cuda_stop = torch.cuda.Event(enable_timing=True)
+                    cuda_start.record()
+                transfer_started = time.monotonic() if profile else 0.0
+                batch = move_batch_to_device(batch, device, non_blocking=non_blocking)
+                if profile:
+                    val_transfer_enqueue_s += time.monotonic() - transfer_started
                 target = _batch_targets(batch, device)
+                val_row_count += int(target.shape[0])
                 val_loss = -mll(model(batch), target)
-                val_losses.append(float(val_loss.detach().cpu()))
-        train_loss = float(np.mean(train_losses)) if train_losses else float("nan")
-        val_nll = float(np.mean(val_losses)) if val_losses else float("nan")
+                if cuda_stop is not None and cuda_start is not None:
+                    cuda_stop.record()
+                    val_cuda_events.append((cuda_start, cuda_stop))
+                if defer_batch_metrics:
+                    assert val_loss_device_sum is not None
+                    val_loss_device_sum.add_(val_loss.detach())
+                else:
+                    val_loss_host_sum += float(val_loss.detach().cpu())
+                val_batch_count += 1
+        val_gpu_batch_s = _cuda_event_seconds(val_cuda_events) if profile else None
+        val_wall_s = time.monotonic() - val_started
+        val_nll = _mean_batch_metric(
+            count=val_batch_count,
+            host_sum=val_loss_host_sum,
+            device_sum=val_loss_device_sum,
+        )
         if not np.isfinite(val_nll):
             logger.error("Non-finite validation NLL at epoch %d", epoch + 1)
             return 1
 
         improved = val_nll < best_val_nll - early_stopping_min_delta
+        checkpoint_snapshot_started = time.monotonic()
         if improved:
             best_val_nll = val_nll
             best_epoch = epoch + 1
@@ -340,6 +642,7 @@ def train_model(
             epochs_without_improvement = 0
         else:
             epochs_without_improvement += 1
+        checkpoint_snapshot_s = time.monotonic() - checkpoint_snapshot_started
 
         epochs_completed = epoch + 1
         elapsed = time.monotonic() - training_started
@@ -348,6 +651,39 @@ def train_model(
         eta_seconds = mean_epoch_seconds * remaining_epochs
         current_lr = float(optimizer.param_groups[0]["lr"])
         noise = float(model.likelihood.base_likelihood.noise.detach().mean().cpu())
+        epoch_seconds = time.monotonic() - epoch_started
+        epoch_profile = {
+            "epoch": epochs_completed,
+            "train_batches": train_batch_count,
+            "train_rows": train_row_count,
+            "train_wall_s": train_wall_s,
+            "train_iterator_start_s": train_iterator_start_s,
+            "train_data_wait_s": train_data_wait_s,
+            "train_transfer_enqueue_s": train_transfer_enqueue_s,
+            "train_gpu_batch_s": train_gpu_batch_s,
+            "train_rows_per_s": train_row_count / train_wall_s,
+            "val_batches": val_batch_count,
+            "val_rows": val_row_count,
+            "val_wall_s": val_wall_s,
+            "val_iterator_start_s": val_iterator_start_s,
+            "val_data_wait_s": val_data_wait_s,
+            "val_transfer_enqueue_s": val_transfer_enqueue_s,
+            "val_gpu_batch_s": val_gpu_batch_s,
+            "val_rows_per_s": val_row_count / val_wall_s,
+            "checkpoint_snapshot_s": checkpoint_snapshot_s,
+            "epoch_wall_s": epoch_seconds,
+            "train_loss": train_loss,
+            "val_nll": val_nll,
+            "mean_gradient_norm": mean_gradient_norm,
+            "max_rss_bytes": _max_rss_bytes(),
+            "cuda_peak_allocated_bytes": (
+                int(torch.cuda.max_memory_allocated(device)) if device.type == "cuda" else None
+            ),
+            "cuda_peak_reserved_bytes": (
+                int(torch.cuda.max_memory_reserved(device)) if device.type == "cuda" else None
+            ),
+        }
+        timing_profile["epochs"].append(epoch_profile)
         logger.info(
             "Epoch %d/%d train_loss=%.4f val_nll=%.4f best_val_nll=%.4f "
             "best_epoch=%d patience=%d/%d lr=%.3g grad_norm=%.3g noise=%.3g "
@@ -362,13 +698,13 @@ def train_model(
             epochs_without_improvement,
             early_stopping_patience,
             current_lr,
-            float(np.mean(gradient_norms)) if gradient_norms else float("nan"),
+            mean_gradient_norm,
             noise,
             _format_optional(model.head.last_raw_feature_min),
             _format_optional(model.head.last_raw_feature_max),
             _format_optional(model.head.last_transformed_feature_min),
             _format_optional(model.head.last_transformed_feature_max),
-            time.monotonic() - epoch_started,
+            epoch_seconds,
             elapsed,
             eta_seconds,
         )
@@ -393,6 +729,13 @@ def train_model(
     split_hash = hashlib.sha256(val_indices.astype(np.int64).tobytes()).hexdigest()
     metadata = {
         "train_rows": int(len(train_smiles)),
+        "unique_train_rows": int(len(train_indices)),
+        "warm_start": warm_start,
+        "parent_checkpoint": parent_checkpoint,
+        "previous_data_path": previous_data_path,
+        "new_data_repeat": new_data_repeat,
+        "new_rows": int(len(new_source_indices)),
+        "new_train_rows": int(len(new_train_indices)),
         "val_rows": int(len(val_smiles)),
         "validation_fraction": validation_fraction,
         "validation_indices_sha256": split_hash,
@@ -411,6 +754,12 @@ def train_model(
         "target_scale": float(target_scaler.scale_[0]),
         "batch_size": batch_size,
         "num_workers": num_workers,
+        "cache_molgraphs": cache_molgraphs,
+        "persistent_workers": persistent_workers,
+        "pin_memory": pin_memory,
+        "non_blocking": non_blocking,
+        "defer_batch_metrics": defer_batch_metrics,
+        "prefetch_factor": prefetch_factor,
         "optimizer": "Adam",
         "chemprop_config": asdict(chemprop_config),
         "svdkl_config": asdict(model.head.config),
@@ -430,6 +779,16 @@ def train_model(
     (save_dir_path / "training_metadata.json").write_text(
         json.dumps(metadata, indent=2) + "\n", encoding="utf-8"
     )
+    if profile:
+        timing_profile["training_total_s"] = time.monotonic() - training_started
+        timing_profile["total_s"] = time.monotonic() - profile_started
+        timing_profile["final_max_rss_bytes"] = _max_rss_bytes()
+        timing_profile["best_epoch"] = best_epoch
+        timing_profile["best_val_nll"] = best_val_nll
+        (save_dir_path / "training_profile.json").write_text(
+            json.dumps(timing_profile, indent=2) + "\n",
+            encoding="utf-8",
+        )
     logger.info("Model saved to %s", bin_path)
     return 0
 
@@ -465,7 +824,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--devices",
         type=str,
         default="1",
-        help="Number of devices for Lightning Trainer (integer)",
+        help="Positive values enable the single CUDA device used by this trainer",
     )
     parser.add_argument("--mp-hidden-size", type=int, default=300)
     parser.add_argument("--mp-depth", type=int, default=3)
@@ -501,6 +860,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--validation-fraction", type=float, default=0.1)
     parser.add_argument("--gradient-clip-val", type=float, default=5.0)
     parser.add_argument("--precision", choices=("32", "32-true"), default="32-true")
+    parser.add_argument("--cache-molgraphs", action="store_true")
+    parser.add_argument("--persistent-workers", action="store_true")
+    parser.add_argument("--pin-memory", action="store_true")
+    parser.add_argument("--non-blocking", action="store_true")
+    parser.add_argument("--defer-batch-metrics", action="store_true")
+    parser.add_argument("--prefetch-factor", type=int, default=2)
+    parser.add_argument("--profile", action="store_true")
+    parser.add_argument("--parent-checkpoint")
+    parser.add_argument("--previous-data-path")
+    parser.add_argument("--new-data-repeat", type=int, default=1)
     return parser
 
 
@@ -543,6 +912,16 @@ def main(argv: list[str] | None = None) -> int:
         args.validation_fraction,
         args.gradient_clip_val,
         args.precision,
+        cache_molgraphs=args.cache_molgraphs,
+        persistent_workers=args.persistent_workers,
+        pin_memory=args.pin_memory,
+        non_blocking=args.non_blocking,
+        defer_batch_metrics=args.defer_batch_metrics,
+        prefetch_factor=args.prefetch_factor,
+        profile=args.profile,
+        parent_checkpoint=args.parent_checkpoint,
+        previous_data_path=args.previous_data_path,
+        new_data_repeat=args.new_data_repeat,
     )
 
 

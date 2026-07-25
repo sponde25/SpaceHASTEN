@@ -32,6 +32,13 @@ def test_installer_writes_training_and_prediction_defaults(tmp_path: Path) -> No
     assert settings.general.train_svdkl_feature_transform == "tanh"
     assert settings.general.train_svdkl_tanh_temperature == 3.0
     assert settings.general.train_seed == 42
+    assert settings.general.train_warm_start is True
+    assert settings.general.train_warm_epochs == 10
+    assert settings.general.train_warm_new_data_repeat == 2
+    assert settings.general.train_warm_max_lr == 3e-4
+    assert settings.general.train_pin_memory is True
+    assert settings.general.train_non_blocking is True
+    assert settings.general.train_defer_batch_metrics is True
     assert settings.general.cpu_count_predict == "1"
     assert settings.general.cpu_count_control == "1"
     assert settings.general.atlas_partition_count == 64

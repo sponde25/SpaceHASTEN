@@ -55,6 +55,9 @@ def _build_train_command(
     model_dir: Path,
     settings: Settings,
     command_prefix: Sequence[str],
+    *,
+    parent_checkpoint: Path | None = None,
+    previous_data_path: Path | None = None,
 ) -> str:
     """Build the bash command for ``remote.train``.
 
@@ -62,12 +65,25 @@ def _build_train_command(
     ``scheduler_functions.write_train_scheduler``.
     """
     g = settings.general
+    warm_start = parent_checkpoint is not None
+    if warm_start != (previous_data_path is not None):
+        raise ValueError("parent checkpoint and previous training data must be paired")
+    epochs = g.train_warm_epochs if warm_start else g.train_epochs
+    warmup_epochs = g.train_warm_warmup_epochs if warm_start else g.train_warmup_epochs
+    init_lr = g.train_warm_init_lr if warm_start else g.train_init_lr
+    max_lr = g.train_warm_max_lr if warm_start else g.train_max_lr
+    final_lr = g.train_warm_final_lr if warm_start else g.train_final_lr
+    early_stopping_patience = (
+        g.train_warm_early_stopping_patience
+        if warm_start
+        else g.train_early_stopping_patience
+    )
     parts: list[str] = [*command_prefix, str(csv_path), str(model_dir)]
     parts += [
         "--batch-size",
         str(g.train_batch_size),
         "--epochs",
-        str(g.train_epochs),
+        str(epochs),
         "--num-workers",
         str(g.train_num_workers),
         "--devices",
@@ -87,15 +103,15 @@ def _build_train_command(
         "--batch-norm",
         str(g.train_batch_norm),
         "--warmup-epochs",
-        str(g.train_warmup_epochs),
+        str(warmup_epochs),
         "--init-lr",
-        str(g.train_init_lr),
+        str(init_lr),
         "--max-lr",
-        str(g.train_max_lr),
+        str(max_lr),
         "--final-lr",
-        str(g.train_final_lr),
+        str(final_lr),
         "--early-stopping-patience",
-        str(g.train_early_stopping_patience),
+        str(early_stopping_patience),
         "--early-stopping-min-delta",
         str(g.train_early_stopping_min_delta),
         "--validation-fraction",
@@ -121,6 +137,25 @@ def _build_train_command(
         "--seed",
         str(g.train_seed),
     ]
+    if warm_start:
+        assert parent_checkpoint is not None
+        assert previous_data_path is not None
+        parts += [
+            "--parent-checkpoint",
+            str(parent_checkpoint),
+            "--previous-data-path",
+            str(previous_data_path),
+            "--new-data-repeat",
+            str(g.train_warm_new_data_repeat),
+        ]
+    if g.train_pin_memory:
+        parts.append("--pin-memory")
+    if g.train_non_blocking:
+        parts.append("--non-blocking")
+    if g.train_defer_batch_metrics:
+        parts.append("--defer-batch-metrics")
+    if g.train_persistent_workers:
+        parts.append("--persistent-workers")
     cmd = " ".join(parts)
     return (
         f'echo "Starting chemprop training (csv={csv_path.name}, model_dir={model_dir.name})"\n'
@@ -191,7 +226,35 @@ def train(
         if train_command_prefix is not None
         else _default_train_command(settings)
     )
-    command = _build_train_command(csv_path, model_dir, settings, prefix)
+    parent_checkpoint: Path | None = None
+    previous_data_path: Path | None = None
+    if latest is not None and settings.general.train_warm_start:
+        previous_model_dir = workdir.model_dir(latest)
+        candidate_checkpoint = previous_model_dir / "model_0" / "pytorch_model.bin"
+        candidate_data = previous_model_dir / "train.csv"
+        if candidate_checkpoint.exists() and candidate_data.exists():
+            parent_checkpoint = candidate_checkpoint
+            previous_data_path = candidate_data
+            logger.info(
+                "Warm-starting model version %d from version %d with %dx new-data replay",
+                next_version,
+                latest,
+                settings.general.train_warm_new_data_repeat,
+            )
+        else:
+            logger.warning(
+                "Warm start requested for version %d but prior checkpoint/data are missing; "
+                "falling back to scratch training",
+                next_version,
+            )
+    command = _build_train_command(
+        csv_path,
+        model_dir,
+        settings,
+        prefix,
+        parent_checkpoint=parent_checkpoint,
+        previous_data_path=previous_data_path,
+    )
 
     job = ArrayJob(
         name=f"train_v{next_version}",

@@ -118,6 +118,55 @@ def test_deterministic_random_split() -> None:
 
 
 @requires_chemprop_svdkl
+def test_identify_new_row_indices_handles_reordered_data() -> None:
+    import pandas as pd
+
+    from spacehasten.remote.train import identify_new_row_indices
+
+    previous = pd.DataFrame(
+        {"smiles": ["CC", "CCC"], "docking_score": [-6.0, -7.0]}
+    )
+    current = pd.DataFrame(
+        {"smiles": ["CCC", "CO", "CC"], "docking_score": [-7.0, -8.0, -6.0]}
+    )
+
+    assert identify_new_row_indices(current, previous).tolist() == [1]
+
+    changed = current.copy()
+    changed.loc[0, "docking_score"] = -7.5
+    with pytest.raises(ValueError, match="docking scores changed"):
+        identify_new_row_indices(changed, previous)
+
+
+@requires_chemprop_svdkl
+def test_remote_train_parser_accepts_performance_controls() -> None:
+    from spacehasten.remote.train import build_parser
+
+    args = build_parser().parse_args(
+        [
+            "train.csv",
+            "model",
+            "--cache-molgraphs",
+            "--persistent-workers",
+            "--pin-memory",
+            "--non-blocking",
+            "--defer-batch-metrics",
+            "--prefetch-factor",
+            "4",
+            "--profile",
+        ]
+    )
+
+    assert args.cache_molgraphs is True
+    assert args.persistent_workers is True
+    assert args.pin_memory is True
+    assert args.non_blocking is True
+    assert args.defer_batch_metrics is True
+    assert args.prefetch_factor == 4
+    assert args.profile is True
+
+
+@requires_chemprop_svdkl
 def test_actual_chemprop_wrapper_uses_encoding() -> None:
     import torch
 
@@ -314,6 +363,8 @@ def test_actual_chemprop_svdkl_train_predict_roundtrip_output_schema() -> None:
 
 @requires_chemprop_svdkl
 def test_remote_train_predict_roundtrip_writes_uncertainty(tmp_path: Path) -> None:
+    import json
+
     import numpy as np
     import pandas as pd
 
@@ -358,6 +409,9 @@ def test_remote_train_predict_roundtrip_writes_uncertainty(tmp_path: Path) -> No
         validation_fraction=0.1,
         gradient_clip_val=5.0,
         precision="32-true",
+        cache_molgraphs=True,
+        defer_batch_metrics=True,
+        profile=True,
     )
     assert train_rc == 0
     checkpoint_path = model_dir / "model_0" / "pytorch_model.bin"
@@ -374,7 +428,59 @@ def test_remote_train_predict_roundtrip_writes_uncertainty(tmp_path: Path) -> No
     assert metadata["stop_reason"] == "early_stopping"
     assert metadata["best_epoch"] == 1
     assert metadata["epochs_completed"] == 2
+    assert metadata["cache_molgraphs"] is True
+    assert metadata["defer_batch_metrics"] is True
     assert (model_dir / "training_metadata.json").exists()
+    profile = json.loads((model_dir / "training_profile.json").read_text())
+    assert profile["settings"]["cache_molgraphs"] is True
+    assert len(profile["epochs"]) == 2
+
+    warm_csv = tmp_path / "warm_train.csv"
+    warm_model_dir = tmp_path / "warm_model"
+    _example_rows(30).to_csv(warm_csv, index=False)
+    warm_rc = train_model(
+        str(warm_csv),
+        str(warm_model_dir),
+        batch_size=6,
+        epochs=2,
+        num_workers=0,
+        devices="0",
+        mp_hidden_size=16,
+        mp_depth=2,
+        ffn_hidden_size=12,
+        ffn_layers=1,
+        dropout=0.0,
+        activation="relu",
+        batch_norm=False,
+        warmup_epochs=1,
+        init_lr=3e-5,
+        max_lr=3e-4,
+        final_lr=3e-5,
+        svdkl_gp_dim=2,
+        svdkl_grid_size=16,
+        svdkl_cholesky_jitter=1e-3,
+        svdkl_feature_transform="tanh",
+        svdkl_tanh_temperature=3.0,
+        seed=42,
+        early_stopping_patience=2,
+        validation_fraction=0.1,
+        gradient_clip_val=5.0,
+        precision="32-true",
+        defer_batch_metrics=True,
+        parent_checkpoint=str(checkpoint_path),
+        previous_data_path=str(train_csv),
+        new_data_repeat=2,
+    )
+    assert warm_rc == 0
+    _, warm_scaler, warm_metadata = load_chemprop_svdkl_checkpoint(
+        warm_model_dir / "model_0" / "pytorch_model.bin"
+    )
+    assert warm_metadata["warm_start"] is True
+    assert warm_metadata["new_data_repeat"] == 2
+    assert warm_metadata["new_rows"] == 6
+    assert warm_metadata["train_rows"] > warm_metadata["unique_train_rows"]
+    assert float(warm_scaler.mean_[0]) == pytest.approx(float(target_scaler.mean_[0]))
+    assert float(warm_scaler.scale_[0]) == pytest.approx(float(target_scaler.scale_[0]))
 
     pred_rc = predict(
         str(pred_csv),

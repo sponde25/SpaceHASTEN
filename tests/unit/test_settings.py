@@ -73,6 +73,18 @@ def test_settings_defaults_no_filesystem_access() -> None:
     assert s.general.train_svdkl_feature_transform == "tanh"
     assert s.general.train_svdkl_tanh_temperature == pytest.approx(3.0)
     assert s.general.train_seed == 42
+    assert s.general.train_warm_start is True
+    assert s.general.train_warm_epochs == 10
+    assert s.general.train_warm_new_data_repeat == 2
+    assert s.general.train_warm_warmup_epochs == 1
+    assert s.general.train_warm_init_lr == pytest.approx(3e-5)
+    assert s.general.train_warm_max_lr == pytest.approx(3e-4)
+    assert s.general.train_warm_final_lr == pytest.approx(3e-5)
+    assert s.general.train_warm_early_stopping_patience == 10
+    assert s.general.train_pin_memory is True
+    assert s.general.train_non_blocking is True
+    assert s.general.train_defer_batch_metrics is True
+    assert s.general.train_persistent_workers is False
     assert s.general.pred_accelerator == "cpu"
     assert s.general.pred_batch_size == 32
     assert s.general.pred_num_workers == 0

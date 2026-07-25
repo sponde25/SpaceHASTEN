@@ -242,32 +242,69 @@ class ChempropSVDKLModel(torch.nn.Module if torch else object):
         return self.head(self.encode_batch(batch))
 
 
-def move_batch_to_device(batch: Any, device: Any) -> Any:
+_BATCH_MOL_GRAPH_TENSOR_FIELDS = ("V", "E", "edge_index", "rev_edge_index", "batch")
+
+
+def enable_batch_mol_graph_pinning() -> None:
+    """Teach PyTorch's pin-memory walker how to pin Chemprop batch graphs."""
+
+    _require_torch_gpytorch()
+    from chemprop.data.collate import BatchMolGraph
+
+    if hasattr(BatchMolGraph, "pin_memory"):
+        return
+
+    def pin_memory(batch_graph: Any) -> Any:
+        for field in _BATCH_MOL_GRAPH_TENSOR_FIELDS:
+            value = getattr(batch_graph, field)
+            setattr(batch_graph, field, value.pin_memory())
+        return batch_graph
+
+    BatchMolGraph.pin_memory = pin_memory  # type: ignore[attr-defined]
+
+
+def move_batch_to_device(batch: Any, device: Any, *, non_blocking: bool = False) -> Any:
     """Move Chemprop batch fields to a torch device."""
 
     _require_torch_gpytorch()
     if hasattr(batch, "_replace") and hasattr(batch, "_fields"):
         return batch._replace(
             **{
-                field: _move_value_to_device(getattr(batch, field), device)
+                field: _move_value_to_device(
+                    getattr(batch, field),
+                    device,
+                    non_blocking=non_blocking,
+                )
                 for field in batch._fields
             }
         )
-    return _move_value_to_device(batch, device)
+    return _move_value_to_device(batch, device, non_blocking=non_blocking)
 
 
-def _move_value_to_device(value: Any, device: Any) -> Any:
+def _move_value_to_device(value: Any, device: Any, *, non_blocking: bool) -> Any:
     if value is None:
         return None
+    if torch.is_tensor(value):
+        return value.to(device, non_blocking=non_blocking)
+    if all(hasattr(value, field) for field in _BATCH_MOL_GRAPH_TENSOR_FIELDS):
+        for field in _BATCH_MOL_GRAPH_TENSOR_FIELDS:
+            tensor = getattr(value, field)
+            setattr(value, field, tensor.to(device, non_blocking=non_blocking))
+        return value
     if hasattr(value, "to"):
         moved = value.to(device)
         return value if moved is None else moved
     if isinstance(value, dict):
-        return {k: _move_value_to_device(v, device) for k, v in value.items()}
+        return {
+            k: _move_value_to_device(v, device, non_blocking=non_blocking)
+            for k, v in value.items()
+        }
     if isinstance(value, list):
-        return [_move_value_to_device(v, device) for v in value]
+        return [_move_value_to_device(v, device, non_blocking=non_blocking) for v in value]
     if isinstance(value, tuple):
-        return tuple(_move_value_to_device(v, device) for v in value)
+        return tuple(
+            _move_value_to_device(v, device, non_blocking=non_blocking) for v in value
+        )
     return value
 
 

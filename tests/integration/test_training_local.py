@@ -162,6 +162,55 @@ def test_training_stage_raises_on_empty_dataset(tmp_path: Path) -> None:
     db.close()
 
 
+def test_training_stage_warm_starts_subsequent_version(tmp_path: Path) -> None:
+    workdir = WorkDir.bootstrap(tmp_path / "ws", name="warmws")
+    db = Database(workdir.dbsh())
+    _seed_db_with_dock_scores(db)
+    stub = _make_stub_train(tmp_path)
+    settings = Settings()
+    scheduler = LocalScheduler()
+
+    assert train(
+        db,
+        workdir,
+        scheduler,
+        settings,
+        cutoff=10.0,
+        train_command_prefix=("bash", str(stub)),
+    ) == 0
+    db.insert_seed_docked("h8", "COC", "dimethyl-ether-1", -8.2)
+    db.commit()
+    assert train(
+        db,
+        workdir,
+        scheduler,
+        settings,
+        cutoff=10.0,
+        train_command_prefix=("bash", str(stub)),
+    ) == 1
+    db.close()
+
+    model_v0 = workdir.model_dir(0)
+    model_v1 = workdir.model_dir(1)
+    args = (model_v1 / "stub_args.txt").read_text().splitlines()[2:]
+    flag_pairs = dict(zip(args[::2], args[1::2], strict=False))
+    assert flag_pairs["--epochs"] == str(settings.general.train_warm_epochs)
+    assert flag_pairs["--warmup-epochs"] == str(
+        settings.general.train_warm_warmup_epochs
+    )
+    assert flag_pairs["--init-lr"] == str(settings.general.train_warm_init_lr)
+    assert flag_pairs["--max-lr"] == str(settings.general.train_warm_max_lr)
+    assert flag_pairs["--final-lr"] == str(settings.general.train_warm_final_lr)
+    assert flag_pairs["--parent-checkpoint"] == str(
+        model_v0 / "model_0" / "pytorch_model.bin"
+    )
+    assert flag_pairs["--previous-data-path"] == str(model_v0 / "train.csv")
+    assert flag_pairs["--new-data-repeat"] == "2"
+    assert "--pin-memory" in args
+    assert "--non-blocking" in args
+    assert "--defer-batch-metrics" in args
+
+
 def test_load_model_path_falls_back_to_blob(tmp_path: Path) -> None:
     """Legacy databases without an on-disk file must still resolve via BLOB."""
     import io
