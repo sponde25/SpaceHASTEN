@@ -11,6 +11,8 @@ license = { file = "LICENSE" }
 requires-python = ">=3.11"
 authors = [{ name = "SpaceHASTEN contributors" }]
 dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
     "pandas>=2.0",
     "rdkit>=2023.9",
     "pydantic>=2",
@@ -58,5 +60,5 @@ files = [
 python_version = "3.11"
 
 [[tool.mypy.overrides]]
-module = ["pandas", "pandas.*"]
+module = ["pandas", "pandas.*", "scipy", "scipy.*"]
 ignore_missing_imports = true
