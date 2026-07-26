@@ -11,8 +11,9 @@ from pathlib import Path
 import joblib
 import numpy as np
 from FPSim2 import FPSim2Engine
-from run_landmark_umap import EXPECTED_FP_PARAMS, EXPECTED_FP_TYPE, _unpack_fingerprints
 from tqdm import tqdm
+
+from spacehasten.analysis import umap as landmark_umap
 
 LOGGER = logging.getLogger("transform_landmark_umap_chunk")
 
@@ -34,7 +35,10 @@ def transform_chunk(args: argparse.Namespace) -> Path:
     reducer = bundle["reducer"]
     reducer.verbose = False
     engine = FPSim2Engine(str(index_path))
-    if engine.fp_type != EXPECTED_FP_TYPE or engine.fp_params != EXPECTED_FP_PARAMS:
+    if (
+        engine.fp_type != landmark_umap.EXPECTED_FP_TYPE
+        or engine.fp_params != landmark_umap.EXPECTED_FP_PARAMS
+    ):
         raise ValueError("fingerprint index does not use Morgan-2 1024-bit fingerprints")
 
     fps = engine.fps
@@ -52,7 +56,7 @@ def transform_chunk(args: argparse.Namespace) -> Path:
     ) as progress:
         for offset in range(start, stop, args.batch_size):
             batch_stop = min(offset + args.batch_size, stop)
-            batch = _unpack_fingerprints(fps[offset:batch_stop, 1:-1])
+            batch = landmark_umap.unpack_fingerprints(fps[offset:batch_stop, 1:-1])
             coordinates[offset - start : batch_stop - start] = reducer.transform(batch).astype(
                 np.float32, copy=False
             )

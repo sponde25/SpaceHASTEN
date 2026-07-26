@@ -16,12 +16,8 @@ import numpy as np
 import umap
 from FPSim2 import FPSim2Engine
 from pynndescent import NNDescent
-from run_landmark_umap import (
-    EXPECTED_FP_PARAMS,
-    EXPECTED_FP_TYPE,
-    _load_centroid_ids,
-    _unpack_fingerprints,
-)
+
+from spacehasten.analysis import umap as landmark_umap
 
 LOGGER = logging.getLogger("fit_landmark_umap")
 
@@ -44,9 +40,12 @@ def fit_model(args: argparse.Namespace) -> None:
         path.unlink()
 
     started = time.monotonic()
-    centroid_ids = np.asarray(_load_centroid_ids(clustering_path), dtype=np.uint64)
+    centroid_ids = np.asarray(landmark_umap.load_centroid_ids(clustering_path), dtype=np.uint64)
     engine = FPSim2Engine(str(index_path))
-    if engine.fp_type != EXPECTED_FP_TYPE or engine.fp_params != EXPECTED_FP_PARAMS:
+    if (
+        engine.fp_type != landmark_umap.EXPECTED_FP_TYPE
+        or engine.fp_params != landmark_umap.EXPECTED_FP_PARAMS
+    ):
         raise ValueError("fingerprint index does not use Morgan-2 1024-bit fingerprints")
 
     fps = engine.fps
@@ -59,7 +58,7 @@ def fit_model(args: argparse.Namespace) -> None:
     ):
         raise ValueError("one or more centroids are absent from the fingerprint index")
     centroid_rows = sorted_rows[positions]
-    centroid_fingerprints = _unpack_fingerprints(fps[centroid_rows, 1:-1])
+    centroid_fingerprints = landmark_umap.unpack_fingerprints(fps[centroid_rows, 1:-1])
 
     n_neighbors = min(args.n_neighbors, len(centroid_ids) - 1)
     if n_neighbors < 2:
@@ -119,7 +118,10 @@ def fit_model(args: argparse.Namespace) -> None:
             "landmark_centroids": int(len(centroid_ids)),
             "disconnected_landmarks": disconnected,
         },
-        "fingerprint": {"type": EXPECTED_FP_TYPE, **EXPECTED_FP_PARAMS},
+        "fingerprint": {
+            "type": landmark_umap.EXPECTED_FP_TYPE,
+            **landmark_umap.EXPECTED_FP_PARAMS,
+        },
         "umap": {
             "metric": "jaccard",
             "n_neighbors": n_neighbors,
