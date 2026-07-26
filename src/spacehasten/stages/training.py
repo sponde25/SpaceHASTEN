@@ -12,14 +12,18 @@ the JSON manifest. The legacy ``models`` SQL table is still updated
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+import math
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 
 from spacehasten.config.settings import Settings
-from spacehasten.core.db import Database
+from spacehasten.core.db import Database, ModelCalibrationRow
 from spacehasten.scheduler.base import ArrayJob, Scheduler
 from spacehasten.workspace.layout import WorkDir
 from spacehasten.workspace.manifest import Manifest
@@ -74,9 +78,7 @@ def _build_train_command(
     max_lr = g.train_warm_max_lr if warm_start else g.train_max_lr
     final_lr = g.train_warm_final_lr if warm_start else g.train_final_lr
     early_stopping_patience = (
-        g.train_warm_early_stopping_patience
-        if warm_start
-        else g.train_early_stopping_patience
+        g.train_warm_early_stopping_patience if warm_start else g.train_early_stopping_patience
     )
     parts: list[str] = [*command_prefix, str(csv_path), str(model_dir)]
     parts += [
@@ -156,6 +158,8 @@ def _build_train_command(
         parts.append("--defer-batch-metrics")
     if g.train_persistent_workers:
         parts.append("--persistent-workers")
+    if g.train_fit_gaussian_calibrator:
+        parts.append("--fit-gaussian-calibrator")
     cmd = " ".join(parts)
     return (
         f'echo "Starting chemprop training (csv={csv_path.name}, model_dir={model_dir.name})"\n'
@@ -288,6 +292,27 @@ def train(
             f"--- tail of task logs ---\n{tail_logs(handle)}"
         )
 
+    if settings.general.train_fit_gaussian_calibrator:
+        calibration = _load_calibration_artifact(model_dir / "calibration.json")
+        artifact_path = model_dir / "calibration.json"
+        db.register_model_calibration(
+            ModelCalibrationRow(
+                model_version=next_version,
+                calibration_kind=calibration["calibration_kind"],
+                uncertainty_source=calibration["uncertainty_source"],
+                mean_shift=calibration["parameters"]["mean_shift"],
+                std_scale=calibration["parameters"]["std_scale"],
+                std_floor=calibration["parameters"]["std_floor"],
+                fit_source=calibration["fit_source"],
+                fit_split_name=calibration["fit_split_name"],
+                fit_row_count=calibration["fit_row_count"],
+                split_sha256=calibration["validation_indices_sha256"],
+                artifact_path=str(artifact_path),
+                artifact_sha256=hashlib.sha256(artifact_path.read_bytes()).hexdigest(),
+                metadata_json=json.dumps(calibration, sort_keys=True, separators=(",", ":")),
+            )
+        )
+
     # Compatibility shim: leave a row in the legacy ``models`` table with
     # an empty BLOB so older readers see the version. The on-disk file is
     # the source of truth.
@@ -304,6 +329,53 @@ def train(
     manifest.save(manifest_path)
     logger.info("Recorded model version %d at %s", next_version, model_dir)
     return next_version
+
+
+def _load_calibration_artifact(path: Path) -> dict[str, Any]:
+    """Load and validate the production calibration artifact before registration."""
+
+    if not path.is_file():
+        raise RuntimeError(f"training job reported success but {path} is missing")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("root must be an object")
+        parameters = payload["parameters"]
+        objective = payload["objective"]
+        if not isinstance(parameters, dict) or not isinstance(objective, dict):
+            raise ValueError("parameters and objective must be objects")
+        expected = {
+            "schema_version": 1,
+            "calibration_kind": "gaussian_affine_std_floor",
+            "uncertainty_source": "epistemic",
+            "fit_source": "deterministic_validation_split",
+            "fit_split_name": "validation",
+            "validation_early_stopping_overlap": True,
+        }
+        for key, value in expected.items():
+            if payload.get(key) != value:
+                raise ValueError(f"{key} must equal {value!r}")
+        if not isinstance(payload["fit_row_count"], int) or payload["fit_row_count"] <= 0:
+            raise ValueError("fit_row_count must be a positive integer")
+        split_hash = payload["validation_indices_sha256"]
+        if not isinstance(split_hash, str) or len(split_hash) != 64:
+            raise ValueError("validation_indices_sha256 must be a SHA256 hex digest")
+        int(split_hash, 16)
+        if objective.get("name") != "mean_gaussian_nll_without_constant":
+            raise ValueError("unexpected calibration objective")
+        values = [
+            parameters["mean_shift"],
+            parameters["std_scale"],
+            parameters["std_floor"],
+            objective["value"],
+        ]
+        if not all(isinstance(value, (int, float)) and math.isfinite(value) for value in values):
+            raise ValueError("calibration numeric values must be finite")
+        if parameters["std_scale"] <= 0 or parameters["std_floor"] < 0:
+            raise ValueError("calibration scale/floor are invalid")
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"invalid calibration artifact {path}: {error}") from error
+    return payload
 
 
 __all__ = ["train"]

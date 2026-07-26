@@ -11,6 +11,7 @@ import os
 import random
 import resource
 import sys
+import tempfile
 import time
 from dataclasses import asdict
 from importlib.metadata import PackageNotFoundError, version
@@ -45,9 +46,11 @@ try:  # script path execution on compute nodes does not import the package root
         fit_target_scaler,
         load_chemprop_svdkl_checkpoint,
         move_batch_to_device,
+        predictive_mean_stds,
         save_chemprop_svdkl_checkpoint,
         scale_targets,
     )
+
 except ImportError:  # pragma: no cover - exercised by file-path remote execution
     from svdkl import (  # type: ignore[no-redef]
         ChempropConfig,
@@ -59,9 +62,18 @@ except ImportError:  # pragma: no cover - exercised by file-path remote executio
         fit_target_scaler,
         load_chemprop_svdkl_checkpoint,
         move_batch_to_device,
+        predictive_mean_stds,
         save_chemprop_svdkl_checkpoint,
         scale_targets,
     )
+
+try:
+    from spacehasten.core.calibration import fit_gaussian_calibration
+except ImportError:  # pragma: no cover - exercised by file-path remote execution
+    package_root = str(Path(__file__).resolve().parents[2])
+    if package_root not in sys.path:
+        sys.path.insert(0, package_root)
+    from spacehasten.core.calibration import fit_gaussian_calibration
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -217,6 +229,7 @@ def train_model(
     parent_checkpoint: str | None = None,
     previous_data_path: str | None = None,
     new_data_repeat: int = 1,
+    fit_gaussian_calibrator: bool = False,
 ) -> int:
     profile_started = time.monotonic()
     timing_profile: dict[str, Any] = {
@@ -319,9 +332,7 @@ def train_model(
             )
             return 1
         try:
-            model, target_scaler, parent_metadata = load_chemprop_svdkl_checkpoint(
-                parent_path
-            )
+            model, target_scaler, parent_metadata = load_chemprop_svdkl_checkpoint(parent_path)
         except (KeyError, TypeError, ValueError) as error:
             logger.error("Could not load warm-start checkpoint %s: %s", parent_path, error)
             return 1
@@ -403,9 +414,7 @@ def train_model(
     if pin_memory:
         enable_batch_mol_graph_pinning()
 
-    effective_batch_norm = (
-        chemprop_config.batch_norm if chemprop_config is not None else batch_norm
-    )
+    effective_batch_norm = chemprop_config.batch_norm if chemprop_config is not None else batch_norm
     drop_last_train = effective_batch_norm and len(train_ds) % batch_size == 1
     loader_options: dict[str, Any] = {
         "num_workers": num_workers,
@@ -506,12 +515,8 @@ def train_model(
         model.likelihood.train()
         train_loss_host_sum = 0.0
         gradient_norm_host_sum = 0.0
-        train_loss_device_sum = (
-            torch.zeros((), device=device) if defer_batch_metrics else None
-        )
-        gradient_norm_device_sum = (
-            torch.zeros((), device=device) if defer_batch_metrics else None
-        )
+        train_loss_device_sum = torch.zeros((), device=device) if defer_batch_metrics else None
+        gradient_norm_device_sum = torch.zeros((), device=device) if defer_batch_metrics else None
         train_batch_count = 0
         train_row_count = 0
         train_data_wait_s = 0.0
@@ -725,8 +730,67 @@ def train_model(
 
     checkpoint_dir = save_dir_path / "model_0"
     bin_path = checkpoint_dir / "pytorch_model.bin"
-    model.cpu()
     split_hash = hashlib.sha256(val_indices.astype(np.int64).tobytes()).hexdigest()
+    calibration_metadata: dict[str, Any] | None = None
+    if fit_gaussian_calibrator:
+        logger.info("Fitting Gaussian calibrator on %d deterministic validation rows", len(val_ds))
+        model.eval()
+        model.likelihood.eval()
+        validation_embeddings: list[torch.Tensor] = []
+        with torch.no_grad():
+            for batch in val_loader:
+                batch = move_batch_to_device(batch, device, non_blocking=non_blocking)
+                validation_embeddings.append(model.encode_batch(batch).detach().cpu())
+        if not validation_embeddings:
+            logger.error("No validation embeddings available for Gaussian calibration")
+            return 1
+        embeddings = torch.cat(validation_embeddings, dim=0).to(device)
+        mean, epistemic_std, _, _ = predictive_mean_stds(
+            model.head, embeddings, target_scaler=target_scaler
+        )
+        raw_mean = mean.detach().cpu().numpy().reshape(-1)
+        raw_std = epistemic_std.detach().cpu().numpy().reshape(-1)
+        raw_targets = raw_val_targets.reshape(-1)
+        if len(raw_mean) != len(raw_targets):
+            logger.error(
+                "Calibration prediction row count (%d) differs from validation rows (%d)",
+                len(raw_mean),
+                len(raw_targets),
+            )
+            return 1
+        try:
+            calibration = fit_gaussian_calibration(raw_mean, raw_std, raw_targets)
+        except (RuntimeError, ValueError) as error:
+            logger.error("Gaussian calibration fit failed: %s", error)
+            return 1
+        calibration_payload = {
+            "schema_version": 1,
+            "calibration_kind": "gaussian_affine_std_floor",
+            "uncertainty_source": "epistemic",
+            "parameters": {
+                "mean_shift": calibration.mean_shift,
+                "std_scale": calibration.std_scale,
+                "std_floor": calibration.std_floor,
+            },
+            "fit_source": "deterministic_validation_split",
+            "fit_split_name": "validation",
+            "fit_row_count": len(raw_targets),
+            "validation_indices_sha256": split_hash,
+            "validation_early_stopping_overlap": True,
+            "objective": {
+                "name": "mean_gaussian_nll_without_constant",
+                "value": calibration.objective,
+            },
+        }
+        calibration_path = save_dir_path / "calibration.json"
+        _atomic_write_json(calibration_path, calibration_payload)
+        calibration_metadata = {
+            "payload": calibration_payload,
+            "artifact": "calibration.json",
+            "artifact_sha256": hashlib.sha256(calibration_path.read_bytes()).hexdigest(),
+        }
+        logger.info("Gaussian calibration fit complete: objective=%.6g", calibration.objective)
+    model.cpu()
     metadata = {
         "train_rows": int(len(train_smiles)),
         "unique_train_rows": int(len(train_indices)),
@@ -769,6 +833,8 @@ def train_model(
             "torch": torch.__version__,
         },
     }
+    if calibration_metadata is not None:
+        metadata["gaussian_calibration"] = calibration_metadata
     save_chemprop_svdkl_checkpoint(
         bin_path,
         model=model,
@@ -797,6 +863,17 @@ def _select_device(n_devices: int) -> torch.device:
     if n_devices > 0 and torch.cuda.is_available():
         return torch.device("cuda:0")
     return torch.device("cpu")
+
+
+def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete=False
+    ) as temporary:
+        json.dump(payload, temporary, indent=2)
+        temporary.write("\n")
+        temporary_path = Path(temporary.name)
+    temporary_path.replace(path)
 
 
 def _batch_targets(batch, device: torch.device) -> torch.Tensor:
@@ -870,6 +947,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--parent-checkpoint")
     parser.add_argument("--previous-data-path")
     parser.add_argument("--new-data-repeat", type=int, default=1)
+    parser.add_argument("--fit-gaussian-calibrator", action="store_true")
     return parser
 
 
@@ -922,6 +1000,7 @@ def main(argv: list[str] | None = None) -> int:
         parent_checkpoint=args.parent_checkpoint,
         previous_data_path=args.previous_data_path,
         new_data_repeat=args.new_data_repeat,
+        fit_gaussian_calibrator=args.fit_gaussian_calibrator,
     )
 
 

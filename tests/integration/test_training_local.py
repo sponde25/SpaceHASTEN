@@ -8,6 +8,8 @@ smoke test.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import stat
 from pathlib import Path
 
@@ -21,7 +23,7 @@ from spacehasten.workspace.layout import WorkDir
 from spacehasten.workspace.manifest import Manifest
 
 
-def _make_stub_train(tmp_path: Path) -> Path:
+def _make_stub_train(tmp_path: Path, *, calibration: bool = False, valid: bool = True) -> Path:
     """Write a bash stub that mimics ``remote.train``: makes
     ``<save_dir>/model_0/pytorch_model.bin`` and exits 0.
 
@@ -29,6 +31,28 @@ def _make_stub_train(tmp_path: Path) -> Path:
     hyper-parameter pass-through if needed.
     """
     stub = tmp_path / "stub_train.sh"
+    calibration_command = ""
+    if calibration:
+        calibration_payload = {
+            "schema_version": 1,
+            "calibration_kind": "gaussian_affine_std_floor",
+            "uncertainty_source": "epistemic",
+            "parameters": {"mean_shift": 0.1, "std_scale": 1.2, "std_floor": 0.3},
+            "fit_source": "deterministic_validation_split",
+            "fit_split_name": "validation",
+            "fit_row_count": 5,
+            "validation_indices_sha256": "0" * 64,
+            "validation_early_stopping_overlap": True,
+            "objective": {
+                "name": "mean_gaussian_nll_without_constant",
+                "value": 0.5,
+            },
+        }
+        if not valid:
+            calibration_payload["schema_version"] = 0
+        calibration_command = (
+            f"printf '%s\\n' '{json.dumps(calibration_payload)}' > \"$save_dir/calibration.json\"\n"
+        )
     stub.write_text(
         "#!/usr/bin/env bash\n"
         "set -eu\n"
@@ -40,7 +64,7 @@ def _make_stub_train(tmp_path: Path) -> Path:
         # Record args for assertions.
         'echo "$data_path" > "$save_dir/stub_args.txt"\n'
         'echo "$save_dir" >> "$save_dir/stub_args.txt"\n'
-        'for a in "$@"; do echo "$a" >> "$save_dir/stub_args.txt"; done\n'
+        'for a in "$@"; do echo "$a" >> "$save_dir/stub_args.txt"; done\n' + calibration_command
     )
     stub.chmod(stub.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     return stub
@@ -162,6 +186,59 @@ def test_training_stage_raises_on_empty_dataset(tmp_path: Path) -> None:
     db.close()
 
 
+def test_training_stage_registers_enabled_calibration(tmp_path: Path) -> None:
+    workdir = WorkDir.bootstrap(tmp_path / "ws", name="calibrated")
+    db = Database(workdir.dbsh())
+    _seed_db_with_dock_scores(db)
+    settings = Settings()
+    settings.general.train_fit_gaussian_calibrator = True
+
+    assert (
+        train(
+            db,
+            workdir,
+            LocalScheduler(),
+            settings,
+            train_command_prefix=("bash", str(_make_stub_train(tmp_path, calibration=True))),
+        )
+        == 0
+    )
+    artifact = workdir.model_dir(0) / "calibration.json"
+    registered = db.load_model_calibration(0)
+    assert registered is not None
+    assert registered.artifact_path == str(artifact)
+    assert registered.artifact_sha256 is not None
+    assert registered.artifact_sha256 == hashlib.sha256(artifact.read_bytes()).hexdigest()
+    assert registered.fit_row_count == 5
+    args = (workdir.model_dir(0) / "stub_args.txt").read_text().splitlines()
+    assert "--fit-gaussian-calibrator" in args
+    db.close()
+
+
+@pytest.mark.parametrize("calibration,valid", [(False, True), (True, False)])
+def test_training_stage_rejects_missing_or_invalid_enabled_calibration(
+    tmp_path: Path, calibration: bool, valid: bool
+) -> None:
+    workdir = WorkDir.bootstrap(tmp_path / "ws", name="badcalibration")
+    db = Database(workdir.dbsh())
+    _seed_db_with_dock_scores(db)
+    settings = Settings()
+    settings.general.train_fit_gaussian_calibrator = True
+
+    with pytest.raises(RuntimeError, match="calibration"):
+        train(
+            db,
+            workdir,
+            LocalScheduler(),
+            settings,
+            train_command_prefix=(
+                "bash",
+                str(_make_stub_train(tmp_path, calibration=calibration, valid=valid)),
+            ),
+        )
+    db.close()
+
+
 def test_training_stage_warm_starts_subsequent_version(tmp_path: Path) -> None:
     workdir = WorkDir.bootstrap(tmp_path / "ws", name="warmws")
     db = Database(workdir.dbsh())
@@ -170,24 +247,30 @@ def test_training_stage_warm_starts_subsequent_version(tmp_path: Path) -> None:
     settings = Settings()
     scheduler = LocalScheduler()
 
-    assert train(
-        db,
-        workdir,
-        scheduler,
-        settings,
-        cutoff=10.0,
-        train_command_prefix=("bash", str(stub)),
-    ) == 0
+    assert (
+        train(
+            db,
+            workdir,
+            scheduler,
+            settings,
+            cutoff=10.0,
+            train_command_prefix=("bash", str(stub)),
+        )
+        == 0
+    )
     db.insert_seed_docked("h8", "COC", "dimethyl-ether-1", -8.2)
     db.commit()
-    assert train(
-        db,
-        workdir,
-        scheduler,
-        settings,
-        cutoff=10.0,
-        train_command_prefix=("bash", str(stub)),
-    ) == 1
+    assert (
+        train(
+            db,
+            workdir,
+            scheduler,
+            settings,
+            cutoff=10.0,
+            train_command_prefix=("bash", str(stub)),
+        )
+        == 1
+    )
     db.close()
 
     model_v0 = workdir.model_dir(0)
@@ -195,15 +278,11 @@ def test_training_stage_warm_starts_subsequent_version(tmp_path: Path) -> None:
     args = (model_v1 / "stub_args.txt").read_text().splitlines()[2:]
     flag_pairs = dict(zip(args[::2], args[1::2], strict=False))
     assert flag_pairs["--epochs"] == str(settings.general.train_warm_epochs)
-    assert flag_pairs["--warmup-epochs"] == str(
-        settings.general.train_warm_warmup_epochs
-    )
+    assert flag_pairs["--warmup-epochs"] == str(settings.general.train_warm_warmup_epochs)
     assert flag_pairs["--init-lr"] == str(settings.general.train_warm_init_lr)
     assert flag_pairs["--max-lr"] == str(settings.general.train_warm_max_lr)
     assert flag_pairs["--final-lr"] == str(settings.general.train_warm_final_lr)
-    assert flag_pairs["--parent-checkpoint"] == str(
-        model_v0 / "model_0" / "pytorch_model.bin"
-    )
+    assert flag_pairs["--parent-checkpoint"] == str(model_v0 / "model_0" / "pytorch_model.bin")
     assert flag_pairs["--previous-data-path"] == str(model_v0 / "train.csv")
     assert flag_pairs["--new-data-repeat"] == "2"
     assert "--pin-memory" in args

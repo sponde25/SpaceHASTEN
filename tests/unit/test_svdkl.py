@@ -123,12 +123,8 @@ def test_identify_new_row_indices_handles_reordered_data() -> None:
 
     from spacehasten.remote.train import identify_new_row_indices
 
-    previous = pd.DataFrame(
-        {"smiles": ["CC", "CCC"], "docking_score": [-6.0, -7.0]}
-    )
-    current = pd.DataFrame(
-        {"smiles": ["CCC", "CO", "CC"], "docking_score": [-7.0, -8.0, -6.0]}
-    )
+    previous = pd.DataFrame({"smiles": ["CC", "CCC"], "docking_score": [-6.0, -7.0]})
+    current = pd.DataFrame({"smiles": ["CCC", "CO", "CC"], "docking_score": [-7.0, -8.0, -6.0]})
 
     assert identify_new_row_indices(current, previous).tolist() == [1]
 
@@ -154,6 +150,7 @@ def test_remote_train_parser_accepts_performance_controls() -> None:
             "--prefetch-factor",
             "4",
             "--profile",
+            "--fit-gaussian-calibrator",
         ]
     )
 
@@ -164,6 +161,7 @@ def test_remote_train_parser_accepts_performance_controls() -> None:
     assert args.defer_batch_metrics is True
     assert args.prefetch_factor == 4
     assert args.profile is True
+    assert args.fit_gaussian_calibrator is True
 
 
 @requires_chemprop_svdkl

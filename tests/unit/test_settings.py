@@ -85,6 +85,7 @@ def test_settings_defaults_no_filesystem_access() -> None:
     assert s.general.train_non_blocking is True
     assert s.general.train_defer_batch_metrics is True
     assert s.general.train_persistent_workers is False
+    assert s.general.train_fit_gaussian_calibrator is False
     assert s.general.pred_accelerator == "cpu"
     assert s.general.pred_batch_size == 32
     assert s.general.pred_num_workers == 0
@@ -116,13 +117,20 @@ def test_settings_load_ini_fixture() -> None:
 
 def test_settings_toml_overrides_ini(tmp_path: Path) -> None:
     toml = tmp_path / "override.toml"
-    payload = {"general": {"train_batch_size": 999, "scheduler": "SGE"}}
+    payload = {
+        "general": {
+            "train_batch_size": 999,
+            "scheduler": "SGE",
+            "train_fit_gaussian_calibrator": True,
+        }
+    }
     with toml.open("wb") as fh:
         tomli_w.dump(payload, fh)
 
     s = Settings.load(ini_path=FIXTURE_INI, toml_path=toml)
     assert s.general.train_batch_size == 999
     assert s.general.scheduler == "SGE"
+    assert s.general.train_fit_gaussian_calibrator is True
     # un-overridden ini values remain
     assert s.general.train_epochs == 25
 

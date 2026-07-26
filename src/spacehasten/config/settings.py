@@ -93,6 +93,7 @@ class GeneralSettings(_Section):
     train_non_blocking: bool = True
     train_defer_batch_metrics: bool = True
     train_persistent_workers: bool = False
+    train_fit_gaussian_calibrator: bool = False
     pred_batch_size: int = 32
     pred_num_workers: int = 0
     pred_accelerator: str = "cpu"
