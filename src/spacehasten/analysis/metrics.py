@@ -21,6 +21,7 @@ ID_COLUMNS = ("spacehastenid", "id", "compound_id")
 ATLAS_COLUMNS = ("cluster_atlas_id", "atlas_id", "atlasid")
 INVARIANT_ACQUISITION_FIELDS = (
     "method",
+    "batch_id",
     "model_version",
     "candidate_count",
     "batch_size",
@@ -36,6 +37,21 @@ INVARIANT_ACQUISITION_FIELDS = (
     "frontier_q10",
     "frontier_q90",
     "frontier_scale",
+    "policy_sha256",
+    "policy_schema_version",
+    "history_attempt_policy",
+    "candidate_watermark",
+    "candidate_digest",
+    "selected_count",
+    "selection_digest",
+    "cap_scope",
+    "cap_limit",
+    "calibration_kind",
+    "calibration_uncertainty_source",
+    "calibration_mean_shift",
+    "calibration_std_scale",
+    "calibration_std_floor",
+    "calibration_artifact_sha256",
 )
 SERIES_ACQUISITION_FIELDS = (
     "pred_score",
@@ -44,6 +60,18 @@ SERIES_ACQUISITION_FIELDS = (
     "cluster_count_before",
     "cluster_penalty",
     "penalized_score",
+    "raw_mean",
+    "raw_epistemic_std",
+    "calibrated_mean",
+    "calibrated_std",
+    "p_hit",
+    "expected_improvement",
+    "quality",
+    "support_before",
+    "support_after",
+    "marginal_reward",
+    "crowding_penalty",
+    "final_utility",
 )
 
 

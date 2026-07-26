@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import heapq
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -61,6 +62,23 @@ class CandidatePool:
             raise ValueError("candidate predictions must be finite")
         if np.any(self.raw_epistemic_stds < 0):
             raise ValueError("candidate epistemic standard deviations must be non-negative")
+
+
+def candidate_pool_digest(pool: CandidatePool) -> str:
+    """Return a layout-independent digest of the complete candidate inputs."""
+    digest = hashlib.sha256()
+    for label, values, dtype in (
+        (b"ids", pool.ids, "<i8"),
+        (b"raw_means", pool.raw_means, "<f8"),
+        (b"raw_epistemic_stds", pool.raw_epistemic_stds, "<f8"),
+        (b"cluster_ids", pool.cluster_ids, "<i8"),
+        (b"model_versions", pool.model_versions, "<i8"),
+    ):
+        normalized = np.ascontiguousarray(np.asarray(values, dtype=np.dtype(dtype)))
+        digest.update(label)
+        digest.update(len(normalized).to_bytes(8, "little", signed=False))
+        digest.update(normalized.tobytes())
+    return digest.hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -346,6 +364,7 @@ def _calibrate(
 
 __all__ = [
     "CandidatePool",
+    "candidate_pool_digest",
     "PortfolioSelection",
     "PortfolioSelectionResult",
     "cumulative_reward",

@@ -10,6 +10,8 @@ from spacehasten.cli.main import (
     _build_parser,
     _cluster_alpha_schedule,
     _cluster_cap_schedule,
+    _portfolio_policy_schedule,
+    _validate_dock_acquisition_args,
     main,
 )
 
@@ -216,6 +218,54 @@ def test_cluster_cap_schedule_broadcasts_and_validates_length() -> None:
         _cluster_cap_schedule([200, 100, 50], 2)
     with pytest.raises(SystemExit, match="must be at least 1"):
         _cluster_cap_schedule(None, 0)
+
+
+def test_portfolio_policy_schedule_and_conflicts(tmp_path: Path) -> None:
+    policy = tmp_path / "policy.toml"
+    policy.write_text(
+        """schema_version = 1
+[quality]
+kind = "gaussian_hit_ei"
+hit_threshold = -9.7
+[reward]
+kind = "piecewise_linear"
+breakpoints = [1, 5, 20]
+slopes = [0.25, 1, 2]
+[constraint]
+kind = "per_cluster_cap"
+limit = 100
+"""
+    )
+    scheduled = _portfolio_policy_schedule([policy], 2)
+    assert scheduled[0] == scheduled[1]
+    with pytest.raises(SystemExit, match="one value or one per round"):
+        _portfolio_policy_schedule([policy, policy, policy], 2)
+
+    parser = _build_parser()
+    args = parser.parse_args(
+        [
+            "dock",
+            "--top-n",
+            "10",
+            "--cpus",
+            "1",
+            "--strategy",
+            "portfolio",
+            "--portfolio-policy",
+            str(policy),
+        ]
+    )
+    _validate_dock_acquisition_args("portfolio", args)
+    args.cluster_cap = [0]
+    with pytest.raises(SystemExit, match="policy owns"):
+        _validate_dock_acquisition_args("portfolio", args)
+
+
+def test_portfolio_policy_parse_failure_is_user_facing(tmp_path: Path) -> None:
+    invalid = tmp_path / "invalid.toml"
+    invalid.write_text("schema_version = 1\n")
+    with pytest.raises(SystemExit, match="invalid --portfolio-policy"):
+        _portfolio_policy_schedule([invalid], 1)
 
 
 def test_dock_rejects_cluster_alpha_with_fixed_lambda(tmp_path) -> None:  # type: ignore[no-untyped-def]

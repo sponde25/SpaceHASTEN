@@ -16,6 +16,7 @@ import sys
 from pathlib import Path
 from typing import Literal
 
+from spacehasten.config.acquisition import PortfolioAcquisitionPolicy, load_acquisition_policy
 from spacehasten.config.properties import PropertyRanges
 from spacehasten.core.db import Database
 from spacehasten.stages import (
@@ -307,6 +308,10 @@ def _add_search(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> Non
 
 def _add_uncertainty_dock_options(p: argparse.ArgumentParser) -> None:
     p.add_argument(
+        "--portfolio-policy", type=Path, nargs="+", default=None,
+        help="Portfolio policy TOML (one file broadcasts across rounds).",
+    )
+    p.add_argument(
         "--lcb-beta",
         type=float,
         default=1.0,
@@ -364,6 +369,23 @@ def _add_uncertainty_dock_options(p: argparse.ArgumentParser) -> None:
 
 
 def _validate_dock_acquisition_args(strategy: str, args: argparse.Namespace) -> None:
+    policies = args.portfolio_policy or []
+    if strategy == "portfolio":
+        if not policies:
+            raise SystemExit("error: portfolio acquisition requires --portfolio-policy")
+        if (
+            args.cluster_lambda != 0
+            or args.cluster_alpha
+            or bool(args.cluster_cap)
+        ):
+            raise SystemExit(
+                "error: portfolio policy owns cluster-lambda, cluster-alpha, and cluster-cap"
+            )
+        if args.ei_hit_threshold is not None or args.ei_xi != 0:
+            raise SystemExit("error: portfolio policy owns EI threshold and xi")
+        return
+    if policies:
+        raise SystemExit("error: --portfolio-policy requires portfolio acquisition")
     if not math.isfinite(args.lcb_beta) or args.lcb_beta < 0:
         raise SystemExit("error: --lcb-beta must be finite and non-negative")
     if not math.isfinite(args.ei_xi) or args.ei_xi < 0:
@@ -435,6 +457,27 @@ def _cluster_cap_schedule(
     return schedule
 
 
+def _portfolio_policy_schedule(
+    paths: list[Path] | None, rounds: int
+) -> list[PortfolioAcquisitionPolicy | None]:
+    if paths is None:
+        return [None] * rounds
+    try:
+        if len(paths) == 1:
+            return [load_acquisition_policy(paths[0])] * rounds
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"error: invalid --portfolio-policy: {exc}") from exc
+    if len(paths) != rounds:
+        raise SystemExit(
+            "error: --portfolio-policy requires one value or one per round "
+            f"({rounds} expected, got {len(paths)})"
+        )
+    try:
+        return [load_acquisition_policy(path) for path in paths]
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"error: invalid --portfolio-policy: {exc}") from exc
+
+
 def _add_dock(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     p = sub.add_parser("dock", help="Dock the next batch of compounds.")
     p.add_argument("--top-n", type=int, required=True, help="Number of compounds to dock.")
@@ -446,7 +489,7 @@ def _add_dock(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     )
     p.add_argument(
         "--strategy",
-        choices=("greedy", "clustering", "lcb", "ei"),
+        choices=("greedy", "clustering", "lcb", "ei", "portfolio"),
         default="greedy",
         help=(
             "Optional. Docking acquisition method. Default: greedy. "
@@ -572,7 +615,7 @@ def _add_screening_cycle(sub: argparse._SubParsersAction[argparse.ArgumentParser
     )
     p.add_argument(
         "--dock-acquisition",
-        choices=("greedy", "clustering", "lcb", "ei"),
+        choices=("greedy", "clustering", "lcb", "ei", "portfolio"),
         default=None,
         help=(
             "Optional. Override acquisition only for docking; similarity-search "
@@ -916,6 +959,7 @@ def _cmd_dock(args: argparse.Namespace) -> int:
     settings = settings_from_args(args)
     scheduler = scheduler_from_args(args, settings)
     _validate_dock_acquisition_args(args.strategy, args)
+    policies = _portfolio_policy_schedule(args.portfolio_policy, 1)
     cluster_alpha = _cluster_alpha_schedule(args.cluster_alpha, 1)[0]
     cluster_cap = _cluster_cap_schedule(args.cluster_cap, 1)[0]
     with open_db(args) as db:
@@ -935,6 +979,7 @@ def _cmd_dock(args: argparse.Namespace) -> int:
                 cluster_alpha=cluster_alpha,
                 cluster_cap=cluster_cap,
                 atlas_id=args.atlas_id,
+                portfolio_policy=policies[0],
             )
         except ValueError as exc:
             raise SystemExit(f"error: {exc}") from exc
@@ -1041,11 +1086,16 @@ def _cmd_screening_cycle(args: argparse.Namespace) -> int:
     _validate_dock_acquisition_args(dock_strategy, args)
     cluster_alphas = _cluster_alpha_schedule(args.cluster_alpha, args.rounds)
     cluster_caps = _cluster_cap_schedule(args.cluster_cap, args.rounds)
-    use_cluster_atlas = dock_strategy in {"lcb", "ei"} and (
+    portfolio_policies = _portfolio_policy_schedule(args.portfolio_policy, args.rounds)
+    if dock_strategy == "portfolio" and not settings.general.train_fit_gaussian_calibrator:
+        raise SystemExit(
+            "error: portfolio screening requires general.train_fit_gaussian_calibrator=true"
+        )
+    use_cluster_atlas = dock_strategy == "portfolio" or (dock_strategy in {"lcb", "ei"} and (
         args.cluster_lambda > 0
         or any(alpha is not None and alpha > 0 for alpha in cluster_alphas)
         or any(cap is not None for cap in cluster_caps)
-    )
+    ))
 
     def _maybe_cluster_queries(db: Database) -> None:
         """Refresh assignments only for hard-clustered simsearch queries."""
@@ -1059,7 +1109,7 @@ def _cmd_screening_cycle(args: argparse.Namespace) -> int:
     ) -> None:
         if dock_strategy == "clustering":
             clustering.cluster(db, workdir, scheduler, settings)
-        elif (
+        elif dock_strategy == "portfolio" or (
             args.cluster_lambda > 0
             or (cluster_alpha is not None and cluster_alpha > 0)
             or cluster_cap is not None
@@ -1076,7 +1126,8 @@ def _cmd_screening_cycle(args: argparse.Namespace) -> int:
         if use_cluster_atlas and db.latest_cluster_atlas_version(args.atlas_id) is None:
             if args.atlas_root is None:
                 raise SystemExit(
-                    "error: clustered LCB/EI acquisition requires an existing seed atlas; "
+                    "error: clustered LCB/EI/portfolio acquisition requires an existing "
+                    "seed atlas; "
                     "pass --atlas-root PATH or run `spacehasten atlas init "
                     "--atlas-root PATH` first"
                 )
@@ -1094,6 +1145,14 @@ def _cmd_screening_cycle(args: argparse.Namespace) -> int:
                     f"error: {exc}; run `spacehasten atlas init --atlas-root "
                     f"{args.atlas_root}` first"
                 ) from exc
+        if (
+            dock_strategy == "portfolio"
+            and db.latest_dock_iteration() in (None, 0)
+            and db.load_model_calibration(0) is None
+        ):
+            raise SystemExit(
+                "error: portfolio screening requires a registered calibration for initial model v0"
+            )
         if args.props_toml is not None:
             props = PropertyRanges.from_toml(args.props_toml)
             db.replace_properties(seeds.typed_to_db_props(props))
@@ -1103,6 +1162,7 @@ def _cmd_screening_cycle(args: argparse.Namespace) -> int:
             logger.info("Screening round %d/%d", round_n, args.rounds)
             round_cluster_alpha = cluster_alphas[round_n - 1]
             round_cluster_cap = cluster_caps[round_n - 1]
+            round_portfolio_policy = portfolio_policies[round_n - 1]
 
             # Train if there are newly docked compounds from a previous
             # screening cycle (i.e. not the very first round ever run).
@@ -1173,6 +1233,7 @@ def _cmd_screening_cycle(args: argparse.Namespace) -> int:
                 cluster_alpha=round_cluster_alpha,
                 cluster_cap=round_cluster_cap,
                 atlas_id=args.atlas_id,
+                portfolio_policy=round_portfolio_policy,
             )
     print(f"Completed {args.rounds} screening round(s)")
     return 0

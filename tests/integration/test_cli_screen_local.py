@@ -15,6 +15,8 @@ from typing import Any
 import pytest
 
 from spacehasten.cli import main as cli_main
+from spacehasten.config.settings import Settings
+from spacehasten.core.db import ClusterAtlasVersionRow
 from spacehasten.workspace.layout import WorkDir
 
 
@@ -146,3 +148,76 @@ def test_screening_cycle_trains_after_first(
     predict_call = next(c for c in calls if c[0] == "predict")
     assert predict_call[1]["model_version"] == 1
     assert predict_call[1]["jobs"] == 7
+
+
+def test_portfolio_screening_updates_atlas_and_passes_policy(
+    stub_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+    _install_stage_stubs(monkeypatch, calls, dock_iteration=0, model_version=0)
+    settings = Settings()
+    settings.general.train_fit_gaussian_calibrator = True
+    monkeypatch.setattr(cli_main, "settings_from_args", lambda args: settings)
+
+    import spacehasten.core.db as db_mod
+
+    monkeypatch.setattr(
+        db_mod.Database,
+        "latest_cluster_atlas_version",
+        lambda self, atlas_id: ClusterAtlasVersionRow(atlas_id, 0, 1, 1, 1, "atlas.json"),
+    )
+    monkeypatch.setattr(
+        db_mod.Database,
+        "load_model_calibration",
+        lambda self, version: object() if version == 0 else None,
+    )
+
+    def update_atlas(db, workdir, scheduler, settings, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append(("atlas_update", kwargs))
+        return ClusterAtlasVersionRow(kwargs["atlas_id"], 1, 1, 1, 1, "atlas.json")
+
+    monkeypatch.setattr(cli_main.atlas_stage, "update_cluster_atlas", update_atlas)
+    policy = tmp_path / "portfolio.toml"
+    policy.write_text(
+        """schema_version = 1
+[quality]
+kind = "gaussian_hit_ei"
+hit_threshold = -9.7
+[reward]
+kind = "piecewise_linear"
+breakpoints = [1, 5, 20]
+slopes = [0.25, 1, 2]
+"""
+    )
+
+    rc = cli_main.main(
+        [
+            "-w",
+            str(stub_workspace),
+            "--scheduler",
+            "local",
+            "screening-cycle",
+            "--rounds",
+            "1",
+            "--simsearch-top-n",
+            "5",
+            "--simsearch-jobs",
+            "2",
+            "--dock-top-n",
+            "10",
+            "--dock-cpus",
+            "2",
+            "--dock-acquisition",
+            "portfolio",
+            "--portfolio-policy",
+            str(policy),
+        ]
+    )
+    assert rc == 0
+    names = [name for name, _kwargs in calls]
+    assert names == ["simsearch", "simsearch", "simsearch", "atlas_update", "dock"]
+    dock_call = next(kwargs for name, kwargs in calls if name == "dock")
+    assert dock_call["strategy"] == "portfolio"
+    assert dock_call["portfolio_policy"].quality.hit_threshold == -9.7

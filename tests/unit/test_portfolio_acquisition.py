@@ -9,6 +9,7 @@ import pytest
 from spacehasten.config.acquisition import CalibrationConfig, PortfolioAcquisitionPolicy
 from spacehasten.core.portfolio_acquisition import (
     CandidatePool,
+    candidate_pool_digest,
     cumulative_reward,
     gaussian_expected_improvement,
     select_portfolio_batch,
@@ -62,6 +63,26 @@ def test_exact_tiers_and_xi() -> None:
         gaussian_expected_improvement(np.array([-10.0]), np.array([1.0]), -9.7, 0.5)[0]
         < gaussian_expected_improvement(np.array([-10.0]), np.array([1.0]), -9.7)[0]
     )
+
+
+def test_candidate_pool_digest_is_layout_independent_and_input_sensitive() -> None:
+    pool = _pool(ids=(1, 2), means=(-10.0, -9.0), clusters=(1, 2))
+    layout_variant = CandidatePool(
+        np.asfortranarray(pool.ids.reshape(1, -1)).reshape(-1),
+        np.asfortranarray(pool.raw_means.reshape(1, -1)).reshape(-1),
+        np.asfortranarray(pool.raw_epistemic_stds.reshape(1, -1)).reshape(-1),
+        np.asfortranarray(pool.cluster_ids.reshape(1, -1)).reshape(-1),
+        np.asfortranarray(pool.model_versions.reshape(1, -1)).reshape(-1),
+    )
+    assert candidate_pool_digest(pool) == candidate_pool_digest(layout_variant)
+    changed = CandidatePool(
+        pool.ids,
+        pool.raw_means + 0.1,
+        pool.raw_epistemic_stds,
+        pool.cluster_ids,
+        pool.model_versions,
+    )
+    assert candidate_pool_digest(pool) != candidate_pool_digest(changed)
 
 
 def test_nontrivial_model_calibration() -> None:

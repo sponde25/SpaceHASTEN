@@ -306,9 +306,16 @@ spacehasten screening-cycle \
     --dock-cpus 250 \
     [--rounds 3] \
     [--strategy greedy|clustering] \
+    [--dock-acquisition greedy|clustering|lcb|ei|portfolio] \
+    [--portfolio-policy policy.toml] \
     [--space /path/to/space.space] \
     [--nnn 10000]
 ```
+
+Portfolio acquisition combines calibrated molecular quality with configurable
+regional rewards, crowding, and constraints. See
+[`docs/portfolio-acquisition.md`](docs/portfolio-acquisition.md) for policy
+configuration, calibration, persistence, and retry semantics.
 
 #### `spacehasten export csv`
 
@@ -336,7 +343,7 @@ These give fine-grained control over individual pipeline stages:
 | `train [--cutoff 10.0]` | Train one chemprop model |
 | `predict [--model-version N]` | Predict scores for undocked rows |
 | `search --source docked\|predicted --top-n N --cpus N [--strategy greedy\|clustering]` | Run one similarity search cycle |
-| `dock --top-n N --cpus N [--strategy greedy\|clustering]` | Dock the next batch of compounds |
+| `dock --top-n N --cpus N [--strategy greedy\|clustering\|lcb\|ei\|portfolio]` | Dock the next batch of compounds |
 | `cluster` | Run sphere-exclusion clustering |
 
 `--strategy clustering` on `search`/`dock` requires cluster assignments to

@@ -21,9 +21,12 @@ from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
-from typing import Final, Literal
+from typing import Any, Final, Literal
+
+import numpy as np
 
 from spacehasten.core.acquisition import AcquisitionCandidate
+from spacehasten.core.portfolio_acquisition import CandidatePool
 
 # ---------------------------------------------------------------------------
 # Schema (frozen — must stay byte-identical to tests/fixtures/legacy_schema.sql)
@@ -1015,6 +1018,87 @@ class Database:
             sql += " WHERE b.dock_iteration < ?"
             params = (before_dock_iteration,)
         return {int(row[0]) for row in self._conn.execute(sql, params)}
+
+    def latest_acquisition_iteration(self) -> int | None:
+        """Return the latest planned acquisition iteration, including unresolved batches."""
+        self.ensure_extension_schema()
+        row = self._conn.execute("SELECT MAX(dock_iteration) FROM acquisition_batches").fetchone()
+        return None if row is None or row[0] is None else int(row[0])
+
+    def select_portfolio_candidate_pool(
+        self, atlas_id: str, *, exclude_selected_attempts: bool
+    ) -> CandidatePool:
+        """Load a compact, strict portfolio pool without materializing SMILES objects."""
+        self.ensure_extension_schema()
+        exclusion = (
+            "AND NOT EXISTS (SELECT 1 FROM acquisition_selections s "
+            "WHERE s.spacehastenid = d.spacehastenid)"
+            if exclude_selected_attempts
+            else ""
+        )
+        coverage_sql = (
+            "SELECT COUNT(*), SUM(CASE WHEN p.spacehastenid IS NOT NULL "
+            "AND p.epistemic_std IS NOT NULL AND a.spacehastenid IS NOT NULL "
+            "AND d.smiles IS NOT NULL THEN 1 ELSE 0 END) "
+            "FROM data d LEFT JOIN predictions p ON p.spacehastenid=d.spacehastenid "
+            "AND p.model_version=d.pred_version LEFT JOIN cluster_atlas_assignments a "
+            "ON a.spacehastenid=d.spacehastenid AND a.atlas_id=? "
+            "WHERE d.dock_score IS NULL AND d.pred_version IS NOT NULL " + exclusion
+        )
+        count, covered = self._conn.execute(coverage_sql, (atlas_id,)).fetchone()
+        if not count:
+            raise ValueError("portfolio candidate pool is empty")
+        if int(covered or 0) != int(count):
+            raise ValueError(
+                "portfolio candidate pool has missing SMILES, prediction, uncertainty, "
+                "or atlas assignment"
+            )
+        sql = (
+            "SELECT d.spacehastenid, p.pred_score, p.epistemic_std, a.clusterid, p.model_version "
+            "FROM data d JOIN predictions p ON p.spacehastenid=d.spacehastenid "
+            "AND p.model_version=d.pred_version JOIN cluster_atlas_assignments a "
+            "ON a.spacehastenid=d.spacehastenid AND a.atlas_id=? "
+            "WHERE d.dock_score IS NULL AND d.pred_version IS NOT NULL " + exclusion +
+            " ORDER BY d.spacehastenid"
+        )
+        chunks: list[list[np.ndarray[Any, Any]]] = [[], [], [], [], []]
+        cursor = self._conn.execute(sql, (atlas_id,))
+        while rows := cursor.fetchmany(100_000):
+            for index, values in enumerate(zip(*rows, strict=True)):
+                chunks[index].append(
+                    np.asarray(values, dtype=(np.float64 if index in (1, 2) else np.int64))
+                )
+        return CandidatePool(
+            ids=np.concatenate(chunks[0]),
+            raw_means=np.concatenate(chunks[1]),
+            raw_epistemic_stds=np.concatenate(chunks[2]),
+            cluster_ids=np.concatenate(chunks[3]),
+            model_versions=np.concatenate(chunks[4]),
+        )
+
+    def select_smiles_by_ids(self, ids: Sequence[int]) -> list[tuple[str, int]]:
+        """Fetch selected SMILES in input order and reject incomplete lookups."""
+        if not ids:
+            return []
+        normalized = [int(identifier) for identifier in ids]
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("selected IDs must be unique")
+        found: dict[int, str] = {}
+        for start in range(0, len(normalized), 900):
+            requested = normalized[start : start + 900]
+            placeholders = ",".join("?" * len(requested))
+            rows = self._conn.execute(
+                f"SELECT spacehastenid, smiles FROM data WHERE spacehastenid IN ({placeholders})",
+                requested,
+            ).fetchall()
+            for identifier, smiles in rows:
+                if smiles is None:
+                    raise ValueError(f"selected ID {identifier} has NULL SMILES")
+                found[int(identifier)] = str(smiles)
+        missing = [identifier for identifier in normalized if identifier not in found]
+        if missing:
+            raise ValueError(f"selected IDs are missing SMILES: {missing}")
+        return [(found[identifier], identifier) for identifier in normalized]
 
     def prior_observed_hit_counts(
         self, atlas_id: str, *, before_dock_iteration: int, hit_threshold: float

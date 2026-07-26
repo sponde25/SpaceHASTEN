@@ -8,6 +8,7 @@ tarring the result back to the dock directory.
 from __future__ import annotations
 
 import csv
+import io
 import math
 import sqlite3
 import tarfile
@@ -15,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from spacehasten.config.acquisition import PortfolioAcquisitionPolicy
 from spacehasten.config.settings import Settings
 from spacehasten.core.db import (
     ClusterAtlasAssignmentRow,
@@ -23,12 +25,85 @@ from spacehasten.core.db import (
     ClusterAtlasVersionRow,
     ClusterRow,
     Database,
+    ModelCalibrationRow,
+    canonical_json,
 )
 from spacehasten.scheduler import LocalScheduler
+from spacehasten.scheduler.base import (
+    ArrayHandle,
+    ArrayJob,
+    ArrayResult,
+    ArrayStatus,
+    Scheduler,
+    TaskState,
+)
 from spacehasten.stages.docking import _build_dock_command_body, dock
 from spacehasten.workspace.layout import WorkDir
 
 TEST_ATLAS_ID = "test-atlas"
+
+
+class _FailedDockScheduler(Scheduler):
+    def __init__(self) -> None:
+        self.submissions = 0
+
+    def submit_array(self, job: ArrayJob) -> ArrayHandle:
+        self.submissions += 1
+        return ArrayHandle("failed-job", job.name, job.array_size, job.workdir)
+
+    def status(self, handle: ArrayHandle) -> ArrayStatus:
+        raise AssertionError("wait is overridden")
+
+    def cancel(self, handle: ArrayHandle) -> None:
+        del handle
+
+    def wait(self, handle: ArrayHandle, on_progress=None) -> ArrayResult:  # type: ignore[no-untyped-def]
+        del on_progress
+        states = (TaskState.FAILED,) * handle.array_size
+        return ArrayResult(handle, states, tuple(range(1, handle.array_size + 1)))
+
+
+class _InterruptedDockScheduler(Scheduler):
+    def __init__(self) -> None:
+        self.handle: ArrayHandle | None = None
+
+    def submit_array(self, job: ArrayJob) -> ArrayHandle:
+        self.handle = ArrayHandle("persisted-job", job.name, job.array_size, job.workdir)
+        return self.handle
+
+    def status(self, handle: ArrayHandle) -> ArrayStatus:
+        raise AssertionError("wait is overridden")
+
+    def cancel(self, handle: ArrayHandle) -> None:
+        del handle
+
+    def wait(self, handle: ArrayHandle, on_progress=None) -> ArrayResult:  # type: ignore[no-untyped-def]
+        del handle, on_progress
+        raise RuntimeError("orchestrator interrupted after submission")
+
+
+class _ReattachDockScheduler(Scheduler):
+    def __init__(self, expected_job_id: str) -> None:
+        self.expected_job_id = expected_job_id
+        self.waited = False
+
+    def submit_array(self, job: ArrayJob) -> ArrayHandle:
+        del job
+        raise AssertionError("submitted portfolio batch must not be resubmitted")
+
+    def status(self, handle: ArrayHandle) -> ArrayStatus:
+        raise AssertionError("wait is overridden")
+
+    def cancel(self, handle: ArrayHandle) -> None:
+        del handle
+
+    def wait(self, handle: ArrayHandle, on_progress=None) -> ArrayResult:  # type: ignore[no-untyped-def]
+        del on_progress
+        assert handle.job_id == self.expected_job_id
+        self.waited = True
+        states = (TaskState.COMPLETED,) * handle.array_size
+        return ArrayResult(handle, states, ())
+
 
 # A bash body that replaces the Schrödinger pipeline. It reads
 # ``chunk_${TASK_ID}.smi`` (each line: ``<smiles> <spacehastenid>``),
@@ -128,6 +203,55 @@ def _seed_uncertainty_db(db: Database) -> list[int]:
     return identifiers
 
 
+def _portfolio_policy() -> PortfolioAcquisitionPolicy:
+    return PortfolioAcquisitionPolicy.model_validate(
+        {
+            "quality": {"kind": "gaussian_hit_ei", "hit_threshold": -8.0},
+            "reward": {
+                "kind": "piecewise_linear",
+                "breakpoints": [1],
+                "slopes": [1],
+            },
+            "constraint": {"kind": "per_cluster_cap", "limit": 1},
+        }
+    )
+
+
+def _register_identity_calibration(db: Database) -> None:
+    db.register_model_calibration(
+        ModelCalibrationRow(
+            1,
+            "affine_std_floor",
+            "epistemic",
+            0.0,
+            1.0,
+            0.0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "artifact",
+            canonical_json({}),
+        )
+    )
+
+
+def _write_stub_result_archives(dock_dir: Path) -> None:
+    results = dock_dir / "results"
+    results.mkdir(exist_ok=True)
+    for smi_path in sorted((dock_dir / "inputs").glob("chunk_*.smi")):
+        chunk = smi_path.stem.removeprefix("chunk_")
+        lines = ["title,r_i_docking_score"]
+        for line in smi_path.read_text().splitlines():
+            lines.append(f"{line.rsplit(' ', 1)[1]},-8.0")
+        payload = ("\n".join(lines) + "\n").encode()
+        info = tarfile.TarInfo(f"glide_chunk_{chunk}.csv")
+        info.size = len(payload)
+        with tarfile.open(results / f"results-chunk_{chunk}.tar.gz", "w:gz") as archive:
+            archive.addfile(info, io.BytesIO(payload))
+
+
 def test_dock_command_uses_run_specific_scratch_and_fails_fast(
     tmp_path: Path,
 ) -> None:
@@ -203,6 +327,136 @@ def test_dock_stage_local_stub(tmp_path: Path) -> None:
     ).fetchone()
     assert seed == (-8.0, 0)
     db2.close()
+
+
+def test_portfolio_dock_plans_and_finalizes_local_batch(tmp_path: Path) -> None:
+    workdir = WorkDir.bootstrap(tmp_path / "ws", name="portfolio")
+    db = Database(workdir.dbsh())
+    identifiers = _seed_uncertainty_db(db)
+    _register_identity_calibration(db)
+    policy = _portfolio_policy()
+    settings = Settings()
+    settings.paths.scratch_default = str(tmp_path / "scratch")
+    iteration = dock(
+        db,
+        workdir,
+        LocalScheduler(),
+        settings,
+        top_n=2,
+        strategy="portfolio",
+        cpus=1,
+        atlas_id=TEST_ATLAS_ID,
+        portfolio_policy=policy,
+        dock_command_template=_STUB_BODY,
+    )
+    assert iteration == 1
+    batch = db.get_acquisition_batch_by_dock_iteration(iteration)
+    assert batch is not None and batch.status == "completed" and batch.selected_count == 2
+    assert len(db.load_acquisition_outcomes(batch.batch_id)) == 2
+    selected_ids = {row.spacehastenid for row in db.load_acquisition_selections(batch.batch_id)}
+    assert selected_ids <= set(identifiers)
+    dock_dir = workdir.docking_dir(iteration)
+    assert (dock_dir / "acquisition.csv").exists()
+    assert (dock_dir / "acquisition_policy.json").exists()
+    with (dock_dir / "acquisition.csv").open(newline="") as handle:
+        acquisition = list(csv.DictReader(handle))
+    assert {row["batch_id"] for row in acquisition} == {batch.batch_id}
+    assert {row["cluster_atlas_id"] for row in acquisition} == {TEST_ATLAS_ID}
+    assert {row["candidate_count"] for row in acquisition} == {"3"}
+    assert {row["calibration_uncertainty_source"] for row in acquisition} == {"epistemic"}
+
+
+def test_failed_portfolio_retry_reuses_persisted_selection(tmp_path: Path) -> None:
+    workdir = WorkDir.bootstrap(tmp_path / "ws", name="portfolio-failed")
+    db = Database(workdir.dbsh())
+    identifiers = _seed_uncertainty_db(db)
+    _register_identity_calibration(db)
+    settings = Settings()
+    settings.paths.scratch_default = str(tmp_path / "scratch")
+    failed = _FailedDockScheduler()
+    with pytest.raises(RuntimeError, match="failed task indices"):
+        dock(
+            db,
+            workdir,
+            failed,
+            settings,
+            top_n=2,
+            strategy="portfolio",
+            cpus=1,
+            atlas_id=TEST_ATLAS_ID,
+            portfolio_policy=_portfolio_policy(),
+            dock_command_template=_STUB_BODY,
+        )
+    batch = db.get_acquisition_batch_by_dock_iteration(1)
+    assert batch is not None and batch.status == "failed"
+    planned = [row.spacehastenid for row in db.load_acquisition_selections(batch.batch_id)]
+
+    new_identifier = db.insert_seed_undocked("new", "NNNN", "new-best")
+    db.apply_predictions([(new_identifier, 1, -20.0, 0.1, 0.1, 0.2)])
+    db.commit()
+    iteration = dock(
+        db,
+        workdir,
+        LocalScheduler(),
+        settings,
+        top_n=2,
+        strategy="portfolio",
+        cpus=1,
+        atlas_id=TEST_ATLAS_ID,
+        portfolio_policy=_portfolio_policy(),
+        dock_command_template=_STUB_BODY,
+    )
+    assert iteration == 1
+    assert [row.spacehastenid for row in db.load_acquisition_selections(batch.batch_id)] == planned
+    assert new_identifier not in planned
+    assert set(planned) <= set(identifiers)
+
+
+def test_submitted_portfolio_batch_reattaches_without_resubmission(
+    tmp_path: Path,
+) -> None:
+    workdir = WorkDir.bootstrap(tmp_path / "ws", name="portfolio-submitted")
+    db = Database(workdir.dbsh())
+    _seed_uncertainty_db(db)
+    _register_identity_calibration(db)
+    settings = Settings()
+    settings.paths.scratch_default = str(tmp_path / "scratch")
+    interrupted = _InterruptedDockScheduler()
+    with pytest.raises(RuntimeError, match="orchestrator interrupted"):
+        dock(
+            db,
+            workdir,
+            interrupted,
+            settings,
+            top_n=2,
+            strategy="portfolio",
+            cpus=1,
+            atlas_id=TEST_ATLAS_ID,
+            portfolio_policy=_portfolio_policy(),
+            dock_command_template=_STUB_BODY,
+        )
+    batch = db.get_acquisition_batch_by_dock_iteration(1)
+    assert batch is not None and batch.status == "submitted"
+    assert batch.scheduler_job_id == "persisted-job"
+    _write_stub_result_archives(workdir.docking_dir(1))
+
+    reattach = _ReattachDockScheduler("persisted-job")
+    iteration = dock(
+        db,
+        workdir,
+        reattach,
+        settings,
+        top_n=2,
+        strategy="portfolio",
+        cpus=1,
+        atlas_id=TEST_ATLAS_ID,
+        portfolio_policy=_portfolio_policy(),
+        dock_command_template=_STUB_BODY,
+    )
+    assert iteration == 1
+    assert reattach.waited
+    completed = db.get_acquisition_batch(batch.batch_id)
+    assert completed is not None and completed.status == "completed"
 
 
 def test_dock_stage_clustering_strategy(tmp_path: Path) -> None:

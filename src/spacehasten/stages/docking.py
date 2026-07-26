@@ -22,6 +22,7 @@ Layout (rooted in the new single-root workspace, replacing
 from __future__ import annotations
 
 import csv
+import hashlib
 import logging
 import math
 import os
@@ -30,9 +31,17 @@ import shutil
 import subprocess
 from collections import Counter
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Final, Literal
 
+from tqdm import tqdm  # type: ignore[import-untyped]
+
+from spacehasten.config.acquisition import (
+    CalibrationConfig,
+    PerClusterCapConstraintConfig,
+    PortfolioAcquisitionPolicy,
+)
 from spacehasten.config.settings import Settings
 from spacehasten.core.acquisition import (
     AcquisitionSelection,
@@ -41,8 +50,20 @@ from spacehasten.core.acquisition import (
     select_normalized_penalized_batch,
     select_penalized_batch,
 )
-from spacehasten.core.db import Database
-from spacehasten.scheduler.base import ArrayJob, Scheduler
+from spacehasten.core.db import (
+    AcquisitionBatchRow,
+    AcquisitionSelectionRow,
+    Database,
+    ModelCalibrationRow,
+    acquisition_selection_digest,
+    canonical_json,
+    sha256_hex,
+)
+from spacehasten.core.portfolio_acquisition import (
+    candidate_pool_digest,
+    select_portfolio_batch,
+)
+from spacehasten.scheduler.base import ArrayHandle, ArrayJob, Scheduler
 from spacehasten.tools.glide import parse_glide_csv, write_glide_in, write_phase_inp
 from spacehasten.workspace.layout import WorkDir
 
@@ -52,7 +73,7 @@ logger = logging.getLogger(__name__)
 #: Maximum SMILES per docking task (cf. legacy ``cfg.DOCKING_CHUNK``).
 DOCKING_CHUNK: Final[int] = 1000
 PENALTY_CLUSTER_SIMILARITY: Final[float] = 0.4
-DockStrategy = Literal["greedy", "clustering", "lcb", "ei"]
+DockStrategy = Literal["greedy", "clustering", "lcb", "ei", "portfolio"]
 
 
 def _chunked(rows: Sequence[tuple[str, int]], chunk_size: int) -> list[list[tuple[str, int]]]:
@@ -66,6 +87,158 @@ def _write_chunk_smi(path: Path, rows: Sequence[tuple[str, int]]) -> None:
     with path.open("wt", encoding="utf-8") as w:
         for smiles, sid in rows:
             w.write(f"{smiles.strip()} {sid}\n")
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    with temporary.open("wt", encoding="utf-8", newline="") as handle:
+        handle.write(text)
+        handle.flush()
+        os.fsync(handle.fileno())
+    temporary.replace(path)
+
+
+def _write_portfolio_artifacts(
+    dock_dir: Path,
+    selections: Sequence[AcquisitionSelectionRow],
+    smiles: Sequence[tuple[str, int]],
+    batch: AcquisitionBatchRow,
+    policy: PortfolioAcquisitionPolicy,
+    calibrations: dict[int, ModelCalibrationRow],
+) -> None:
+    smiles_by_id = {identifier: smiles_value for smiles_value, identifier in smiles}
+    fields = [
+        "rank",
+        "method",
+        "batch_id",
+        "spacehastenid",
+        "smiles",
+        "clusterid",
+        "model_version",
+        "raw_mean",
+        "raw_epistemic_std",
+        "calibrated_mean",
+        "calibrated_std",
+        "p_hit",
+        "expected_improvement",
+        "quality",
+        "support_before",
+        "support_after",
+        "marginal_reward",
+        "crowding_penalty",
+        "final_utility",
+        "cluster_count_before",
+        "cap_reached_after",
+        "policy_schema_version",
+        "policy_sha256",
+        "history_attempt_policy",
+        "candidate_count",
+        "candidate_watermark",
+        "candidate_digest",
+        "batch_size",
+        "selected_count",
+        "selection_digest",
+        "cluster_atlas_id",
+        "cluster_atlas_version",
+        "cap_scope",
+        "cap_limit",
+        "cluster_cap",
+        "ei_hit_threshold",
+        "ei_xi",
+        "calibration_kind",
+        "calibration_uncertainty_source",
+        "calibration_mean_shift",
+        "calibration_std_scale",
+        "calibration_std_floor",
+        "calibration_artifact_sha256",
+    ]
+    import io
+
+    buffer = io.StringIO(newline="")
+    writer = csv.DictWriter(buffer, fieldnames=fields)
+    writer.writeheader()
+    for row in selections:
+        calibration = calibrations[row.model_version]
+        writer.writerow(
+            {
+                "rank": row.selection_rank,
+                "method": "portfolio",
+                "batch_id": batch.batch_id,
+                "spacehastenid": row.spacehastenid,
+                "smiles": smiles_by_id[row.spacehastenid],
+                "clusterid": row.clusterid,
+                "model_version": row.model_version,
+                "raw_mean": row.raw_mean,
+                "raw_epistemic_std": row.raw_epistemic_std,
+                "calibrated_mean": row.calibrated_mean,
+                "calibrated_std": row.calibrated_std,
+                "p_hit": row.p_hit,
+                "expected_improvement": row.expected_improvement,
+                "quality": row.quality,
+                "support_before": row.support_before,
+                "support_after": row.support_after,
+                "marginal_reward": row.marginal_reward,
+                "crowding_penalty": row.crowding_penalty,
+                "final_utility": row.final_utility,
+                "cluster_count_before": row.cluster_count_before,
+                "cap_reached_after": int(row.cap_reached_after),
+                "policy_schema_version": batch.policy_schema_version,
+                "policy_sha256": batch.policy_sha256,
+                "history_attempt_policy": batch.history_attempt_policy,
+                "candidate_count": batch.candidate_count,
+                "candidate_watermark": batch.candidate_watermark,
+                "candidate_digest": batch.candidate_digest,
+                "batch_size": batch.requested_count,
+                "selected_count": batch.selected_count,
+                "selection_digest": batch.selection_digest,
+                "cluster_atlas_id": batch.atlas_id,
+                "cluster_atlas_version": batch.atlas_version,
+                "cap_scope": batch.cap_scope or "",
+                "cap_limit": batch.cap_limit or "",
+                "cluster_cap": batch.cap_limit or "",
+                "ei_hit_threshold": policy.quality.hit_threshold,
+                "ei_xi": policy.quality.xi,
+                "calibration_kind": calibration.calibration_kind,
+                "calibration_uncertainty_source": calibration.uncertainty_source,
+                "calibration_mean_shift": calibration.mean_shift,
+                "calibration_std_scale": calibration.std_scale,
+                "calibration_std_floor": calibration.std_floor,
+                "calibration_artifact_sha256": calibration.artifact_sha256 or "",
+            }
+        )
+    _atomic_write_text(dock_dir / "acquisition.csv", buffer.getvalue())
+    _atomic_write_text(
+        dock_dir / "acquisition_policy.json",
+        canonical_json(
+            {
+                "batch": {
+                    "batch_id": batch.batch_id,
+                    "dock_iteration": batch.dock_iteration,
+                    "policy_schema_version": batch.policy_schema_version,
+                    "policy_sha256": batch.policy_sha256,
+                    "history_attempt_policy": batch.history_attempt_policy,
+                    "model_version": batch.model_version,
+                    "atlas_id": batch.atlas_id,
+                    "atlas_version": batch.atlas_version,
+                    "candidate_count": batch.candidate_count,
+                    "candidate_watermark": batch.candidate_watermark,
+                    "candidate_digest": batch.candidate_digest,
+                    "requested_count": batch.requested_count,
+                    "selected_count": batch.selected_count,
+                    "selection_digest": batch.selection_digest,
+                    "cap_scope": batch.cap_scope,
+                    "cap_limit": batch.cap_limit,
+                },
+                "policy": policy.model_dump(mode="json"),
+                "calibrations": {
+                    str(version): calibration.__dict__
+                    for version, calibration in calibrations.items()
+                },
+            },
+        )
+        + "\n",
+    )
 
 
 def _write_acquisition_csv(
@@ -327,6 +500,7 @@ def dock(
     cluster_alpha: float | None = None,
     cluster_cap: int | None = None,
     atlas_id: str | None = None,
+    portfolio_policy: PortfolioAcquisitionPolicy | None = None,
     dock_command_template: str | None = None,
     seed: int | None = None,
 ) -> int:
@@ -379,6 +553,13 @@ def dock(
             " run `spacehasten cluster` first (or use"
             " `screening-cycle --strategy clustering`, which clusters automatically)"
         )
+    if strategy == "portfolio":
+        if portfolio_policy is None:
+            raise ValueError("strategy='portfolio' requires a portfolio policy")
+        if atlas_id is None:
+            raise ValueError("strategy='portfolio' requires a current atlas ID")
+        if cluster_lambda != 0 or cluster_alpha is not None or cluster_cap is not None:
+            raise ValueError("portfolio policy owns cluster reward, crowding, and cap settings")
 
     selections: list[AcquisitionSelection] = []
     acquisition_method: DockAcquisition | None = None
@@ -386,7 +567,172 @@ def dock(
     effective_cluster_lambda = cluster_lambda
     acquisition_candidate_count = 0
     penalty_atlas_version: int | None = None
-    if strategy in {"lcb", "ei"}:
+    portfolio_batch: AcquisitionBatchRow | None = None
+    portfolio_selections: list[AcquisitionSelectionRow] = []
+    portfolio_calibrations: dict[int, ModelCalibrationRow] = {}
+    portfolio_resume_submitted = False
+    if strategy == "portfolio":
+        assert portfolio_policy is not None and atlas_id is not None
+        latest_data = db.latest_dock_iteration()
+        latest_batch = db.latest_acquisition_iteration()
+        existing = (
+            db.get_acquisition_batch_by_dock_iteration(latest_batch)
+            if latest_batch is not None
+            else None
+        )
+        policy_json = canonical_json(portfolio_policy.model_dump(mode="json"))
+        if (
+            existing is not None
+            and existing.strategy == "portfolio"
+            and existing.status in {"planned", "submitted", "failed"}
+            and (latest_data is None or existing.dock_iteration > latest_data)
+        ):
+            if existing.atlas_id != atlas_id or existing.policy_sha256 != sha256_hex(policy_json):
+                raise ValueError("resume batch atlas or effective policy hash does not match")
+            if existing.requested_count != top_n:
+                raise ValueError("resume batch requested count does not match top_n")
+            iteration = existing.dock_iteration
+            portfolio_batch = existing
+            portfolio_selections = db.load_acquisition_selections(existing.batch_id)
+            if len(portfolio_selections) != top_n:
+                raise ValueError("resume batch persisted selection count does not match top_n")
+            for version in {row.model_version for row in portfolio_selections}:
+                calibration = db.load_model_calibration(version)
+                if calibration is None:
+                    raise ValueError(f"resume batch has no calibration for model version {version}")
+                if calibration.uncertainty_source != portfolio_policy.quality.uncertainty_source:
+                    raise ValueError("resume batch calibration uncertainty_source is incompatible")
+                portfolio_calibrations[version] = calibration
+            rows = db.select_smiles_by_ids([row.spacehastenid for row in portfolio_selections])
+            acquisition_candidate_count = existing.candidate_count
+            penalty_atlas_version = existing.atlas_version
+            portfolio_resume_submitted = existing.status == "submitted"
+        else:
+            penalty_atlas_version = _require_current_cluster_atlas(db, atlas_id)
+            iteration = (
+                max(value for value in (latest_data, latest_batch, 0) if value is not None) + 1
+            )
+            pool = db.select_portfolio_candidate_pool(
+                atlas_id,
+                exclude_selected_attempts=(
+                    portfolio_policy.history.attempt_policy == "once_per_campaign"
+                ),
+            )
+            candidate_digest = candidate_pool_digest(pool)
+            versions = {int(version) for version in pool.model_versions}
+            if len(versions) != 1:
+                raise ValueError("production portfolio batches require exactly one model version")
+            for version in versions:
+                calibration = db.load_model_calibration(version)
+                if calibration is None:
+                    raise ValueError(
+                        f"portfolio requires a registered calibration for model version {version}"
+                    )
+                if calibration.uncertainty_source != portfolio_policy.quality.uncertainty_source:
+                    raise ValueError(
+                        "portfolio calibration uncertainty_source is incompatible with policy"
+                    )
+                portfolio_calibrations[version] = calibration
+            core_calibrations = {
+                version: CalibrationConfig(
+                    mean_shift=calibration.mean_shift,
+                    std_scale=calibration.std_scale,
+                    std_floor=calibration.std_floor,
+                )
+                for version, calibration in portfolio_calibrations.items()
+            }
+            prior = db.prior_observed_hit_counts(
+                atlas_id,
+                before_dock_iteration=iteration,
+                hit_threshold=portfolio_policy.quality.hit_threshold,
+            )
+            with tqdm(total=top_n, desc="portfolio selection", unit="compound") as progress:
+                selected = select_portfolio_batch(
+                    pool,
+                    portfolio_policy,
+                    core_calibrations,
+                    batch_size=top_n,
+                    prior_observed_hits=prior,
+                    progress=lambda done, total: progress.update(1),
+                ).selections
+            portfolio_selections = [
+                AcquisitionSelectionRow(
+                    batch_id="pending",
+                    selection_rank=rank,
+                    spacehastenid=item.candidate_id,
+                    clusterid=item.cluster_id,
+                    model_version=item.model_version,
+                    raw_mean=item.raw_mean,
+                    raw_epistemic_std=item.raw_epistemic_std,
+                    calibrated_mean=item.calibrated_mean,
+                    calibrated_std=item.calibrated_std,
+                    p_hit=item.p_hit,
+                    expected_improvement=item.expected_improvement,
+                    quality=item.quality,
+                    support_before=item.support_before,
+                    support_after=item.support_after,
+                    marginal_reward=item.marginal_reward,
+                    crowding_penalty=item.crowding_penalty,
+                    final_utility=item.final_utility,
+                    cluster_count_before=item.cluster_count_before,
+                    cap_reached_after=bool(item.cap_reached_after),
+                    contributions_json=canonical_json(
+                        {
+                            "quality": item.quality,
+                            "marginal_reward": item.marginal_reward,
+                            "crowding_penalty": item.crowding_penalty,
+                            "final_utility": item.final_utility,
+                        }
+                    ),
+                )
+                for rank, item in enumerate(selected, start=1)
+            ]
+            selection_digest = acquisition_selection_digest(portfolio_selections)
+            batch_id = (
+                "portfolio-"
+                + hashlib.sha256(
+                    f"{iteration}:{sha256_hex(policy_json)}:{candidate_digest}:{selection_digest}".encode()
+                ).hexdigest()[:24]
+            )
+            portfolio_selections = [replace(row, batch_id=batch_id) for row in portfolio_selections]
+            selection_digest = acquisition_selection_digest(portfolio_selections)
+            constraint = portfolio_policy.constraint
+            portfolio_batch = db.plan_acquisition_batch(
+                AcquisitionBatchRow(
+                    batch_id=batch_id,
+                    dock_iteration=iteration,
+                    strategy="portfolio",
+                    status="planned",
+                    policy_schema_version=portfolio_policy.schema_version,
+                    policy_json=policy_json,
+                    policy_sha256=sha256_hex(policy_json),
+                    history_attempt_policy=portfolio_policy.history.attempt_policy,
+                    model_version=next(iter(versions)),
+                    atlas_id=atlas_id,
+                    atlas_version=penalty_atlas_version,
+                    candidate_count=len(pool.ids),
+                    candidate_watermark=db.latest_spacehastenid(),
+                    candidate_digest=candidate_digest,
+                    requested_count=top_n,
+                    selected_count=len(portfolio_selections),
+                    selection_digest=selection_digest,
+                    cap_scope=(
+                        constraint.scope
+                        if isinstance(constraint, PerClusterCapConstraintConfig)
+                        else None
+                    ),
+                    cap_limit=(
+                        constraint.limit
+                        if isinstance(constraint, PerClusterCapConstraintConfig)
+                        else None
+                    ),
+                ),
+                portfolio_selections,
+            )
+            db.commit()
+            rows = db.select_smiles_by_ids([row.spacehastenid for row in portfolio_selections])
+            acquisition_candidate_count = len(pool.ids)
+    elif strategy in {"lcb", "ei"}:
         acquisition_method = strategy
         use_cluster_penalty = (
             cluster_lambda > 0
@@ -449,6 +795,9 @@ def dock(
             f"no compounds match the {strategy!r} acquisition query; run prediction first"
         )
 
+    if strategy == "portfolio" and seed is None:
+        assert portfolio_batch is not None
+        seed = int(portfolio_batch.selection_digest[:16], 16)
     rng = random.Random(seed)
     shuffled = list(rows)
     rng.shuffle(shuffled)
@@ -459,10 +808,24 @@ def dock(
     chunks = _chunked(shuffled, chunk_size)
     n_chunks = len(chunks)
 
-    latest = db.latest_dock_iteration()
-    iteration = 0 if latest is None else latest + 1
+    if strategy != "portfolio":
+        latest = db.latest_dock_iteration()
+        iteration = 0 if latest is None else latest + 1
     dock_dir = workdir.docking_dir(iteration)
     dock_dir.mkdir(parents=True, exist_ok=True)
+    if (
+        portfolio_batch is not None
+        and portfolio_policy is not None
+        and not portfolio_resume_submitted
+    ):
+        _write_portfolio_artifacts(
+            dock_dir,
+            portfolio_selections,
+            rows,
+            portfolio_batch,
+            portfolio_policy,
+            portfolio_calibrations,
+        )
     if selections:
         assert acquisition_method is not None
         _write_acquisition_csv(
@@ -505,23 +868,25 @@ def dock(
         cpus,
     )
 
-    # Extract the grid + load the dock_param template once.
-    grid_blob = db.load_dock_grid()
-    (dock_dir / "glide_grid.zip").write_bytes(grid_blob)
-    dock_param_blob = db.load_dock_param()
+    # A submitted portfolio batch may be actively using these immutable inputs.
+    if portfolio_resume_submitted:
+        required = [dock_dir / "glide_grid.zip", dock_dir / "inputs"]
+        if not all(path.exists() for path in required):
+            raise RuntimeError("submitted portfolio batch is missing persisted docking inputs")
+    else:
+        grid_blob = db.load_dock_grid()
+        (dock_dir / "glide_grid.zip").write_bytes(grid_blob)
+        dock_param_blob = db.load_dock_param()
 
     # Per-chunk files.
     inputs_dir = dock_dir / "inputs"
-    inputs_dir.mkdir(parents=True, exist_ok=True)
-    for i, chunk in enumerate(chunks, start=1):
-        stem = f"chunk_{i}"
-        _write_chunk_smi(inputs_dir / f"{stem}.smi", chunk)
-        write_phase_inp(inputs_dir / f"{stem}.inp")
-        write_glide_in(
-            inputs_dir / f"glide_{stem}.in",
-            dock_param_blob,
-            ligand_stem=stem,
-        )
+    if not portfolio_resume_submitted:
+        inputs_dir.mkdir(parents=True, exist_ok=True)
+        for i, chunk in enumerate(chunks, start=1):
+            stem = f"chunk_{i}"
+            _write_chunk_smi(inputs_dir / f"{stem}.smi", chunk)
+            write_phase_inp(inputs_dir / f"{stem}.inp")
+            write_glide_in(inputs_dir / f"glide_{stem}.in", dock_param_blob, ligand_stem=stem)
 
     body = (
         dock_command_template
@@ -539,10 +904,20 @@ def dock(
         env_setup=[],
         command_template=body,
     )
-    handle = scheduler.submit_array(job)
+    if portfolio_resume_submitted:
+        assert portfolio_batch is not None and portfolio_batch.scheduler_job_id is not None
+        handle = ArrayHandle(portfolio_batch.scheduler_job_id, job.name, n_chunks, dock_dir)
+    else:
+        handle = scheduler.submit_array(job)
+    if portfolio_batch is not None and not portfolio_resume_submitted:
+        db.update_acquisition_submitted(portfolio_batch.batch_id, handle.job_id)
+        db.commit()
     logger.info("Submitted docking job %s (%d tasks)", handle.job_id, n_chunks)
     result = scheduler.wait(handle)
     if not result.success:
+        if portfolio_batch is not None:
+            db.mark_acquisition_batch_failed(portfolio_batch.batch_id)
+            db.commit()
         from spacehasten.scheduler.diagnostics import tail_logs
 
         raise RuntimeError(
@@ -551,24 +926,64 @@ def dock(
             f"--- tail of task logs ---\n{tail_logs(handle)}"
         )
 
-    extract_root = _extract_results(dock_dir, settings.paths.scratch_default or "/wrk")
-    title_to_score = _ingest_dock_results(extract_root)
-    shutil.rmtree(extract_root, ignore_errors=True)
+    try:
+        extract_root = _extract_results(dock_dir, settings.paths.scratch_default or "/wrk")
+        title_to_score = _ingest_dock_results(extract_root)
+        shutil.rmtree(extract_root, ignore_errors=True)
+    except BaseException:
+        if portfolio_batch is not None:
+            db.mark_acquisition_batch_failed(portfolio_batch.batch_id)
+            db.commit()
+        raise
     if not title_to_score:
+        if portfolio_batch is not None:
+            assert portfolio_policy is not None
+            db.finalize_acquisition_outcomes(
+                portfolio_batch.batch_id, {}, hit_threshold=portfolio_policy.quality.hit_threshold
+            )
+            db.commit()
+            return iteration
         raise RuntimeError(f"docking iter{iteration}: no scores parsed from {extract_root}")
 
     update_rows: list[tuple[float, int, int]] = []
+    planned_ids = {row.spacehastenid for row in portfolio_selections}
     for title, score in title_to_score.items():
         try:
             sid = int(title)
-        except ValueError:
+        except ValueError as exc:
+            if portfolio_batch is not None:
+                db.mark_acquisition_batch_failed(portfolio_batch.batch_id)
+                db.commit()
+                raise RuntimeError(
+                    f"portfolio docking result has non-integer title {title!r}"
+                ) from exc
             logger.warning("skipping non-integer Glide title %r", title)
             continue
+        if portfolio_batch is not None and sid not in planned_ids:
+            db.mark_acquisition_batch_failed(portfolio_batch.batch_id)
+            db.commit()
+            raise RuntimeError(f"portfolio docking result has unexpected title {title!r}")
         update_rows.append((float(score), iteration, sid))
     if not update_rows:
         raise RuntimeError(f"docking iter{iteration}: no integer titles in result CSVs")
 
-    db.apply_dock_scores(update_rows)
+    db.connection.execute("SAVEPOINT portfolio_ingest")
+    try:
+        db.apply_dock_scores(update_rows)
+        if portfolio_batch is not None and portfolio_policy is not None:
+            db.finalize_acquisition_outcomes(
+                portfolio_batch.batch_id,
+                {sid: (score, "dock") for score, _iteration, sid in update_rows},
+                hit_threshold=portfolio_policy.quality.hit_threshold,
+            )
+        db.connection.execute("RELEASE SAVEPOINT portfolio_ingest")
+    except BaseException:
+        db.connection.execute("ROLLBACK TO SAVEPOINT portfolio_ingest")
+        db.connection.execute("RELEASE SAVEPOINT portfolio_ingest")
+        if portfolio_batch is not None:
+            db.mark_acquisition_batch_failed(portfolio_batch.batch_id)
+        db.commit()
+        raise
     db.commit()
     logger.info("Updated dock_score for %d rows (iter=%d)", len(update_rows), iteration)
     return iteration
