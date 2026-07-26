@@ -13,8 +13,11 @@ class-level ``_SQL_*`` constants. They are the regression lock — tests in
 
 from __future__ import annotations
 
+import hashlib
+import json
+import math
 import sqlite3
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
@@ -113,6 +116,118 @@ EXTENSION_SCHEMA_STATEMENTS: Final[tuple[str, ...]] = (
         "CREATE INDEX IF NOT EXISTS idx_cluster_atlas_assignments_cluster "
         "ON cluster_atlas_assignments(atlas_id, clusterid)"
     ),
+    (
+        "CREATE TABLE IF NOT EXISTS model_calibrations ("
+        "model_version INTEGER PRIMARY KEY,"
+        "calibration_kind TEXT NOT NULL,"
+        "uncertainty_source TEXT NOT NULL,"
+        "mean_shift REAL NOT NULL,"
+        "std_scale REAL NOT NULL,"
+        "std_floor REAL NOT NULL,"
+        "fit_source TEXT,"
+        "fit_split_name TEXT,"
+        "fit_row_count INTEGER,"
+        "split_sha256 TEXT,"
+        "artifact_path TEXT,"
+        "artifact_sha256 TEXT,"
+        "metadata_json TEXT NOT NULL,"
+        "created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"
+        ")"
+    ),
+    (
+        "CREATE TABLE IF NOT EXISTS acquisition_batches ("
+        "batch_id TEXT PRIMARY KEY,"
+        "dock_iteration INTEGER NOT NULL UNIQUE,"
+        "strategy TEXT NOT NULL,"
+        "status TEXT NOT NULL,"
+        "policy_schema_version INTEGER NOT NULL,"
+        "policy_json TEXT NOT NULL,"
+        "policy_sha256 TEXT NOT NULL,"
+        "history_attempt_policy TEXT NOT NULL,"
+        "model_version INTEGER NOT NULL,"
+        "atlas_id TEXT NOT NULL,"
+        "atlas_version INTEGER NOT NULL,"
+        "candidate_count INTEGER NOT NULL,"
+        "candidate_watermark INTEGER NOT NULL,"
+        "candidate_digest TEXT NOT NULL,"
+        "requested_count INTEGER NOT NULL,"
+        "selected_count INTEGER NOT NULL,"
+        "selection_digest TEXT NOT NULL,"
+        "cap_scope TEXT,"
+        "cap_limit INTEGER,"
+        "scheduler_job_id TEXT,"
+        "created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+        "submitted_at TEXT,"
+        "completed_at TEXT"
+        ")"
+    ),
+    (
+        "CREATE INDEX IF NOT EXISTS idx_acquisition_batches_iteration "
+        "ON acquisition_batches(dock_iteration)"
+    ),
+    (
+        "CREATE TABLE IF NOT EXISTS acquisition_selections ("
+        "batch_id TEXT NOT NULL,"
+        "selection_rank INTEGER NOT NULL,"
+        "spacehastenid INTEGER NOT NULL,"
+        "clusterid INTEGER NOT NULL,"
+        "model_version INTEGER NOT NULL,"
+        "raw_mean REAL NOT NULL,"
+        "raw_epistemic_std REAL NOT NULL,"
+        "calibrated_mean REAL NOT NULL,"
+        "calibrated_std REAL NOT NULL,"
+        "p_hit REAL NOT NULL,"
+        "expected_improvement REAL NOT NULL,"
+        "quality REAL NOT NULL,"
+        "support_before REAL NOT NULL,"
+        "support_after REAL NOT NULL,"
+        "marginal_reward REAL NOT NULL,"
+        "crowding_penalty REAL NOT NULL,"
+        "final_utility REAL NOT NULL,"
+        "cluster_count_before INTEGER NOT NULL,"
+        "cap_reached_after INTEGER NOT NULL,"
+        "contributions_json TEXT NOT NULL,"
+        "PRIMARY KEY(batch_id, selection_rank),"
+        "UNIQUE(batch_id, spacehastenid),"
+        "FOREIGN KEY(batch_id) REFERENCES acquisition_batches(batch_id)"
+        ")"
+    ),
+    (
+        "CREATE INDEX IF NOT EXISTS idx_acquisition_selections_spacehastenid "
+        "ON acquisition_selections(spacehastenid)"
+    ),
+    (
+        "CREATE INDEX IF NOT EXISTS idx_acquisition_selections_batch_cluster "
+        "ON acquisition_selections(batch_id, clusterid)"
+    ),
+    (
+        "CREATE TABLE IF NOT EXISTS acquisition_outcomes ("
+        "batch_id TEXT NOT NULL,"
+        "spacehastenid INTEGER NOT NULL,"
+        "status TEXT NOT NULL,"
+        "dock_score REAL,"
+        "source TEXT,"
+        "updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+        "PRIMARY KEY(batch_id, spacehastenid),"
+        "FOREIGN KEY(batch_id, spacehastenid) REFERENCES "
+        "acquisition_selections(batch_id, spacehastenid)"
+        ")"
+    ),
+    (
+        "CREATE TABLE IF NOT EXISTS acquisition_region_summaries ("
+        "batch_id TEXT NOT NULL,"
+        "clusterid INTEGER NOT NULL,"
+        "prior_observed_hits INTEGER NOT NULL,"
+        "selected_count INTEGER NOT NULL,"
+        "expected_hit_mass REAL NOT NULL,"
+        "scored_count INTEGER NOT NULL,"
+        "observed_hits INTEGER NOT NULL,"
+        "unresolved_count INTEGER NOT NULL,"
+        "cap_reached INTEGER NOT NULL,"
+        "PRIMARY KEY(batch_id, clusterid),"
+        "FOREIGN KEY(batch_id) REFERENCES acquisition_batches(batch_id)"
+        ")"
+    ),
 )
 
 
@@ -208,6 +323,145 @@ class PredictionRow:
     aleatoric_std: float | None
     total_std: float | None
     created_at: str
+
+
+@dataclass(frozen=True)
+class ModelCalibrationRow:
+    model_version: int
+    calibration_kind: str
+    uncertainty_source: str
+    mean_shift: float
+    std_scale: float
+    std_floor: float
+    fit_source: str | None
+    fit_split_name: str | None
+    fit_row_count: int | None
+    split_sha256: str | None
+    artifact_path: str | None
+    artifact_sha256: str | None
+    metadata_json: str
+    created_at: str | None = None
+
+
+@dataclass(frozen=True)
+class AcquisitionBatchRow:
+    batch_id: str
+    dock_iteration: int
+    strategy: str
+    status: Literal["planned", "submitted", "completed", "partial", "failed"]
+    policy_schema_version: int
+    policy_json: str
+    policy_sha256: str
+    history_attempt_policy: str
+    model_version: int
+    atlas_id: str
+    atlas_version: int
+    candidate_count: int
+    candidate_watermark: int
+    candidate_digest: str
+    requested_count: int
+    selected_count: int
+    selection_digest: str
+    cap_scope: str | None
+    cap_limit: int | None
+    scheduler_job_id: str | None = None
+    created_at: str | None = None
+    submitted_at: str | None = None
+    completed_at: str | None = None
+
+
+@dataclass(frozen=True)
+class AcquisitionSelectionRow:
+    batch_id: str
+    selection_rank: int
+    spacehastenid: int
+    clusterid: int
+    model_version: int
+    raw_mean: float
+    raw_epistemic_std: float
+    calibrated_mean: float
+    calibrated_std: float
+    p_hit: float
+    expected_improvement: float
+    quality: float
+    support_before: float
+    support_after: float
+    marginal_reward: float
+    crowding_penalty: float
+    final_utility: float
+    cluster_count_before: int
+    cap_reached_after: bool
+    contributions_json: str
+
+
+@dataclass(frozen=True)
+class AcquisitionOutcomeRow:
+    batch_id: str
+    spacehastenid: int
+    status: Literal["pending", "scored", "unresolved"]
+    dock_score: float | None
+    source: str | None
+    updated_at: str | None = None
+
+
+@dataclass(frozen=True)
+class AcquisitionRegionSummaryRow:
+    batch_id: str
+    clusterid: int
+    prior_observed_hits: int
+    selected_count: int
+    expected_hit_mass: float
+    scored_count: int
+    observed_hits: int
+    unresolved_count: int
+    cap_reached: bool
+
+
+@dataclass(frozen=True)
+class AcquisitionOutcomeUpdate:
+    spacehastenid: int
+    dock_score: float
+    source: str
+
+
+def canonical_json(value: object) -> str:
+    """Serialize JSON deterministically for persisted provenance records."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def sha256_hex(text: str) -> str:
+    """Return the SHA256 digest for UTF-8 text."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def acquisition_selection_digest(selections: Sequence[AcquisitionSelectionRow]) -> str:
+    """Hash complete selection diagnostics in deterministic rank order."""
+    digest = hashlib.sha256()
+    for selection in sorted(selections, key=lambda item: item.selection_rank):
+        record = {
+            "selection_rank": selection.selection_rank,
+            "spacehastenid": selection.spacehastenid,
+            "clusterid": selection.clusterid,
+            "model_version": selection.model_version,
+            "raw_mean": selection.raw_mean,
+            "raw_epistemic_std": selection.raw_epistemic_std,
+            "calibrated_mean": selection.calibrated_mean,
+            "calibrated_std": selection.calibrated_std,
+            "p_hit": selection.p_hit,
+            "expected_improvement": selection.expected_improvement,
+            "quality": selection.quality,
+            "support_before": selection.support_before,
+            "support_after": selection.support_after,
+            "marginal_reward": selection.marginal_reward,
+            "crowding_penalty": selection.crowding_penalty,
+            "final_utility": selection.final_utility,
+            "cluster_count_before": selection.cluster_count_before,
+            "cap_reached_after": selection.cap_reached_after,
+            "contributions_json": selection.contributions_json,
+        }
+        digest.update(canonical_json(record).encode("utf-8"))
+        digest.update(b"\n")
+    return digest.hexdigest()
 
 
 @dataclass(frozen=True)
@@ -421,6 +675,612 @@ class Database:
         """Create additive SpaceHASTEN extension tables for an existing database."""
         for stmt in EXTENSION_SCHEMA_STATEMENTS:
             self._conn.execute(stmt)
+
+    # ----- immutable acquisition and calibration history -----
+
+    def register_model_calibration(self, calibration: ModelCalibrationRow) -> ModelCalibrationRow:
+        """Store one immutable calibrator, allowing only an exact repeat registration."""
+        self.ensure_extension_schema()
+        self._validate_model_calibration(calibration)
+        columns = (
+            "model_version, calibration_kind, uncertainty_source, mean_shift, std_scale, "
+            "std_floor, fit_source, fit_split_name, fit_row_count, split_sha256, "
+            "artifact_path, artifact_sha256, metadata_json"
+        )
+        values = (
+            calibration.model_version,
+            calibration.calibration_kind,
+            calibration.uncertainty_source,
+            calibration.mean_shift,
+            calibration.std_scale,
+            calibration.std_floor,
+            calibration.fit_source,
+            calibration.fit_split_name,
+            calibration.fit_row_count,
+            calibration.split_sha256,
+            calibration.artifact_path,
+            calibration.artifact_sha256,
+            calibration.metadata_json,
+        )
+        existing = self._conn.execute(
+            f"SELECT {columns} FROM model_calibrations WHERE model_version = ?",
+            (calibration.model_version,),
+        ).fetchone()
+        if existing is not None:
+            if tuple(existing) != values:
+                raise ValueError(
+                    f"model version {calibration.model_version} already has a different calibration"
+                )
+            loaded = self.load_model_calibration(calibration.model_version)
+            assert loaded is not None
+            return loaded
+        self._conn.execute(
+            f"INSERT INTO model_calibrations({columns}) VALUES ({','.join('?' * len(values))})",
+            values,
+        )
+        loaded = self.load_model_calibration(calibration.model_version)
+        assert loaded is not None
+        return loaded
+
+    def load_model_calibration(self, model_version: int) -> ModelCalibrationRow | None:
+        self.ensure_extension_schema()
+        row = self._conn.execute(
+            "SELECT model_version, calibration_kind, uncertainty_source, mean_shift, std_scale, "
+            "std_floor, fit_source, fit_split_name, fit_row_count, split_sha256, artifact_path, "
+            "artifact_sha256, metadata_json, created_at FROM model_calibrations "
+            "WHERE model_version = ?",
+            (model_version,),
+        ).fetchone()
+        return ModelCalibrationRow(*row) if row is not None else None
+
+    def plan_acquisition_batch(
+        self,
+        batch: AcquisitionBatchRow,
+        selections: Sequence[AcquisitionSelectionRow],
+    ) -> AcquisitionBatchRow:
+        """Atomically persist an immutable planned batch and its pending outcomes."""
+        self.ensure_extension_schema()
+        self._validate_acquisition_plan(batch, selections)
+        self._conn.execute("SAVEPOINT acquisition_plan")
+        try:
+            existing = self.get_acquisition_batch_by_dock_iteration(batch.dock_iteration)
+            if existing is not None:
+                if self._immutable_batch_fields(existing) != self._immutable_batch_fields(batch):
+                    raise ValueError(
+                        f"dock iteration {batch.dock_iteration} already has a different "
+                        "acquisition plan"
+                    )
+                self._conn.execute("RELEASE SAVEPOINT acquisition_plan")
+                return existing
+            self._conn.execute(
+                "INSERT INTO acquisition_batches("
+                "batch_id, dock_iteration, strategy, status, policy_schema_version, policy_json, "
+                "policy_sha256, history_attempt_policy, model_version, atlas_id, atlas_version, "
+                "candidate_count, candidate_watermark, candidate_digest, requested_count, "
+                "selected_count, selection_digest, cap_scope, cap_limit, scheduler_job_id"
+                ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    batch.batch_id,
+                    batch.dock_iteration,
+                    batch.strategy,
+                    batch.status,
+                    batch.policy_schema_version,
+                    batch.policy_json,
+                    batch.policy_sha256,
+                    batch.history_attempt_policy,
+                    batch.model_version,
+                    batch.atlas_id,
+                    batch.atlas_version,
+                    batch.candidate_count,
+                    batch.candidate_watermark,
+                    batch.candidate_digest,
+                    batch.requested_count,
+                    batch.selected_count,
+                    batch.selection_digest,
+                    batch.cap_scope,
+                    batch.cap_limit,
+                    batch.scheduler_job_id,
+                ),
+            )
+            self._conn.executemany(
+                "INSERT INTO acquisition_selections("
+                "batch_id, selection_rank, spacehastenid, clusterid, model_version, raw_mean, "
+                "raw_epistemic_std, calibrated_mean, calibrated_std, p_hit, "
+                "expected_improvement, quality, "
+                "support_before, support_after, marginal_reward, crowding_penalty, final_utility, "
+                "cluster_count_before, cap_reached_after, contributions_json"
+                ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                [
+                    (
+                        selection.batch_id,
+                        selection.selection_rank,
+                        selection.spacehastenid,
+                        selection.clusterid,
+                        selection.model_version,
+                        selection.raw_mean,
+                        selection.raw_epistemic_std,
+                        selection.calibrated_mean,
+                        selection.calibrated_std,
+                        selection.p_hit,
+                        selection.expected_improvement,
+                        selection.quality,
+                        selection.support_before,
+                        selection.support_after,
+                        selection.marginal_reward,
+                        selection.crowding_penalty,
+                        selection.final_utility,
+                        selection.cluster_count_before,
+                        int(selection.cap_reached_after),
+                        selection.contributions_json,
+                    )
+                    for selection in selections
+                ],
+            )
+            self._conn.executemany(
+                "INSERT INTO acquisition_outcomes(batch_id, spacehastenid, status) "
+                "VALUES (?, ?, 'pending')",
+                [(batch.batch_id, selection.spacehastenid) for selection in selections],
+            )
+            self._conn.execute("RELEASE SAVEPOINT acquisition_plan")
+        except BaseException:
+            self._conn.execute("ROLLBACK TO SAVEPOINT acquisition_plan")
+            self._conn.execute("RELEASE SAVEPOINT acquisition_plan")
+            raise
+        loaded = self.get_acquisition_batch(batch.batch_id)
+        assert loaded is not None
+        return loaded
+
+    def get_acquisition_batch(self, batch_id: str) -> AcquisitionBatchRow | None:
+        self.ensure_extension_schema()
+        row = self._conn.execute(
+            "SELECT batch_id, dock_iteration, strategy, status, policy_schema_version, "
+            "policy_json, policy_sha256, history_attempt_policy, model_version, atlas_id, "
+            "atlas_version, candidate_count, candidate_watermark, candidate_digest, "
+            "requested_count, selected_count, "
+            "selection_digest, cap_scope, cap_limit, scheduler_job_id, created_at, submitted_at, "
+            "completed_at FROM acquisition_batches WHERE batch_id = ?",
+            (batch_id,),
+        ).fetchone()
+        return AcquisitionBatchRow(*row) if row is not None else None
+
+    def get_acquisition_batch_by_dock_iteration(
+        self, dock_iteration: int
+    ) -> AcquisitionBatchRow | None:
+        self.ensure_extension_schema()
+        row = self._conn.execute(
+            "SELECT batch_id FROM acquisition_batches WHERE dock_iteration = ?", (dock_iteration,)
+        ).fetchone()
+        return self.get_acquisition_batch(str(row[0])) if row is not None else None
+
+    def load_acquisition_selections(self, batch_id: str) -> list[AcquisitionSelectionRow]:
+        self.ensure_extension_schema()
+        rows = self._conn.execute(
+            "SELECT batch_id, selection_rank, spacehastenid, clusterid, model_version, raw_mean, "
+            "raw_epistemic_std, calibrated_mean, calibrated_std, p_hit, "
+            "expected_improvement, quality, "
+            "support_before, support_after, marginal_reward, crowding_penalty, final_utility, "
+            "cluster_count_before, cap_reached_after, contributions_json "
+            "FROM acquisition_selections "
+            "WHERE batch_id = ? ORDER BY selection_rank",
+            (batch_id,),
+        ).fetchall()
+        return [
+            AcquisitionSelectionRow(
+                batch_id=row[0],
+                selection_rank=row[1],
+                spacehastenid=row[2],
+                clusterid=row[3],
+                model_version=row[4],
+                raw_mean=row[5],
+                raw_epistemic_std=row[6],
+                calibrated_mean=row[7],
+                calibrated_std=row[8],
+                p_hit=row[9],
+                expected_improvement=row[10],
+                quality=row[11],
+                support_before=row[12],
+                support_after=row[13],
+                marginal_reward=row[14],
+                crowding_penalty=row[15],
+                final_utility=row[16],
+                cluster_count_before=row[17],
+                cap_reached_after=bool(row[18]),
+                contributions_json=row[19],
+            )
+            for row in rows
+        ]
+
+    def load_acquisition_outcomes(self, batch_id: str) -> list[AcquisitionOutcomeRow]:
+        self.ensure_extension_schema()
+        rows = self._conn.execute(
+            "SELECT batch_id, spacehastenid, status, dock_score, source, updated_at "
+            "FROM acquisition_outcomes WHERE batch_id = ? ORDER BY spacehastenid",
+            (batch_id,),
+        ).fetchall()
+        return [AcquisitionOutcomeRow(*row) for row in rows]
+
+    def update_acquisition_submitted(self, batch_id: str, scheduler_job_id: str) -> None:
+        self.ensure_extension_schema()
+        batch = self.get_acquisition_batch(batch_id)
+        if batch is None:
+            raise KeyError(f"no acquisition batch {batch_id!r}")
+        if batch.status == "submitted":
+            if batch.scheduler_job_id == scheduler_job_id:
+                return
+            raise ValueError(f"batch {batch_id!r} is already submitted with a different job ID")
+        if batch.status not in ("planned", "failed"):
+            raise ValueError(f"batch {batch_id!r} cannot be submitted from status {batch.status!r}")
+        cursor = self._conn.execute(
+            "UPDATE acquisition_batches SET status = 'submitted', scheduler_job_id = ?, "
+            "submitted_at = CURRENT_TIMESTAMP, completed_at = NULL WHERE batch_id = ?",
+            (scheduler_job_id, batch_id),
+        )
+        if cursor.rowcount != 1:
+            raise ValueError(f"batch {batch_id!r} is not a planned acquisition batch")
+
+    def mark_acquisition_batch_failed(self, batch_id: str) -> None:
+        self.ensure_extension_schema()
+        batch = self.get_acquisition_batch(batch_id)
+        if batch is None:
+            raise KeyError(f"no acquisition batch {batch_id!r}")
+        if batch.status == "failed":
+            return
+        cursor = self._conn.execute(
+            "UPDATE acquisition_batches SET status = 'failed', completed_at = CURRENT_TIMESTAMP "
+            "WHERE batch_id = ? AND status IN ('planned', 'submitted')",
+            (batch_id,),
+        )
+        if cursor.rowcount != 1:
+            raise ValueError(f"batch {batch_id!r} cannot be marked failed")
+
+    def finalize_acquisition_outcomes(
+        self,
+        batch_id: str,
+        outcomes: Mapping[int, tuple[float, str]] | Sequence[AcquisitionOutcomeUpdate],
+        *,
+        hit_threshold: float,
+    ) -> list[AcquisitionRegionSummaryRow]:
+        """Persist immutable scored outcomes, resolve missing selections, and summarize regions."""
+        self.ensure_extension_schema()
+        if not math.isfinite(hit_threshold):
+            raise ValueError("hit_threshold must be finite")
+        updates = self._normalize_outcome_updates(outcomes)
+        self._conn.execute("SAVEPOINT acquisition_finalize")
+        try:
+            batch = self.get_acquisition_batch(batch_id)
+            if batch is None:
+                raise KeyError(f"no acquisition batch {batch_id!r}")
+            planned = {
+                int(row[0]): (str(row[1]), row[2], row[3])
+                for row in self._conn.execute(
+                    "SELECT spacehastenid, status, dock_score, source FROM acquisition_outcomes "
+                    "WHERE batch_id = ?",
+                    (batch_id,),
+                )
+            }
+            unexpected = set(updates).difference(planned)
+            if unexpected:
+                raise ValueError(
+                    f"outcomes include IDs not planned for batch {batch_id!r}: {sorted(unexpected)}"
+                )
+            for identifier, update in updates.items():
+                status, score, source = planned[identifier]
+                if status in ("pending", "unresolved"):
+                    self._conn.execute(
+                        "UPDATE acquisition_outcomes SET status = 'scored', dock_score = ?, "
+                        "source = ?, "
+                        "updated_at = CURRENT_TIMESTAMP WHERE batch_id = ? AND spacehastenid = ?",
+                        (update.dock_score, update.source, batch_id, identifier),
+                    )
+                elif status != "scored" or score != update.dock_score or source != update.source:
+                    raise ValueError(
+                        f"conflicting immutable outcome for spacehastenid {identifier}"
+                    )
+            absent = set(planned).difference(updates)
+            if absent:
+                placeholders = ",".join("?" * len(absent))
+                self._conn.execute(
+                    "UPDATE acquisition_outcomes SET status = 'unresolved', "
+                    "updated_at = CURRENT_TIMESTAMP "
+                    f"WHERE batch_id = ? AND status = 'pending' "
+                    f"AND spacehastenid IN ({placeholders})",
+                    (batch_id, *sorted(absent)),
+                )
+            summaries = self._derive_acquisition_region_summaries(batch, hit_threshold)
+            self._conn.execute(
+                "UPDATE acquisition_batches SET status = ?, completed_at = CURRENT_TIMESTAMP "
+                "WHERE batch_id = ?",
+                (
+                    "completed"
+                    if all(summary.unresolved_count == 0 for summary in summaries)
+                    else "partial",
+                    batch_id,
+                ),
+            )
+            self._conn.execute("RELEASE SAVEPOINT acquisition_finalize")
+        except BaseException:
+            self._conn.execute("ROLLBACK TO SAVEPOINT acquisition_finalize")
+            self._conn.execute("RELEASE SAVEPOINT acquisition_finalize")
+            raise
+        return summaries
+
+    def selected_attempt_ids(self, *, before_dock_iteration: int | None = None) -> set[int]:
+        self.ensure_extension_schema()
+        sql = (
+            "SELECT DISTINCT s.spacehastenid FROM acquisition_selections AS s "
+            "JOIN acquisition_batches AS b ON b.batch_id = s.batch_id"
+        )
+        params: tuple[int, ...] = ()
+        if before_dock_iteration is not None:
+            sql += " WHERE b.dock_iteration < ?"
+            params = (before_dock_iteration,)
+        return {int(row[0]) for row in self._conn.execute(sql, params)}
+
+    def prior_observed_hit_counts(
+        self, atlas_id: str, *, before_dock_iteration: int, hit_threshold: float
+    ) -> dict[int, int]:
+        """Count scored historical hits by the cluster stored at selection time."""
+        self.ensure_extension_schema()
+        rows = self._conn.execute(
+            "SELECT s.clusterid, COUNT(*) FROM acquisition_outcomes AS o "
+            "JOIN acquisition_selections AS s ON s.batch_id = o.batch_id "
+            "AND s.spacehastenid = o.spacehastenid "
+            "JOIN acquisition_batches AS b ON b.batch_id = o.batch_id "
+            "WHERE b.atlas_id = ? AND b.dock_iteration < ? "
+            "AND b.status IN ('completed', 'partial') AND o.status = 'scored' "
+            "AND o.dock_score <= ? GROUP BY s.clusterid",
+            (atlas_id, before_dock_iteration, hit_threshold),
+        ).fetchall()
+        return {int(clusterid): int(count) for clusterid, count in rows}
+
+    def load_acquisition_region_summaries(self, batch_id: str) -> list[AcquisitionRegionSummaryRow]:
+        self.ensure_extension_schema()
+        rows = self._conn.execute(
+            "SELECT batch_id, clusterid, prior_observed_hits, selected_count, expected_hit_mass, "
+            "scored_count, observed_hits, unresolved_count, cap_reached "
+            "FROM acquisition_region_summaries WHERE batch_id = ? ORDER BY clusterid",
+            (batch_id,),
+        ).fetchall()
+        return [
+            AcquisitionRegionSummaryRow(
+                batch_id=row[0],
+                clusterid=row[1],
+                prior_observed_hits=row[2],
+                selected_count=row[3],
+                expected_hit_mass=row[4],
+                scored_count=row[5],
+                observed_hits=row[6],
+                unresolved_count=row[7],
+                cap_reached=bool(row[8]),
+            )
+            for row in rows
+        ]
+
+    @staticmethod
+    def _normalize_outcome_updates(
+        outcomes: Mapping[int, tuple[float, str]] | Sequence[AcquisitionOutcomeUpdate],
+    ) -> dict[int, AcquisitionOutcomeUpdate]:
+        items = (
+            (
+                AcquisitionOutcomeUpdate(identifier, score, source)
+                for identifier, (score, source) in outcomes.items()
+            )
+            if isinstance(outcomes, Mapping)
+            else iter(outcomes)
+        )
+        normalized: dict[int, AcquisitionOutcomeUpdate] = {}
+        for update in items:
+            if update.spacehastenid in normalized:
+                raise ValueError(f"duplicate outcome for spacehastenid {update.spacehastenid}")
+            if not math.isfinite(update.dock_score):
+                raise ValueError("outcome dock scores must be finite")
+            normalized[update.spacehastenid] = update
+        return normalized
+
+    @staticmethod
+    def _validate_acquisition_plan(
+        batch: AcquisitionBatchRow, selections: Sequence[AcquisitionSelectionRow]
+    ) -> None:
+        if batch.status != "planned":
+            raise ValueError("new acquisition batches must have planned status")
+        if not batch.batch_id or not batch.strategy:
+            raise ValueError("batch_id and strategy must be non-empty")
+        if batch.dock_iteration < 0:
+            raise ValueError("dock_iteration must be non-negative")
+        if batch.policy_schema_version < 1:
+            raise ValueError("policy_schema_version must be positive")
+        if batch.history_attempt_policy not in ("once_per_campaign", "unscored_eligible"):
+            raise ValueError("history_attempt_policy is not recognized")
+        if batch.model_version < 0 or batch.atlas_version < 0:
+            raise ValueError("model_version and atlas_version must be non-negative")
+        if not batch.atlas_id or batch.candidate_count < 1 or batch.candidate_watermark < 1:
+            raise ValueError("atlas_id, candidate_count, and candidate_watermark must be positive")
+        if not batch.candidate_digest:
+            raise ValueError("candidate_digest must be non-empty")
+        if batch.selected_count != len(selections):
+            raise ValueError("selected_count does not match the selections provided")
+        if batch.requested_count != batch.selected_count:
+            raise ValueError(
+                "requested_count must equal selected_count for a complete portfolio plan"
+            )
+        if batch.requested_count < 1:
+            raise ValueError("requested_count must be positive")
+        if batch.candidate_count < batch.selected_count:
+            raise ValueError("candidate_count cannot be below selected_count")
+        if batch.cap_scope is None:
+            if batch.cap_limit is not None:
+                raise ValueError("cap_limit requires a cap_scope")
+        elif batch.cap_scope == "batch":
+            if batch.cap_limit is None or batch.cap_limit < 1:
+                raise ValueError("batch cap_scope requires a positive cap_limit")
+        else:
+            raise ValueError("cap_scope is not recognized")
+        if sha256_hex(batch.policy_json) != batch.policy_sha256:
+            raise ValueError("policy_sha256 does not match policy_json")
+        try:
+            if canonical_json(json.loads(batch.policy_json)) != batch.policy_json:
+                raise ValueError("policy_json must be canonical JSON")
+        except json.JSONDecodeError as exc:
+            raise ValueError("policy_json must be valid JSON") from exc
+        ranks = [selection.selection_rank for selection in selections]
+        if sorted(ranks) != list(range(1, len(selections) + 1)):
+            raise ValueError("selection ranks must be contiguous and start at one")
+        identifiers = [selection.spacehastenid for selection in selections]
+        if len(set(identifiers)) != len(identifiers):
+            raise ValueError("selection spacehastenids must be unique within a batch")
+        if any(selection.batch_id != batch.batch_id for selection in selections):
+            raise ValueError("all selections must belong to the planned batch")
+        for selection in selections:
+            try:
+                if (
+                    canonical_json(json.loads(selection.contributions_json))
+                    != selection.contributions_json
+                ):
+                    raise ValueError("contributions_json must be canonical JSON")
+            except json.JSONDecodeError as exc:
+                raise ValueError("contributions_json must be valid JSON") from exc
+            if (
+                selection.spacehastenid < 0
+                or selection.clusterid < 0
+                or selection.model_version < 0
+                or selection.cluster_count_before < 0
+            ):
+                raise ValueError("selection IDs, model version, and cluster count are invalid")
+            values = (
+                selection.raw_mean,
+                selection.raw_epistemic_std,
+                selection.calibrated_mean,
+                selection.calibrated_std,
+                selection.p_hit,
+                selection.expected_improvement,
+                selection.quality,
+                selection.support_before,
+                selection.support_after,
+                selection.marginal_reward,
+                selection.crowding_penalty,
+                selection.final_utility,
+            )
+            if not all(math.isfinite(value) for value in values):
+                raise ValueError("selection diagnostics must be finite")
+            if selection.raw_epistemic_std < 0 or selection.calibrated_std <= 0:
+                raise ValueError("selection uncertainty standard deviations are invalid")
+            if not 0.0 <= selection.p_hit <= 1.0:
+                raise ValueError("selection p_hit must be in [0, 1]")
+            if selection.support_after < selection.support_before:
+                raise ValueError("selection support_after cannot be below support_before")
+            if not isinstance(selection.cap_reached_after, bool):
+                raise ValueError("selection cap_reached_after must be a bool")
+        if acquisition_selection_digest(selections) != batch.selection_digest:
+            raise ValueError("selection_digest does not match the selections provided")
+
+    @staticmethod
+    def _validate_model_calibration(calibration: ModelCalibrationRow) -> None:
+        if calibration.model_version < 0:
+            raise ValueError("calibration model_version must be non-negative")
+        if not calibration.calibration_kind or not calibration.uncertainty_source:
+            raise ValueError("calibration kind and uncertainty source must be non-empty")
+        if not all(
+            math.isfinite(value)
+            for value in (calibration.mean_shift, calibration.std_scale, calibration.std_floor)
+        ):
+            raise ValueError("calibration numeric values must be finite")
+        if calibration.std_scale <= 0 or calibration.std_floor < 0:
+            raise ValueError("calibration std_scale must be positive and std_floor non-negative")
+        if calibration.fit_row_count is not None and calibration.fit_row_count < 0:
+            raise ValueError("calibration fit_row_count must be non-negative")
+        try:
+            if canonical_json(json.loads(calibration.metadata_json)) != calibration.metadata_json:
+                raise ValueError("calibration metadata_json must be canonical JSON")
+        except json.JSONDecodeError as exc:
+            raise ValueError("calibration metadata_json must be valid JSON") from exc
+
+    @staticmethod
+    def _immutable_batch_fields(batch: AcquisitionBatchRow) -> tuple[object, ...]:
+        return (
+            batch.batch_id,
+            batch.dock_iteration,
+            batch.strategy,
+            batch.policy_schema_version,
+            batch.policy_json,
+            batch.policy_sha256,
+            batch.history_attempt_policy,
+            batch.model_version,
+            batch.atlas_id,
+            batch.atlas_version,
+            batch.candidate_count,
+            batch.candidate_watermark,
+            batch.candidate_digest,
+            batch.requested_count,
+            batch.selected_count,
+            batch.selection_digest,
+            batch.cap_scope,
+            batch.cap_limit,
+        )
+
+    def _derive_acquisition_region_summaries(
+        self, batch: AcquisitionBatchRow, hit_threshold: float
+    ) -> list[AcquisitionRegionSummaryRow]:
+        prior = self.prior_observed_hit_counts(
+            batch.atlas_id,
+            before_dock_iteration=batch.dock_iteration,
+            hit_threshold=hit_threshold,
+        )
+        rows = self._conn.execute(
+            "SELECT s.clusterid, COUNT(*), SUM(s.p_hit), "
+            "SUM(CASE WHEN o.status = 'scored' THEN 1 ELSE 0 END), "
+            "SUM(CASE WHEN o.status = 'scored' AND o.dock_score <= ? THEN 1 ELSE 0 END), "
+            "SUM(CASE WHEN o.status = 'unresolved' THEN 1 ELSE 0 END), MAX(s.cap_reached_after) "
+            "FROM acquisition_selections AS s JOIN acquisition_outcomes AS o "
+            "ON o.batch_id = s.batch_id AND o.spacehastenid = s.spacehastenid "
+            "WHERE s.batch_id = ? GROUP BY s.clusterid ORDER BY s.clusterid",
+            (hit_threshold, batch.batch_id),
+        ).fetchall()
+        summaries = [
+            AcquisitionRegionSummaryRow(
+                batch_id=batch.batch_id,
+                clusterid=int(clusterid),
+                prior_observed_hits=prior.get(int(clusterid), 0),
+                selected_count=int(selected_count),
+                expected_hit_mass=float(expected_hit_mass),
+                scored_count=int(scored_count),
+                observed_hits=int(observed_hits),
+                unresolved_count=int(unresolved_count),
+                cap_reached=bool(cap_reached),
+            )
+            for (
+                clusterid,
+                selected_count,
+                expected_hit_mass,
+                scored_count,
+                observed_hits,
+                unresolved_count,
+                cap_reached,
+            ) in rows
+        ]
+        self._conn.execute(
+            "DELETE FROM acquisition_region_summaries WHERE batch_id = ?", (batch.batch_id,)
+        )
+        self._conn.executemany(
+            "INSERT INTO acquisition_region_summaries("
+            "batch_id, clusterid, prior_observed_hits, selected_count, expected_hit_mass, "
+            "scored_count, observed_hits, unresolved_count, cap_reached"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    summary.batch_id,
+                    summary.clusterid,
+                    summary.prior_observed_hits,
+                    summary.selected_count,
+                    summary.expected_hit_mass,
+                    summary.scored_count,
+                    summary.observed_hits,
+                    summary.unresolved_count,
+                    int(summary.cap_reached),
+                )
+                for summary in summaries
+            ],
+        )
+        return summaries
 
     # ----- lookups -----
 
@@ -1136,6 +1996,12 @@ class Database:
 
 
 __all__ = [
+    "AcquisitionBatchRow",
+    "AcquisitionOutcomeRow",
+    "AcquisitionOutcomeUpdate",
+    "AcquisitionRegionSummaryRow",
+    "AcquisitionSelectionRow",
+    "acquisition_selection_digest",
     "ClusterAtlasAssignmentRow",
     "ClusterAtlasCentroidRow",
     "ClusterAtlasRow",
@@ -1145,10 +2011,13 @@ __all__ = [
     "DataRow",
     "EXTENSION_SCHEMA_STATEMENTS",
     "ExportRow",
+    "canonical_json",
     "ModelRow",
+    "ModelCalibrationRow",
     "PredictionRow",
     "PropertyRanges",
     "PropertyRow",
     "SCHEMA_STATEMENTS",
+    "sha256_hex",
     "SimsearchCycleStats",
 ]
