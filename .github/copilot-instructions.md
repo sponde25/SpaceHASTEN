@@ -35,6 +35,10 @@ Prefix all Python execution with the conda activation:
 source /wrk/lurvas/miniconda3/etc/profile.d/conda.sh && conda activate spacehasten-quick && python3 ...
 ```
 
+## Progress Reporting
+
+Long-running scripts and analysis loops should expose progress whenever practical. Prefer a progress bar such as `tqdm`, or periodic structured logging when a progress bar is unsuitable. Include completed and total work, elapsed time, processing rate, and ETA when the total is known.
+
 ## System Conda Environments (for SLURM jobs)
 
 For jobs running on compute nodes via SLURM, use the system-wide conda at `/data/programs/oce/`:
@@ -48,6 +52,16 @@ Available environments on compute nodes:
 - `fpsim2-0.7.3` - For clustering (has rdkit, FPSim2, tqdm)
 
 **Important:** The local `spacehasten-quick` environment is NOT available on compute nodes. Always use the system conda environments for SLURM-submitted jobs.
+
+## Large Database Analysis
+
+For I/O-intensive analysis of large SQLite databases, keep the canonical database under `/data/$USER` but stage a read-only working copy under `/fastwrk/$USER/<project>/<run>` on the compute node selected for the job. `/wrk` and `/fastwrk` paths exist on every node but are node-local; copies created on the login host or another compute node are not shared. Stage from shared `/data` inside the job, run scans and temporary analysis on that node's `/fastwrk`, then copy only validated final results back to `/data/$USER`.
+
+- Treat the canonical database on `/data` as immutable during analysis.
+- If the source database may have an active writer, use SQLite's backup mechanism rather than copying the file directly.
+- Verify the staged copy before analysis, for example with `PRAGMA quick_check` and expected row counts.
+- Do not copy a modified analysis database back over the canonical database unless the user explicitly requests it.
+- Use a run-specific directory, preferably including `$SLURM_JOB_ID`, to prevent concurrent jobs from sharing or overwriting temporary files.
 
 ## SpaceHASTEN Installation
 
