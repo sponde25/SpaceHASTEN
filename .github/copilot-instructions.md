@@ -2,14 +2,17 @@
 
 ## Environment
 
-Conda is at `/wrk/lurvas/miniconda3`. Always activate it before running any Python or shell commands:
+Local conda initialization is provided by `/wrk/setup_conda.sh`. Always activate it before
+running Python or project shell commands:
 
 ```bash
-source /wrk/lurvas/miniconda3/etc/profile.d/conda.sh
+source /wrk/setup_conda.sh
 conda activate spacehasten-quick
 ```
 
-The primary environment is `spacehasten-quick` (Python 3.11, chemprop 2.1.2, lightning, FPSim2).
+The primary environment is `spacehasten-quick` at
+`/fastwrk/$USER/miniconda3/envs/spacehasten-quick` (Python 3.11). Verify commands resolve to this
+environment when behavior is ambiguous.
 
 ## Terminal
 
@@ -32,12 +35,36 @@ Do not create PRs against the upstream/original SpaceHASTEN repository unless ex
 Prefix all Python execution with the conda activation:
 
 ```bash
-source /wrk/lurvas/miniconda3/etc/profile.d/conda.sh && conda activate spacehasten-quick && python3 ...
+source /wrk/setup_conda.sh && conda activate spacehasten-quick && python3 ...
 ```
 
 ## Progress Reporting
 
 Long-running scripts and analysis loops should expose progress whenever practical. Prefer a progress bar such as `tqdm`, or periodic structured logging when a progress bar is unsuitable. Include completed and total work, elapsed time, processing rate, and ETA when the total is known.
+
+## Agent Delegation
+
+Use `general`/Sol agents for complex analysis, architecture, scientific reasoning, integration,
+and multi-file implementation. Their prompts must include the exact workspace, owned files,
+input/output paths, environment commands, scientific invariants, and verification commands.
+
+Use Terra only for narrow, mechanical work after the main agent has already produced a complete
+implementation plan. Suitable Terra tasks include a bounded file edit, compilation, formatting,
+or deterministic data extraction from explicitly named inputs. Do not delegate open-ended
+codebase exploration, scientific analysis design, architecture, report synthesis, or multi-stage
+workflow implementation to Terra.
+
+Every delegated prompt must state these environment rules explicitly:
+
+- Workspace: `/data/$USER/PROJECTS/SpaceHASTEN`.
+- Local setup: `source /wrk/setup_conda.sh && conda activate spacehasten-quick`.
+- Expected local Python: `/fastwrk/$USER/miniconda3/envs/spacehasten-quick/bin/python3`.
+- Never use another user's filesystem namespace or conda environment.
+- SLURM jobs use `source /data/programs/oce/actoce` and the approved system environment.
+- Node-local temporary paths use `/fastwrk/$USER/.../${SLURM_JOB_ID}`.
+
+Independently review and verify all delegated output before integrating it. A subagent's successful
+return is not evidence that scientific or runtime requirements were met.
 
 ## System Conda Environments (for SLURM jobs)
 
@@ -66,7 +93,7 @@ For I/O-intensive analysis of large SQLite databases, keep the canonical databas
 ## SpaceHASTEN Installation
 
 ### Installation Path
-**Primary installation**: `/data/lurvas/projects/coding/SpaceHASTEN`
+**Repository workspace**: the current SpaceHASTEN checkout
 
 ### System Conda Environments (for SLURM jobs)
 For jobs running on compute nodes via SLURM, use the system-wide conda at `/data/programs/oce/`:
@@ -91,7 +118,7 @@ SLURM_PARTITION = jobs
 
 ### Installation Steps
 1. Run the installer: `python3 install_spacehasten.py`
-2. Specify installation path: `/data/lurvas/projects/coding/spacehasten_test/`
+2. Specify an installation path owned by the current user under `/data/$USER/`.
 3. Use system conda paths for BioSolveIT tools
 4. Set conda environments as shown above
 5. Install `pigz` system-wide: `sudo apt install pigz`
@@ -99,11 +126,13 @@ SLURM_PARTITION = jobs
 ### Verification
 Run end-to-end verification:
 ```bash
-/data/lurvas/projects/coding/spacehasten_test/verify
+/data/$USER/<installation>/verify
 ```
 
 This tests: clustering, docking, chemprop training, SpaceLight, and FTrees.
 
 ## File System Restrictions
 
-**Do not modify any files outside `/data/lurvas`, `/wrk/lurvas`, or `/fastwrk/lurvas`.** All other directories are read-only.
+Modify only user-owned project and analysis paths under `/data/$USER`, `/wrk/$USER`, and
+`/fastwrk/$USER`, unless the user explicitly approves another location. Treat shared system
+software under `/data/programs` as read-only.

@@ -9,7 +9,9 @@ __pycache__/
 *.pyc
 .env
 opencode.json
-overnight_experiments/
+overnight_experiments/*
+!overnight_experiments/ANALYSIS_WORKFLOW.md
+!overnight_experiments/FUTURE_RUN_ANALYSIS_PROMPT.md
 quick_test/*
 !quick_test/test_fast_auto.sh
 !quick_test/test_fast_acquisition.sh
