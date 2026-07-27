@@ -183,6 +183,37 @@ def test_outer_discovery_prefers_canonical_run_local_database(tmp_path: Path) ->
     assert discover_run(outer).database_path == database.resolve()
 
 
+def test_database_override_preserves_run_acquisition_discovery(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outer = tmp_path / "experiment"
+    outer.mkdir()
+    (outer / "run_local").symlink_to(workspace, target_is_directory=True)
+    acquisition = outer / "run_shared" / "docking" / "iter1" / "acquisition.csv"
+    _acquisition(acquisition, [2, 3], atlas_id="atlas-a")
+    snapshot = _database(tmp_path / "snapshots" / "final.dbsh")
+
+    context = discover_run(outer, database_path=snapshot)
+
+    assert context.database_path == snapshot.resolve()
+    assert context.input_path == outer.absolute()
+    assert context.acquisition_paths == ((1, acquisition.absolute()),)
+    assert context.capabilities.has_data
+
+
+def test_database_override_must_exist_and_contain_data(tmp_path: Path) -> None:
+    run = tmp_path / "run"
+    run.mkdir()
+    _database(run / "run.dbsh")
+    with pytest.raises(FileNotFoundError):
+        discover_run(run, database_path=tmp_path / "missing.dbsh")
+
+    invalid = tmp_path / "invalid.dbsh"
+    sqlite3.connect(invalid).close()
+    with pytest.raises(ValueError, match="does not contain a data table"):
+        discover_run(run, database_path=invalid)
+
+
 def test_seed_exclusion_threshold_equality_and_legacy_layout(tmp_path: Path) -> None:
     database = _database(tmp_path / "run" / "run.dbsh", atlas_ids=())
     _acquisition(tmp_path / "run" / "run_shared" / "iter1" / "acquisition.csv", [1, 2, 2])

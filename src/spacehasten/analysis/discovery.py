@@ -9,20 +9,32 @@ from .database import ReadOnlyDatabase
 from .models import RunContext
 
 
-def discover_run(run_or_db: str | Path) -> RunContext:
-    """Discover a run from its outer directory, local/shared roots, manifest, or DB."""
+def discover_run(
+    run_or_db: str | Path,
+    *,
+    database_path: str | Path | None = None,
+) -> RunContext:
+    """Discover run artifacts, optionally reading data from an immutable DB override."""
     supplied = Path(run_or_db).expanduser()
     if not supplied.exists():
         raise FileNotFoundError(supplied)
     input_path = supplied.absolute()
-    database_path = supplied.resolve() if supplied.is_file() else _discover_database(input_path)
+    database = (
+        Path(database_path).expanduser().resolve()
+        if database_path is not None
+        else supplied.resolve()
+        if supplied.is_file()
+        else _discover_database(input_path)
+    )
+    if not database.is_file():
+        raise FileNotFoundError(database)
     shared_root = _discover_shared_root(input_path)
     acquisition_paths = _discover_acquisitions(shared_root) if shared_root else ()
-    with ReadOnlyDatabase(database_path) as database:
-        capabilities = database.capabilities()
+    with ReadOnlyDatabase(database) as source:
+        capabilities = source.capabilities()
     if not capabilities.has_data:
-        raise ValueError(f"{database_path} does not contain a data table")
-    return RunContext(input_path, database_path, shared_root, acquisition_paths, capabilities)
+        raise ValueError(f"{database} does not contain a data table")
+    return RunContext(input_path, database, shared_root, acquisition_paths, capabilities)
 
 
 def _candidate_roots(root: Path) -> tuple[Path, ...]:

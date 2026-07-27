@@ -14,6 +14,14 @@ from spacehasten.analysis import AnalysisConfig, analyze_run, discover_run
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("run_or_db", metavar="RUN_OR_DB")
+    parser.add_argument(
+        "--database",
+        type=Path,
+        help=(
+            "Optional immutable database snapshot. Run layout and acquisition files are still "
+            "discovered from RUN_OR_DB."
+        ),
+    )
     parser.add_argument("--analysis-root", type=Path)
     parser.add_argument("--hit-threshold", type=float, required=True)
     parser.add_argument("--cutoff", type=float, action="append", default=[])
@@ -32,7 +40,7 @@ def main() -> None:
         while (step > 0 and start <= stop) or (step < 0 and start >= stop):
             cutoffs.append(start)
             start += step
-    context = discover_run(arguments.run_or_db)
+    context = discover_run(arguments.run_or_db, database_path=arguments.database)
     root = arguments.analysis_root or (context.database_path.parent / "analysis")
     summary = analyze_run(
         context,
