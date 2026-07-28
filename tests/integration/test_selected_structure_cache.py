@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -92,6 +93,32 @@ def _database(path: Path) -> Path:
         database.apply_dock_scores(
             [(score, 1, identifier) for identifier, (score, _source) in scores.items()]
         )
+        retry = replace(selections[0], batch_id="retry", selection_rank=1)
+        database.plan_acquisition_batch(
+            AcquisitionBatchRow(
+                batch_id="retry",
+                dock_iteration=2,
+                strategy="portfolio",
+                status="planned",
+                policy_schema_version=1,
+                policy_json=policy,
+                policy_sha256=sha256_hex(policy),
+                history_attempt_policy="unscored_eligible",
+                model_version=0,
+                atlas_id="atlas",
+                atlas_version=0,
+                candidate_count=1,
+                candidate_watermark=max(identifiers),
+                candidate_digest="retry-candidate-digest",
+                requested_count=1,
+                selected_count=1,
+                selection_digest=acquisition_selection_digest([retry]),
+                cap_scope=None,
+                cap_limit=None,
+            ),
+            [retry],
+        )
+        database.finalize_acquisition_outcomes("retry", {}, hit_threshold=-9.7)
     return path
 
 
@@ -117,9 +144,11 @@ def test_selected_structure_cache_end_to_end(tmp_path: Path) -> None:
     _run("combine", "--output-root", str(output))
 
     assert (output / "logs").is_dir()
+    assert "export PYTHONPATH=" in (output / "submit.sh").read_text()
     receipt = json.loads((output / "_SUCCESS.json").read_text())
     assert receipt["status"] == "complete"
     assert receipt["rows"] == 4
+    assert receipt["selected_attempts"] == 5
     assert receipt["task_count"] == 2
     with np.load(output / "fingerprints.npz") as data:
         assert data["spacehastenid"].shape == (4,)

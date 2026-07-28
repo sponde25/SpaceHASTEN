@@ -18,12 +18,41 @@ from spacehasten.analysis import umap as landmark_umap
 LOGGER = logging.getLogger("transform_landmark_umap_chunk")
 
 
+def load_fingerprints(
+    index_path: Path | None,
+    cache_path: Path | None,
+) -> tuple[np.ndarray, np.ndarray]:
+    if index_path is not None:
+        engine = FPSim2Engine(str(index_path))
+        if (
+            engine.fp_type != landmark_umap.EXPECTED_FP_TYPE
+            or engine.fp_params != landmark_umap.EXPECTED_FP_PARAMS
+        ):
+            raise ValueError("fingerprint index does not use Morgan-2 1024-bit fingerprints")
+        return (
+            np.asarray(engine.fps[:, 0], dtype=np.uint64),
+            np.asarray(engine.fps[:, 1:-1], dtype=np.uint64),
+        )
+    assert cache_path is not None
+    with np.load(cache_path, allow_pickle=False) as cache:
+        identifiers = cache["spacehastenid"].astype(np.uint64, copy=True)
+        words = cache["words"].astype(np.uint64, copy=True)
+    if identifiers.ndim != 1 or words.shape != (len(identifiers), 16):
+        raise ValueError("selected fingerprint cache must contain IDs and N x 16 words")
+    if len(np.unique(identifiers)) != len(identifiers):
+        raise ValueError("selected fingerprint cache contains duplicate IDs")
+    return identifiers, words
+
+
 def transform_chunk(args: argparse.Namespace) -> Path:
-    index_path = args.fp_index.resolve()
+    index_path = args.fp_index.resolve() if args.fp_index else None
+    cache_path = args.fingerprints.resolve() if args.fingerprints else None
     model_path = args.model.resolve()
     chunks_dir = args.chunks_dir.resolve()
-    if not index_path.is_file():
-        raise FileNotFoundError(index_path)
+    source_path = index_path or cache_path
+    assert source_path is not None
+    if not source_path.is_file():
+        raise FileNotFoundError(source_path)
     if not model_path.is_file():
         raise FileNotFoundError(model_path)
     chunks_dir.mkdir(parents=True, exist_ok=True)
@@ -34,15 +63,8 @@ def transform_chunk(args: argparse.Namespace) -> Path:
     bundle = joblib.load(model_path)
     reducer = bundle["reducer"]
     reducer.verbose = False
-    engine = FPSim2Engine(str(index_path))
-    if (
-        engine.fp_type != landmark_umap.EXPECTED_FP_TYPE
-        or engine.fp_params != landmark_umap.EXPECTED_FP_PARAMS
-    ):
-        raise ValueError("fingerprint index does not use Morgan-2 1024-bit fingerprints")
-
-    fps = engine.fps
-    total = len(fps)
+    identifiers, words = load_fingerprints(index_path, cache_path)
+    total = len(identifiers)
     start = total * (args.task_index - 1) // args.task_count
     stop = total * args.task_index // args.task_count
     coordinates = np.empty((stop - start, 2), dtype=np.float32)
@@ -56,7 +78,7 @@ def transform_chunk(args: argparse.Namespace) -> Path:
     ) as progress:
         for offset in range(start, stop, args.batch_size):
             batch_stop = min(offset + args.batch_size, stop)
-            batch = landmark_umap.unpack_fingerprints(fps[offset:batch_stop, 1:-1])
+            batch = landmark_umap.unpack_fingerprints(words[offset:batch_stop])
             coordinates[offset - start : batch_stop - start] = reducer.transform(batch).astype(
                 np.float32, copy=False
             )
@@ -66,7 +88,7 @@ def transform_chunk(args: argparse.Namespace) -> Path:
     with temporary.open("wb") as handle:
         np.savez_compressed(
             handle,
-            spacehastenid=np.asarray(fps[start:stop, 0], dtype=np.uint64),
+            spacehastenid=identifiers[start:stop],
             umap=coordinates,
             start=np.asarray(start),
             stop=np.asarray(stop),
@@ -78,7 +100,9 @@ def transform_chunk(args: argparse.Namespace) -> Path:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--fp-index", type=Path, required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--fp-index", type=Path)
+    source.add_argument("--fingerprints", type=Path)
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--chunks-dir", type=Path, required=True)
     parser.add_argument("--task-index", type=int, required=True)

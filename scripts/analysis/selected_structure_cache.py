@@ -106,14 +106,29 @@ def command_prepare(args: argparse.Namespace) -> None:
     if args.task_count < 1:
         raise ValueError("task count must be positive")
     write_selected_manifest(manifest_path, rows)
-    task_count = min(args.task_count, len(rows))
+    compounds: list[dict[str, Any]] = []
+    by_identifier: dict[int, tuple[str, str]] = {}
+    reghashes: set[str] = set()
+    for row in rows:
+        identifier = int(row["spacehastenid"])
+        identity = (str(row["reghash"]), str(row["smiles"]))
+        if identifier in by_identifier:
+            if by_identifier[identifier] != identity:
+                raise ValueError(f"selected ID maps to multiple structures: {identifier}")
+            continue
+        if identity[0] in reghashes:
+            raise ValueError(f"selected reghash maps to multiple IDs: {identity[0]}")
+        by_identifier[identifier] = identity
+        reghashes.add(identity[0])
+        compounds.append(row)
+    task_count = min(args.task_count, len(compounds))
     (root / "logs").mkdir(exist_ok=True)
     chunks = []
     input_fields = ("spacehastenid", "reghash", "smiles")
     for task in tqdm(range(1, task_count + 1), desc="structure inputs", unit="chunk"):
-        start = len(rows) * (task - 1) // task_count
-        stop = len(rows) * task // task_count
-        subset = [{name: row[name] for name in input_fields} for row in rows[start:stop]]
+        start = len(compounds) * (task - 1) // task_count
+        stop = len(compounds) * task // task_count
+        subset = [{name: row[name] for name in input_fields} for row in compounds[start:stop]]
         path = root / "inputs" / f"selected_{task:04d}_of_{task_count:04d}.csv.gz"
         write_gzip_csv(path, input_fields, subset)
         chunks.append(
@@ -127,6 +142,7 @@ def command_prepare(args: argparse.Namespace) -> None:
             }
         )
     worker = Path(__file__).resolve()
+    source_root = worker.parents[2] / "src"
     submit = root / "submit.sh"
     submit.write_text(
         f"""#!/bin/bash
@@ -140,6 +156,7 @@ def command_prepare(args: argparse.Namespace) -> None:
 set -euo pipefail
 source /data/programs/oce/actoce
 conda activate fpsim2-0.7.3
+export PYTHONPATH={source_root}:${{PYTHONPATH:-}}
 python3 -u {worker} worker --output-root {root} --task-index "$SLURM_ARRAY_TASK_ID"
 """,
         encoding="utf-8",
@@ -268,7 +285,10 @@ def command_combine(args: argparse.Namespace) -> None:
         return
     preparation = json.loads((root / "preparation.json").read_text(encoding="utf-8"))
     manifest_rows = read_gzip_csv(root / "selected_manifest.csv.gz")
-    expected_ids = np.asarray([int(row["spacehastenid"]) for row in manifest_rows], dtype=np.int64)
+    expected_ids = np.asarray(
+        list(dict.fromkeys(int(row["spacehastenid"]) for row in manifest_rows)),
+        dtype=np.int64,
+    )
     task_count = int(preparation["task_count"])
     structures: list[dict[str, str]] = []
     id_parts: list[np.ndarray] = []
@@ -316,6 +336,7 @@ def command_combine(args: argparse.Namespace) -> None:
     metadata = {
         "status": "complete",
         "rows": len(ids),
+        "selected_attempts": len(manifest_rows),
         "task_count": task_count,
         "manifest_sha256": sha256(root / "selected_manifest.csv.gz"),
         "structure_sha256": sha256(structure_path),
