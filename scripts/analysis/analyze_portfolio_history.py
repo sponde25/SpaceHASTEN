@@ -248,16 +248,29 @@ def summary_tables(
 def save_figures(root: Path, tables: dict[str, list[dict[str, Any]]], dpi: int) -> None:
     root.mkdir(parents=True, exist_ok=True)
     contributions = pd.DataFrame(tables["contribution_summary"])
-    figure, axis = plt.subplots(figsize=(7.2, 4.2))
-    for color, component in zip(OKABE_ITO, COMPONENTS, strict=True):
-        current = contributions[contributions["component"] == component]
-        axis.plot(current["round"], current["mean"], marker="o", color=color, label=component)
-    axis.set(
-        xlabel="Round", ylabel="Mean contribution", xticks=sorted(contributions["round"].unique())
-    )
-    axis.legend(frameon=False)
-    axis.spines[["top", "right"]].set_visible(False)
-    axis.grid(axis="y", color="#E6E6E6", linewidth=0.6)
+    figure, axes = plt.subplots(1, 2, figsize=(9.0, 4.0))
+    groups = (("quality", "final_utility"), ("marginal_reward", "crowding_penalty"))
+    colors = dict(zip(COMPONENTS, OKABE_ITO, strict=True))
+    for axis, components in zip(axes, groups, strict=True):
+        for component in components:
+            current = contributions[contributions["component"] == component]
+            axis.plot(
+                current["round"],
+                current["mean"],
+                marker="o",
+                color=colors[component],
+                label=component.replace("_", " "),
+            )
+        axis.set(
+            xlabel="Round",
+            ylabel="Mean contribution",
+            xticks=sorted(contributions["round"].unique()),
+        )
+        axis.legend(frameon=False)
+        axis.spines[["top", "right"]].set_visible(False)
+        axis.grid(axis="y", color="#E6E6E6", linewidth=0.6)
+    axes[0].set_title("Quality and final utility")
+    axes[1].set_title("Reward and crowding")
     figure.tight_layout()
     _save(figure, root / "portfolio_contributions", dpi)
 

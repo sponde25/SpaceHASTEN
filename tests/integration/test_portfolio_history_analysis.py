@@ -142,3 +142,4 @@ def test_portfolio_history_analysis_outputs_productive_coverage(tmp_path: Path) 
         rows = list(csv.DictReader(handle))
     assert rows[-1]["broad_q2"] == "1.6"
     assert (output / "figures" / "coverage_depth.png").stat().st_size > 0
+    assert (output / "figures" / "portfolio_contributions.png").stat().st_size > 0
