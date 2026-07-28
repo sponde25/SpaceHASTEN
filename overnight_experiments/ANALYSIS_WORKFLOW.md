@@ -28,6 +28,7 @@ combining, UMAP transforms, diversity formulas, coverage formulas, or artifact v
 |---|---|---|
 | Transaction-consistent SQLite snapshot | Implemented | `scripts/analysis/snapshot_sqlite_database.py` |
 | Standard read-only run analysis | Implemented | `scripts/analysis/analyze_run.py` |
+| Training metadata, leakage, prediction drift, timing | Implemented | `scripts/analysis/analyze_run_metadata.py` |
 | Fingerprint-index construction | Implemented, conditional | `scripts/analysis/build_fingerprint_indexes.py` |
 | FPSim2 nearest-seed worker/combine | Implemented | `nearest_seed_similarity_chunk.py`, `combine_nearest_seed_chunks.py` |
 | Landmark UMAP transform/combine | Implemented | `transform_landmark_umap_chunk.py`, `combine_landmark_umap_chunks.py` |
@@ -38,7 +39,16 @@ combining, UMAP transforms, diversity formulas, coverage formulas, or artifact v
 | Acquisition-history selected-manifest export | Implemented | `scripts/analysis/export_selected_manifest.py` |
 | Selected-cohort structure cache | Implemented | `scripts/analysis/selected_structure_cache.py` |
 | Portfolio support/reward/crowding analysis | Implemented | `scripts/analysis/analyze_portfolio_history.py` |
-| Configuration-driven full-report orchestration | Not yet implemented | Do not build a parallel run-local framework |
+| Exact portfolio candidate/region enrichment | Implemented | `scripts/analysis/analyze_portfolio_enrichment.py` |
+| Selected-cache diversity/descriptors/seed coverage | Implemented | `scripts/analysis/analyze_selected_cache.py` |
+| Selected-cache count matching and seed resampling | Implemented | `scripts/analysis/selected_resampling.py` |
+| Selected nearest-seed preparation | Implemented | `scripts/analysis/prepare_selected_nearest_seed.py` |
+| Selected/centroid fixed-model UMAP preparation | Implemented | `scripts/analysis/prepare_cached_umap.py` |
+| Occupied atlas-centroid fingerprint cache | Implemented | `scripts/analysis/prepare_atlas_centroid_cache.py` |
+| Selected fixed-reference chemical-space figures | Implemented | `scripts/analysis/plot_selected_chemical_space.py` |
+| Cross-artifact validation and manifest | Implemented | `scripts/analysis/validate_run_analysis.py` |
+| Standalone HTML export | Implemented | `scripts/analysis/export_standalone_report.py` |
+| Single-command orchestration | Not required | Execute the exact stage sequence below |
 
 Update this table whenever a missing capability is implemented. Remove obsolete run-local guidance
 at the same time.
@@ -68,10 +78,23 @@ Define these shell variables before running the examples:
 ```bash
 REPO=/data/$USER/PROJECTS/SpaceHASTEN
 RUN=$REPO/overnight_experiments/<run_name>
-DB=$RUN/<run_name>.dbsh
-ANALYSIS=$RUN/analysis
+DB_SOURCE=<canonical_or_live_run_database.dbsh>
+SNAPSHOT_ROOT=/data/$USER/SPACEHASTEN/<run_name>_analysis
+DB=$SNAPSHOT_ROOT/final.dbsh
+ANALYSIS=$SNAPSHOT_ROOT/analysis
 CUTOFF=-9.7
+STRICT_CUTOFF=-11.0
+SEED_INDEX=<validated_seed_morgan_r2_1024.h5>
+SEED_REFERENCE=<validated_seed_reference_cache.npz>
+SEED_FAMILIES=<validated_seed_scaffold_categories.csv.gz>
+UMAP_MODEL=<validated_fixed_landmark_umap_model.joblib>
+SEED_COORDINATES=<validated_fixed_seed_coordinates.npz>
 ```
+
+Set every placeholder before execution. `SEED_INDEX`, `SEED_REFERENCE`, `SEED_FAMILIES`,
+`UMAP_MODEL`, and `SEED_COORDINATES` must describe the same ordered starting-seed population and
+Morgan radius-2/1024-bit definition. Do not silently substitute assets from another target or seed
+set.
 
 ## Environments
 
@@ -111,8 +134,8 @@ transaction-consistent SQLite backup before analysis:
 
 ```bash
 python $REPO/scripts/analysis/snapshot_sqlite_database.py \
-  --source "$DB" \
-  --output /data/$USER/SPACEHASTEN/<run_name>_analysis/final.dbsh
+  --source "$DB_SOURCE" \
+  --output "$DB"
 ```
 
 Wait for the final database and JSON receipt to be atomically published. Never analyze a
@@ -124,22 +147,7 @@ I/O-heavy SLURM jobs must stage their own copy from `/data` to
 
 Run the read-only standard profile first. It discovers arbitrary rounds and evolving acquisition CSV schemas, uses selected-attempt and scored denominators separately, and writes canonical coverage, yield, cutoff, chemistry, atlas, acquisition, calibration, provenance, and plot artifacts:
 
-```bash
-source /wrk/setup_conda.sh
-conda activate spacehasten-quick
-python $REPO/scripts/analysis/analyze_run.py "$RUN" \
-  --analysis-root "$ANALYSIS/standard" \
-  --hit-threshold "$CUTOFF" \
-  --cutoff-range -12 -8 0.25 \
-  --pair-samples 10000000 \
-  --random-seed 42 \
-  --dpi 600
-```
-
-The analyzer opens the source database in SQLite read-only/query-only mode. Unsupported prediction or atlas metrics are emitted with explicit availability status rather than inferred or imputed.
-
-When the immutable snapshot is outside the run directory, preserve run/acquisition discovery while
-overriding only the database:
+Preserve run/acquisition discovery while reading only the immutable snapshot:
 
 ```bash
 python $REPO/scripts/analysis/analyze_run.py "$RUN" \
@@ -152,23 +160,10 @@ python $REPO/scripts/analysis/analyze_run.py "$RUN" \
   --dpi 600
 ```
 
-## 0A. Normalized Selected Manifest — Implemented
+The analyzer opens the snapshot in SQLite read-only/query-only mode. Unsupported prediction or
+atlas metrics are emitted with explicit availability status rather than inferred or imputed.
 
-Export one row per selected attempt. Modern runs use immutable acquisition-history tables; older
-runs fall back to acquisition CSVs and round-specific outcomes:
-
-```bash
-python $REPO/scripts/analysis/export_selected_manifest.py "$RUN" \
-  --database "$DB" \
-  --output "$ANALYSIS/structure_cache/selected_manifest.csv.gz" \
-  --hit-threshold "$CUTOFF" \
-  --strict-threshold -11.0
-```
-
-The manifest retains common identity/outcome columns and available policy diagnostics. Cross-run
-identity uses `reghash`, never run-local numeric IDs.
-
-## 0B. Selected Structure Cache — Implemented
+## 0A. Selected Structure Cache — Implemented
 
 Prepare deterministic selected-cohort inputs and a SLURM script:
 
@@ -182,7 +177,13 @@ python $REPO/scripts/analysis/selected_structure_cache.py prepare "$RUN" \
 ```
 
 Submit only the generated `structure_cache/submit.sh`. It invokes the same central CLI's `worker`
-subcommand in `fpsim2-0.7.3`. After all tasks complete:
+subcommand in `fpsim2-0.7.3`:
+
+```bash
+sbatch "$ANALYSIS/structure_cache/submit.sh"
+```
+
+After `squeue -j <job_id>` no longer lists the array and every task exited successfully:
 
 ```bash
 python $REPO/scripts/analysis/selected_structure_cache.py combine \
@@ -191,6 +192,27 @@ python $REPO/scripts/analysis/selected_structure_cache.py combine \
 
 The combined receipt validates exact manifest order, unique IDs, scaffold/descriptor coverage, and
 packed Morgan radius-2/1024 fingerprints. Do not create a run-local structure worker or combiner.
+Its `selected_manifest.csv.gz` is the canonical normalized manifest; do not export a duplicate.
+
+## 0B. Training Metadata And Timing — Implemented
+
+Use the normalized manifest to collect model metadata, verify that each model's selected compounds
+are absent from its training CSV, summarize candidate prediction drift, parse exact round
+boundaries, and query SLURM accounting:
+
+```bash
+python $REPO/scripts/analysis/analyze_run_metadata.py "$RUN" \
+  --database "$DB" \
+  --manifest "$ANALYSIS/structure_cache/selected_manifest.csv.gz" \
+  --output-root "$ANALYSIS/run_metadata" \
+  --hit-threshold "$CUTOFF" \
+  --sacct \
+  --dpi 600
+```
+
+If scheduler accounting has aged out, rerun without `--sacct`; the command still emits exact
+log-derived stage and round timing and records scheduler accounting as unavailable. Do not copy a
+run-specific log parser.
 
 ## 0C. Portfolio History — Implemented When Available
 
@@ -208,6 +230,251 @@ python $REPO/scripts/analysis/analyze_portfolio_history.py "$RUN" \
 This writes contribution, support-state calibration, cap-binding, expected-versus-observed region,
 coverage-depth, U20/overfill, hit-depth, transition, and threshold-crossing tables plus standard
 figures. Non-portfolio runs should skip this stage rather than emulate missing diagnostics.
+
+## 0D. Exact Portfolio Enrichment — Implemented When Available
+
+For the same portfolio run, reconstruct each historical candidate pool from its persisted model,
+atlas version, watermark, and attempt policy. The command refuses to report candidate enrichment
+unless both the persisted candidate count and digest match exactly:
+
+```bash
+python $REPO/scripts/analysis/analyze_portfolio_enrichment.py "$RUN" \
+  --database "$DB" \
+  --output-root "$ANALYSIS/portfolio_enrichment" \
+  --hit-threshold "$CUTOFF" \
+  --strict-threshold "$STRICT_CUTOFF" \
+  --dpi 600
+```
+
+This writes candidate/selected/scored/hit shares, selection and hit enrichment, share growth,
+centroid origin, within-region selection order, marginal hit productivity, concentration, and exact
+candidate-reconstruction receipts. Run this I/O-heavy command against a node-local copy of `DB`
+when the shared snapshot is large; keep `--database` pointing to that validated read-only copy.
+
+## 0E. Exact Selected Nearest-Seed Similarity — Implemented
+
+Prepare deterministic query chunks from the selected manifest and the validated seed index:
+
+```bash
+python $REPO/scripts/analysis/prepare_selected_nearest_seed.py \
+  --manifest "$ANALYSIS/structure_cache/selected_manifest.csv.gz" \
+  --seed-index "$SEED_INDEX" \
+  --output-root "$ANALYSIS/nearest_seed" \
+  --task-count 96
+sbatch "$ANALYSIS/nearest_seed/submit.sh"
+```
+
+After the array succeeds, read exact counts from the preparation receipt and combine:
+
+```bash
+NEAREST_TASKS=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["task_count"])' \
+  "$ANALYSIS/nearest_seed/preparation.json")
+SELECTED_COUNT=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["selected_compounds"])' \
+  "$ANALYSIS/nearest_seed/preparation.json")
+python $REPO/scripts/analysis/combine_nearest_seed_chunks.py \
+  --chunks-dir "$ANALYSIS/nearest_seed/chunks" \
+  --output "$ANALYSIS/nearest_seed/nearest_seed_similarity.npz" \
+  --task-count "$NEAREST_TASKS" \
+  --expected-count "$SELECTED_COUNT"
+```
+
+The existing worker performs exact top-1 FPSim2 Tanimoto search with validated Morgan
+radius-2/1024 seed fingerprints. Do not replace it with approximate nearest neighbors.
+
+## 0F. Selected Diversity, Descriptors, And Seed Coverage — Implemented
+
+Consume the structure cache and exact nearest-seed result without reparsing SMILES or regenerating
+selected fingerprints:
+
+```bash
+python $REPO/scripts/analysis/analyze_selected_cache.py \
+  --manifest "$ANALYSIS/structure_cache/selected_manifest.csv.gz" \
+  --structure-cache "$ANALYSIS/structure_cache/structure_cache.csv.gz" \
+  --fingerprints "$ANALYSIS/structure_cache/fingerprints.npz" \
+  --nearest-seed "$ANALYSIS/nearest_seed/nearest_seed_similarity.npz" \
+  --seed-families "$SEED_FAMILIES" \
+  --portfolio-enrichment "$ANALYSIS/portfolio_enrichment/cluster_round_enrichment.csv" \
+  --output-root "$ANALYSIS/selected_analysis" \
+  --pair-samples 1000000 \
+  --random-seed 42 \
+  --dpi 600
+```
+
+Outputs cover per-round selected and hit-only cohorts, cumulative selected and hit-only cohorts,
+typed/generic/persistent-atlas q0/q1/q2 and concentration, productive-family growth, descriptor
+drift, exact nearest-seed summaries, and seed scaffold/framework novelty. The selected-attempt
+denominator includes unresolved outcomes.
+
+## 0G. Count-Matched Resampling — Implemented
+
+Prepare a NumPy-only worker cache. The optional seed inputs shown here enable both per-round
+selected-to-hit count matching and starting-seed-to-final-hit matching:
+
+```bash
+python $REPO/scripts/analysis/selected_resampling.py prepare \
+  --manifest "$ANALYSIS/structure_cache/selected_manifest.csv.gz" \
+  --structure-cache "$ANALYSIS/structure_cache/structure_cache.csv.gz" \
+  --fingerprints "$ANALYSIS/structure_cache/fingerprints.npz" \
+  --seed-reference-cache "$SEED_REFERENCE" \
+  --seed-index "$SEED_INDEX" \
+  --output-root "$ANALYSIS/resampling" \
+  --task-count 40 \
+  --replicates 200 \
+  --pair-samples 100000 \
+  --random-seed 42
+sbatch "$ANALYSIS/resampling/submit.sh"
+```
+
+After every task succeeds:
+
+```bash
+python $REPO/scripts/analysis/selected_resampling.py combine \
+  --output-root "$ANALYSIS/resampling" \
+  --dpi 600
+```
+
+The combined tables keep empirical between-replicate intervals separate from each replicate's
+pair-sampling Monte Carlo error. Do not run the old hard-coded worked-run resampling workers.
+
+## 0H. Fixed-Reference Selected UMAP — Implemented
+
+Transform the existing packed selected fingerprints with the validated fixed model; never refit a
+run-specific primary UMAP:
+
+```bash
+python $REPO/scripts/analysis/prepare_cached_umap.py \
+  --fingerprints "$ANALYSIS/structure_cache/fingerprints.npz" \
+  --model "$UMAP_MODEL" \
+  --output-root "$ANALYSIS/selected_umap" \
+  --task-count 80 \
+  --batch-size 500
+sbatch "$ANALYSIS/selected_umap/submit.sh"
+```
+
+After the array succeeds:
+
+```bash
+UMAP_TASKS=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["task_count"])' \
+  "$ANALYSIS/selected_umap/preparation.json")
+UMAP_COUNT=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["compound_count"])' \
+  "$ANALYSIS/selected_umap/preparation.json")
+python $REPO/scripts/analysis/combine_landmark_umap_chunks.py \
+  --chunks-dir "$ANALYSIS/selected_umap/chunks" \
+  --model "$UMAP_MODEL" \
+  --output-dir "$ANALYSIS/selected_umap" \
+  --task-count "$UMAP_TASKS" \
+  --expected-count "$UMAP_COUNT" \
+  --skip-landmark-overwrite
+```
+
+`--skip-landmark-overwrite` is required because selected IDs are not the complete reference-index
+namespace. The combiner validates exact row count, unique IDs, two coordinate columns, and finite
+values.
+
+## 0I. Occupied Atlas-Centroid Coordinates — Implemented
+
+Build the small occupied-centroid cache and transform it with the same fixed model. Seed and
+selected coordinates take precedence later, so these transformed coordinates fill only missing
+virtual-centroid positions:
+
+```bash
+python $REPO/scripts/analysis/prepare_atlas_centroid_cache.py "$RUN" \
+  --database "$DB" \
+  --manifest "$ANALYSIS/structure_cache/selected_manifest.csv.gz" \
+  --output "$ANALYSIS/centroid_cache/fingerprints.npz"
+python $REPO/scripts/analysis/prepare_cached_umap.py \
+  --fingerprints "$ANALYSIS/centroid_cache/fingerprints.npz" \
+  --model "$UMAP_MODEL" \
+  --output-root "$ANALYSIS/centroid_umap" \
+  --task-count 16 \
+  --batch-size 500
+sbatch "$ANALYSIS/centroid_umap/submit.sh"
+```
+
+After the centroid array succeeds:
+
+```bash
+CENTROID_TASKS=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["task_count"])' \
+  "$ANALYSIS/centroid_umap/preparation.json")
+CENTROID_COUNT=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["compound_count"])' \
+  "$ANALYSIS/centroid_umap/preparation.json")
+python $REPO/scripts/analysis/combine_landmark_umap_chunks.py \
+  --chunks-dir "$ANALYSIS/centroid_umap/chunks" \
+  --model "$UMAP_MODEL" \
+  --output-dir "$ANALYSIS/centroid_umap" \
+  --task-count "$CENTROID_TASKS" \
+  --expected-count "$CENTROID_COUNT" \
+  --skip-landmark-overwrite
+```
+
+## 0J. Canonical Chemical-Space Figures — Implemented
+
+Generate the four fixed-reference figures from the validated selected, seed, centroid, enrichment,
+and nearest-seed artifacts:
+
+```bash
+python $REPO/scripts/analysis/plot_selected_chemical_space.py \
+  --manifest "$ANALYSIS/structure_cache/selected_manifest.csv.gz" \
+  --selected-coordinates "$ANALYSIS/selected_umap/landmark_umap_coordinates.npz" \
+  --seed-coordinates "$SEED_COORDINATES" \
+  --seed-reference-cache "$SEED_REFERENCE" \
+  --centroid-coordinates "$ANALYSIS/centroid_umap/landmark_umap_coordinates.npz" \
+  --portfolio-enrichment "$ANALYSIS/portfolio_enrichment/cluster_round_enrichment.csv" \
+  --selected-nearest "$ANALYSIS/selected_analysis/selected_nearest_seed.csv.gz" \
+  --output-root "$ANALYSIS/chemical_space" \
+  --label "<target and acquisition label>" \
+  --prior-strength 20 \
+  --dpi 600
+```
+
+The outputs are seed/hit density, round-wise acquisition shift, posterior local cluster hit
+enrichment, and exact nearest-seed ECDF, each as 600-dpi PNG and vector PDF. UMAP remains a fixed
+reference visualization; do not interpret two-dimensional distances quantitatively.
+
+## 0K. Report Export And Final Validation — Implemented
+
+Write the run-specific scientific narrative at `$ANALYSIS/FULL_RUN_ANALYSIS.md` using only the
+canonical tables and figures above. Narrative synthesis is intentionally run-specific; metric
+formulas, chemistry workers, and validation are not. Export it unchanged:
+
+```bash
+REPORT_MD="$ANALYSIS/FULL_RUN_ANALYSIS.md"
+REPORT_HTML="$ANALYSIS/FULL_RUN_ANALYSIS.html"
+python $REPO/scripts/analysis/export_standalone_report.py "$REPORT_MD" "$REPORT_HTML"
+```
+
+Then revalidate receipts, hashes, exact selected identities, nearest-seed ranges, finite UMAP
+coordinates, figures, and report links, and generate the final artifact manifest:
+
+```bash
+python $REPO/scripts/analysis/validate_run_analysis.py \
+  --analysis-root "$ANALYSIS" \
+  --snapshot-receipt "$DB.json" \
+  --database "$DB" \
+  --standard-root "$ANALYSIS/standard" \
+  --structure-root "$ANALYSIS/structure_cache" \
+  --run-metadata-root "$ANALYSIS/run_metadata" \
+  --selected-root "$ANALYSIS/selected_analysis" \
+  --resampling-root "$ANALYSIS/resampling" \
+  --portfolio-history-root "$ANALYSIS/portfolio_history" \
+  --portfolio-enrichment-root "$ANALYSIS/portfolio_enrichment" \
+  --nearest-seed "$ANALYSIS/nearest_seed/nearest_seed_similarity.npz" \
+  --umap "$ANALYSIS/selected_umap/landmark_umap_coordinates.npz" \
+  --figures-root "$ANALYSIS" \
+  --markdown "$REPORT_MD" \
+  --html "$REPORT_HTML"
+```
+
+For a non-portfolio legacy run, omit the two portfolio-root arguments and use the compatible
+all-docked chemical-space command in legacy Section 6 instead of Section 0J. Do not omit any stage
+that was executed. The final outputs are `artifact_manifest.json` and `FINAL_VALIDATION.json`.
+
+## Legacy And Reference Appendix
+
+The canonical future-run workflow ends at Section 0K. The remaining sections document the older
+all-docked pipeline, one-time reference creation, and cross-run studies. Do not execute them in
+addition to Sections 0A-0K unless the selected-cache workflow is incompatible with a legacy run or
+the user explicitly requests a new shared reference or cross-run comparison.
 
 ## 1. Fingerprint Indexes — Conditional/Legacy
 
@@ -284,7 +551,8 @@ python $REPO/scripts/analysis/combine_landmark_umap_chunks.py \
   --chunks-dir "$ANALYSIS/umap/chunks" \
   --model "$ANALYSIS/umap/landmark_umap_model.joblib" \
   --output-dir "$ANALYSIS/umap" \
-  --task-count 96
+  --task-count 96 \
+  --expected-count <all_docked_count>
 ```
 
 ## 4. Exact Nearest-Seed Similarity — Implemented Reusable Workers

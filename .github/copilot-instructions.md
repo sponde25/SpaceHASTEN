@@ -38,6 +38,12 @@ Prefix all Python execution with the conda activation:
 source /wrk/setup_conda.sh && conda activate spacehasten-quick && python3 ...
 ```
 
+## Editing
+
+For substantial changes, use small focused patches that modify one file or one narrow logical unit
+at a time. Do not submit a single large multi-file patch; review and validate each capability group
+before moving to the next.
+
 ## Progress Reporting
 
 Long-running scripts and analysis loops should expose progress whenever practical. Prefer a progress bar such as `tqdm`, or periodic structured logging when a progress bar is unsuitable. Include completed and total work, elapsed time, processing rate, and ETA when the total is known.
