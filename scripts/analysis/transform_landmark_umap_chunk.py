@@ -41,7 +41,7 @@ def load_fingerprints(
         raise ValueError("selected fingerprint cache must contain IDs and N x 16 words")
     if len(np.unique(identifiers)) != len(identifiers):
         raise ValueError("selected fingerprint cache contains duplicate IDs")
-    return identifiers, words
+    return identifiers, landmark_umap.rdkit_words_to_fpsim2_words(words)
 
 
 def transform_chunk(args: argparse.Namespace) -> Path:

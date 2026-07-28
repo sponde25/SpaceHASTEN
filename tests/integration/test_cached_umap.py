@@ -8,16 +8,32 @@ from pathlib import Path
 import joblib
 import numpy as np
 import pytest
+from FPSim2.io.chem import process_fp
+from rdkit import Chem, DataStructs
+from rdkit.Chem import rdFingerprintGenerator
 
 pytest.importorskip("sklearn")
 from sklearn.decomposition import PCA
 
-from spacehasten.analysis.umap import unpack_fingerprints
+from spacehasten.analysis.umap import rdkit_words_to_fpsim2_words, unpack_fingerprints
 
 ROOT = Path(__file__).resolve().parents[2]
 PREPARE = ROOT / "scripts" / "analysis" / "prepare_cached_umap.py"
 WORKER = ROOT / "scripts" / "analysis" / "transform_landmark_umap_chunk.py"
 COMBINE = ROOT / "scripts" / "analysis" / "combine_landmark_umap_chunks.py"
+
+
+def test_rdkit_words_convert_to_fpsim2_order() -> None:
+    molecule = Chem.MolFromSmiles("CCOC(=O)N1CCCCC1")
+    fingerprint = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=1024).GetFingerprint(
+        molecule
+    )
+    rdkit_words = np.frombuffer(
+        DataStructs.BitVectToBinaryText(fingerprint), dtype=np.dtype("<u8")
+    ).reshape(1, 16)
+    fpsim2_words = np.asarray(process_fp(fingerprint, 7)[1:-1], dtype=np.uint64)
+    converted = rdkit_words_to_fpsim2_words(rdkit_words)
+    assert np.array_equal(converted[0], fpsim2_words)
 
 
 def test_cached_umap_pipeline(tmp_path: Path) -> None:
@@ -32,7 +48,7 @@ def test_cached_umap_pipeline(tmp_path: Path) -> None:
         popcounts=np.asarray([2, 2, 4, 2], dtype=np.uint16),
     )
     model = tmp_path / "model.joblib"
-    reducer = PCA(n_components=2).fit(unpack_fingerprints(words))
+    reducer = PCA(n_components=2).fit(unpack_fingerprints(rdkit_words_to_fpsim2_words(words)))
     joblib.dump({"reducer": reducer}, model)
     output = tmp_path / "umap"
     subprocess.run(
