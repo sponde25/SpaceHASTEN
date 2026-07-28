@@ -236,6 +236,16 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
         "snapshot": validate_snapshot(args.snapshot_receipt, args.database, args.quick_check),
         "standard": validate_standard(args.standard_root),
     }
+    if args.reference_root:
+        receipt = validate_receipt(args.reference_root, "_SUCCESS.json")
+        snapshot_seed_count = checks["snapshot"].get("counts", {}).get("dock_iterations", {}).get(
+            "0"
+        )
+        if snapshot_seed_count is not None and int(receipt.get("seed_count", -1)) != int(
+            snapshot_seed_count
+        ):
+            raise ValueError("translated seed count differs from snapshot seed count")
+        checks["seed_reference"] = receipt
     selected_ids, structure_receipt = validate_structure(args.structure_root)
     selected_attempts = int(
         structure_receipt.get("selected_attempts", structure_receipt.get("rows", -1))
@@ -302,6 +312,7 @@ def main() -> None:
     parser.add_argument("--database", type=Path)
     parser.add_argument("--quick-check", action="store_true")
     parser.add_argument("--standard-root", type=Path, required=True)
+    parser.add_argument("--reference-root", type=Path)
     parser.add_argument("--structure-root", type=Path, required=True)
     parser.add_argument("--selected-root", type=Path)
     parser.add_argument("--run-metadata-root", type=Path)

@@ -149,6 +149,7 @@ def plot_cluster_enrichment(
         )
         .reset_index()
     )
+    grouped = grouped[grouped["selected_count"] > 0].copy()
     coordinate_map = (
         pd.concat(coordinate_frames, ignore_index=True)
         .drop_duplicates("spacehastenid", keep="first")
