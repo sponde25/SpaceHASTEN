@@ -28,6 +28,7 @@ combining, UMAP transforms, diversity formulas, coverage formulas, or artifact v
 |---|---|---|
 | Transaction-consistent SQLite snapshot | Implemented | `scripts/analysis/snapshot_sqlite_database.py` |
 | Standard read-only run analysis | Implemented | `scripts/analysis/analyze_run.py` |
+| Cross-namespace seed reference translation | Implemented | `scripts/analysis/translate_seed_reference.py` |
 | Training metadata, leakage, prediction drift, timing | Implemented | `scripts/analysis/analyze_run_metadata.py` |
 | Fingerprint-index construction | Implemented, conditional | `scripts/analysis/build_fingerprint_indexes.py` |
 | FPSim2 nearest-seed worker/combine | Implemented | `nearest_seed_similarity_chunk.py`, `combine_nearest_seed_chunks.py` |
@@ -89,6 +90,10 @@ SEED_REFERENCE=<validated_seed_reference_cache.npz>
 SEED_FAMILIES=<validated_seed_scaffold_categories.csv.gz>
 UMAP_MODEL=<validated_fixed_landmark_umap_model.joblib>
 SEED_COORDINATES=<validated_fixed_seed_coordinates.npz>
+SOURCE_SEED_DB=<source_namespace_seed_database.dbsh>
+SOURCE_SEED_REFERENCE=<source_namespace_seed_reference_cache.npz>
+SOURCE_SEED_FAMILIES=<source_namespace_seed_scaffold_categories.csv.gz>
+SOURCE_SEED_COORDINATES=<source_namespace_fixed_coordinates.npz>
 ```
 
 Set every placeholder before execution. `SEED_INDEX`, `SEED_REFERENCE`, `SEED_FAMILIES`,
@@ -142,6 +147,32 @@ Wait for the final database and JSON receipt to be atomically published. Never a
 `.tmp`, `-journal`, `-wal`, or `-shm` file. Treat the published `/data` snapshot as immutable.
 I/O-heavy SLURM jobs must stage their own copy from `/data` to
 `/fastwrk/$USER/.../${SLURM_JOB_ID}` inside the selected job.
+
+## Seed Namespace Translation — Implemented When Required
+
+If the reusable seed reference/cache and the target seed index were created in different run-local
+numeric ID namespaces, translate by `reghash` before resampling or fixed-reference plotting. Equal
+numeric ID ranges or sets are not evidence of compound identity.
+
+```bash
+python $REPO/scripts/analysis/translate_seed_reference.py \
+  --source-database "$SOURCE_SEED_DB" \
+  --target-database "$DB" \
+  --source-reference "$SOURCE_SEED_REFERENCE" \
+  --source-families "$SOURCE_SEED_FAMILIES" \
+  --source-coordinates "$SOURCE_SEED_COORDINATES" \
+  --target-seed-index "$SEED_INDEX" \
+  --output-root "$ANALYSIS/reference"
+SEED_REFERENCE="$ANALYSIS/reference/seed_reference_cache.npz"
+SEED_FAMILIES="$ANALYSIS/reference/seed_scaffold_categories.csv.gz"
+SEED_COORDINATES="$ANALYSIS/reference/seed_coordinates.npz"
+```
+
+The command requires a one-to-one source/target seed `reghash` join, exact structure agreement,
+complete production-atlas assignments, complete source coordinates, and exact target index ID
+coverage. It writes the identity map, target-namespace reference/cache, target-namespace exact seed
+coordinates, family categories, hashes, and `_SUCCESS.json`. Do not use source-namespace caches
+directly after translation is required.
 
 ## 0. Standard Per-Run Analysis — Implemented Default
 
@@ -451,6 +482,7 @@ python $REPO/scripts/analysis/validate_run_analysis.py \
   --analysis-root "$ANALYSIS" \
   --snapshot-receipt "$DB.json" \
   --database "$DB" \
+  --reference-root "$ANALYSIS/reference" \
   --standard-root "$ANALYSIS/standard" \
   --structure-root "$ANALYSIS/structure_cache" \
   --run-metadata-root "$ANALYSIS/run_metadata" \

@@ -38,6 +38,7 @@ UMAP transform, diversity formula, coverage formula, or generic validator. Those
 | Purpose | Command |
 |---|---|
 | Transaction-consistent snapshot | `scripts/analysis/snapshot_sqlite_database.py` |
+| Translate seed references across ID namespaces | `scripts/analysis/translate_seed_reference.py` |
 | Standard read-only analysis | `scripts/analysis/analyze_run.py` |
 | Training metadata, leakage, prediction drift, timing | `scripts/analysis/analyze_run_metadata.py` |
 | Normalize selected attempts | `scripts/analysis/export_selected_manifest.py` |
@@ -178,6 +179,9 @@ database with `PRAGMA table_info`; older runs may lack extension tables.
 
 - `spacehastenid` is efficient for joins within one database but is run-local. Use `reghash` for
   cross-run compound identity.
+- Equal seed ID ranges or sets across databases do not establish matching molecules. Before mixing
+  a seed index, family cache, atlas code, or coordinate cache from different run namespaces, execute
+  `translate_seed_reference.py` and consume only its target-namespace outputs.
 - `data.pred_score`, `data.pred_version`, `dock_score`, and `dock_iteration` describe current/final
   row state. Use `predictions` and acquisition-history tables for historical analyses.
 - A selection is an attempt, identified in normalized artifacts as `selection_id = batch_id:rank`.
@@ -212,6 +216,9 @@ produce and the grain at which a future hypothesis can consume each artifact.
 | Stage/artifact | Grain and key fields | Information available |
 |---|---|---|
 | Snapshot `final.dbsh.json` | One receipt | Source/output paths, online-backup method, source/snapshot quick checks, page count/size, core table counts, score counts by iteration, elapsed time |
+| `reference/seed_identity_map.csv.gz` | One row per target seed | Target ID, source ID and shared `reghash`; proves cross-namespace one-to-one identity |
+| `reference/seed_reference_cache.npz` | One row per target seed | Target and source IDs, translated typed/generic family codes, target production-atlas codes/labels |
+| `reference/seed_coordinates.npz` | One row per target seed | Exact fixed-reference coordinates relabelled into the target ID namespace |
 | `standard/round_metrics.csv` | One row per round | Selected/scored/missing/hit counts, selected and scored rates with intervals, score summaries, cumulative counts |
 | `standard/budget_curve.csv` | Ordered acquisition-budget checkpoints | Cumulative selected/scored/hits and yield versus budget |
 | `standard/cutoff_curve.csv` | Round and score cutoff | Hit-count/rate sensitivity to the docking threshold |
@@ -764,6 +771,7 @@ Copy this checklist into the working task list:
 [ ] Inventory the new run and existing compatible assets.
 [ ] Validate run completion and modern acquisition history or acquisition CSV fallback.
 [ ] Create an immutable SQLite analysis snapshot.
+[ ] Translate reusable seed references by reghash when source and target ID namespaces differ.
 [ ] Run analyze_run.py with the run path plus immutable --database override.
 [ ] Build one selected-compound cache with selected_structure_cache.py.
 [ ] Run analyze_run_metadata.py for training, leakage, prediction drift, timing, and sacct.
