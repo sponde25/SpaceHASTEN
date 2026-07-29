@@ -37,13 +37,15 @@ combining, UMAP transforms, diversity formulas, coverage formulas, or artifact v
 | Generic hit diversity | Implemented, older hit-only interface | `calculate_hit_diversity_metrics.py` |
 | Random-seed comparison | Implemented, older interface | `compare_hits_to_random_seeds.py` |
 | Cross-run hit quality | Implemented | `compare_hit_quality.py` |
-| Acquisition-history selected-manifest export | Implemented | `scripts/analysis/export_selected_manifest.py` |
+| Selected-manifest export with history/CSV/docking-input fallback | Implemented | `scripts/analysis/export_selected_manifest.py` |
 | Selected-cohort structure cache | Implemented | `scripts/analysis/selected_structure_cache.py` |
 | Portfolio support/reward/crowding analysis | Implemented | `scripts/analysis/analyze_portfolio_history.py` |
 | Exact portfolio candidate/region enrichment | Implemented | `scripts/analysis/analyze_portfolio_enrichment.py` |
 | Selected-cache diversity/descriptors/seed coverage | Implemented | `scripts/analysis/analyze_selected_cache.py` |
 | Selected-cache count matching and seed resampling | Implemented | `scripts/analysis/selected_resampling.py` |
 | Selected nearest-seed preparation | Implemented | `scripts/analysis/prepare_selected_nearest_seed.py` |
+| Selected assignment/repair against a reusable seed atlas | Implemented | `scripts/analysis/assign_selected_atlas.py` |
+| Reusable seed scaffold/framework/atlas reference cache | Implemented | `scripts/analysis/build_seed_reference_cache.py` |
 | Selected/centroid fixed-model UMAP preparation | Implemented | `scripts/analysis/prepare_cached_umap.py` |
 | Occupied atlas-centroid fingerprint cache | Implemented | `scripts/analysis/prepare_atlas_centroid_cache.py` |
 | Selected fixed-reference chemical-space figures | Implemented | `scripts/analysis/plot_selected_chemical_space.py` |
@@ -64,7 +66,8 @@ for one report.
 A completed experiment requires:
 
 - `<run>.dbsh`: canonical SpaceHASTEN SQLite database.
-- `run_shared/docking/iter*/acquisition.csv` or database acquisition-history tables.
+- database acquisition-history tables, `run_shared/docking/iter*/acquisition.csv`, or immutable
+  `run_shared/docking/iter*/inputs/chunk_*.smi` selected-ID evidence.
 - model training metadata and, when applicable, calibration artifacts.
 - workflow logs or scheduler accounting for timing context.
 - Docking input, grid, and pre-docked seed CSV for reproducing future runs.
@@ -72,24 +75,33 @@ A completed experiment requires:
 Modern databases may provide authoritative `acquisition_batches`, `acquisition_selections`,
 `acquisition_outcomes`, `acquisition_region_summaries`, and `model_calibrations`. Prefer those
 tables over reconstructing attempts from final mutable row state. Use acquisition CSVs as portable
-mirrors and as the fallback for older runs.
+mirrors and as the first fallback for older runs. If both history rows and acquisition CSVs are
+absent, the central selected-manifest implementation recovers attempted IDs from docking input
+chunks, outcomes from `data`, and greedy rank from version-matched predictions. Such ranks are
+explicitly labelled reconstructed rather than persisted.
 
 Define these shell variables before running the examples:
 
 ```bash
 REPO=/data/$USER/PROJECTS/SpaceHASTEN
 RUN=$REPO/overnight_experiments/<run_name>
+RUN_CONFIG=<validated SpaceHASTEN INI/TOML used for scheduler and atlas settings>
 DB_SOURCE=<canonical_or_live_run_database.dbsh>
-SNAPSHOT_ROOT=/data/$USER/SPACEHASTEN/<run_name>_analysis
-DB=$SNAPSHOT_ROOT/final.dbsh
-ANALYSIS=$SNAPSHOT_ROOT/analysis
+DB_ROOT=/fastwrk/$USER/SpaceHASTEN/<run_name>_analysis
+DB=$DB_ROOT/final.dbsh
+ANALYSIS_ROOT=/data/$USER/SPACEHASTEN/<run_name>_analysis
+ANALYSIS=$ANALYSIS_ROOT/analysis
 CUTOFF=-9.7
 STRICT_CUTOFF=-11.0
+CUTOFF_RANGE_MIN=-12
+CUTOFF_RANGE_MAX=-8
+CUTOFF_RANGE_STEP=0.25
 SEED_INDEX=<validated_seed_morgan_r2_1024.h5>
 SEED_REFERENCE=<validated_seed_reference_cache.npz>
 SEED_FAMILIES=<validated_seed_scaffold_categories.csv.gz>
 UMAP_MODEL=<validated_fixed_landmark_umap_model.joblib>
 SEED_COORDINATES=<validated_fixed_seed_coordinates.npz>
+SELECTED_MANIFEST=$ANALYSIS/structure_cache/selected_manifest.csv.gz
 SOURCE_SEED_DB=<source_namespace_seed_database.dbsh>
 SOURCE_SEED_REFERENCE=<source_namespace_seed_reference_cache.npz>
 SOURCE_SEED_FAMILIES=<source_namespace_seed_scaffold_categories.csv.gz>
@@ -100,6 +112,10 @@ Set every placeholder before execution. `SEED_INDEX`, `SEED_REFERENCE`, `SEED_FA
 `UMAP_MODEL`, and `SEED_COORDINATES` must describe the same ordered starting-seed population and
 Morgan radius-2/1024-bit definition. Do not silently substitute assets from another target or seed
 set.
+
+Docking scores are lower-is-better, so `STRICT_CUTOFF` must be numerically lower than `CUTOFF`.
+Choose the cutoff sensitivity range so it contains both thresholds and the scientifically relevant
+score distribution for the target; the example values above are not universal defaults.
 
 ## Environments
 
@@ -132,10 +148,18 @@ source /data/$USER/venvs/spacehasten-umap/bin/activate
 python -m pip install 'umap-learn==0.5.7'
 ```
 
-## Snapshot Before Analysis — Implemented Default
+## Snapshot Before Analysis — Implemented, Approval-Gated
 
-If the canonical database is on node-local `/wrk`, or may have an active writer, create a durable
-transaction-consistent SQLite backup before analysis:
+Before copying any database to `/data`, NFS, or another shared filesystem:
+
+1. Report the source path and size, proposed destination, transfer reason, and expected reuse.
+2. Ask the user for explicit approval and record the decision in the analysis reproducibility log.
+3. If the user chooses local analysis on a personal host, keep the validated snapshot local and put
+   only derived inputs and final artifacts on shared storage.
+4. Ask again before a later archive or SLURM stage that requires transferring the full database.
+
+If the canonical database may have an active writer, create a transaction-consistent SQLite backup.
+The destination may be local or shared according to the recorded user decision:
 
 ```bash
 python $REPO/scripts/analysis/snapshot_sqlite_database.py \
@@ -144,9 +168,17 @@ python $REPO/scripts/analysis/snapshot_sqlite_database.py \
 ```
 
 Wait for the final database and JSON receipt to be atomically published. Never analyze a
-`.tmp`, `-journal`, `-wal`, or `-shm` file. Treat the published `/data` snapshot as immutable.
-I/O-heavy SLURM jobs must stage their own copy from `/data` to
-`/fastwrk/$USER/.../${SLURM_JOB_ID}` inside the selected job.
+`.tmp`, `-journal`, `-wal`, or `-shm` file. Treat the published snapshot as immutable. When the
+approved snapshot is shared, compute jobs open `DB` directly from `/data` in read-only/query-only
+mode. Do not create node-local copies by default and never copy the full database once per array
+task. Prefer local preparation of compact deterministic chunks so most distributed workers never
+need the database. Consider node-local staging only after measured NFS performance demonstrates a
+material bottleneck and the user separately approves the additional copy.
+
+`DB_ROOT` and `ANALYSIS_ROOT` are deliberately independent. Local commands read `DB`; preparation
+commands write deterministic chunks and submit scripts beneath shared `ANALYSIS`, and SLURM workers
+consume those chunks without opening the database. A shared analysis root does not imply a shared
+database.
 
 ## Seed Namespace Translation — Implemented When Required
 
@@ -185,7 +217,7 @@ python $REPO/scripts/analysis/analyze_run.py "$RUN" \
   --database "$DB" \
   --analysis-root "$ANALYSIS/standard" \
   --hit-threshold "$CUTOFF" \
-  --cutoff-range -12 -8 0.25 \
+  --cutoff-range "$CUTOFF_RANGE_MIN" "$CUTOFF_RANGE_MAX" "$CUTOFF_RANGE_STEP" \
   --pair-samples 1000000 \
   --random-seed 42 \
   --dpi 600
@@ -203,7 +235,7 @@ python $REPO/scripts/analysis/selected_structure_cache.py prepare "$RUN" \
   --database "$DB" \
   --output-root "$ANALYSIS/structure_cache" \
   --hit-threshold "$CUTOFF" \
-  --strict-threshold -11.0 \
+  --strict-threshold "$STRICT_CUTOFF" \
   --task-count 80
 ```
 
@@ -224,6 +256,8 @@ python $REPO/scripts/analysis/selected_structure_cache.py combine \
 The combined receipt validates exact manifest order, unique IDs, scaffold/descriptor coverage, and
 packed Morgan radius-2/1024 fingerprints. Do not create a run-local structure worker or combiner.
 Its `selected_manifest.csv.gz` is the canonical normalized manifest; do not export a duplicate.
+The manifest records whether selection evidence came from immutable database history, acquisition
+CSVs, or recovered docking inputs, and whether acquisition rank was persisted or reconstructed.
 
 ## 0B. Training Metadata And Timing — Implemented
 
@@ -254,7 +288,7 @@ python $REPO/scripts/analysis/analyze_portfolio_history.py "$RUN" \
   --database "$DB" \
   --output-root "$ANALYSIS/portfolio_history" \
   --hit-threshold "$CUTOFF" \
-  --strict-threshold -11.0 \
+  --strict-threshold "$STRICT_CUTOFF" \
   --dpi 600
 ```
 
@@ -279,8 +313,9 @@ python $REPO/scripts/analysis/analyze_portfolio_enrichment.py "$RUN" \
 
 This writes candidate/selected/scored/hit shares, selection and hit enrichment, share growth,
 centroid origin, within-region selection order, marginal hit productivity, concentration, and exact
-candidate-reconstruction receipts. Run this I/O-heavy command against a node-local copy of `DB`
-when the shared snapshot is large; keep `--database` pointing to that validated read-only copy.
+candidate-reconstruction receipts. On a personal login host, run it directly against the validated
+local `DB`. When an approved immutable snapshot already exists on `/data`, a compute-node job may
+open it there directly in read-only/query-only mode; do not make a node-local copy by default.
 
 ## 0E. Exact Selected Nearest-Seed Similarity — Implemented
 
@@ -312,6 +347,33 @@ python $REPO/scripts/analysis/combine_nearest_seed_chunks.py \
 The existing worker performs exact top-1 FPSim2 Tanimoto search with validated Morgan
 radius-2/1024 seed fingerprints. Do not replace it with approximate nearest neighbors.
 
+## 0E-A. Selected Assignment To A Reusable Seed Atlas — Implemented When Needed
+
+If the run database already contains complete persistent-atlas assignments for the selected
+compounds, retain the canonical manifest from Section 0A. If the run has no production atlas but a
+compatible completed seed atlas exists, assign the selected cohort with the native parallel atlas
+assignment/repair workflow:
+
+```bash
+python $REPO/scripts/analysis/assign_selected_atlas.py \
+  --manifest "$ANALYSIS/structure_cache/selected_manifest.csv.gz" \
+  --seed-atlas "$SEED_ATLAS" \
+  --output-root "$ANALYSIS/selected_atlas" \
+  --config "$RUN_CONFIG"
+SELECTED_MANIFEST="$ANALYSIS/selected_atlas/selected_manifest_with_atlas.csv.gz"
+```
+
+The seed centroids remain fixed. Compounds below the seed-atlas similarity threshold are repaired
+deterministically into analysis-owned virtual centroids. The command must validate one assignment per
+selected compound, finite similarity at or above the atlas threshold after repair, noncolliding
+centroid IDs, source/manifest/atlas hashes, and exact manifest order. The local orchestrator submits
+and monitors the native parallel atlas jobs through SpaceHASTEN's scheduler abstraction. It writes a
+derived manifest with `atlas_cluster`; it never mutates the run database or canonical Section 0A
+manifest.
+
+Do not use all-docked LeaderPicker clustering for this purpose. LeaderPicker is reserved for the
+bounded virtual-hit paper endpoint in Section 0F-P.
+
 ## 0F. Selected Diversity, Descriptors, And Seed Coverage — Implemented
 
 Consume the structure cache and exact nearest-seed result without reparsing SMILES or regenerating
@@ -319,7 +381,7 @@ selected fingerprints:
 
 ```bash
 python $REPO/scripts/analysis/analyze_selected_cache.py \
-  --manifest "$ANALYSIS/structure_cache/selected_manifest.csv.gz" \
+  --manifest "$SELECTED_MANIFEST" \
   --structure-cache "$ANALYSIS/structure_cache/structure_cache.csv.gz" \
   --fingerprints "$ANALYSIS/structure_cache/fingerprints.npz" \
   --nearest-seed "$ANALYSIS/nearest_seed/nearest_seed_similarity.npz" \
@@ -336,6 +398,79 @@ typed/generic/persistent-atlas q0/q1/q2 and concentration, productive-family gro
 drift, exact nearest-seed summaries, and seed scaffold/framework novelty. The selected-attempt
 denominator includes unresolved outcomes.
 
+## 0F-P. Original-Paper-Aligned Virtual-Hit Diversity — Implemented
+
+When the report should be comparable to the original SpaceHASTEN paper, add the two published
+virtual-hit diversity definitions without replacing the campaign-native metrics from Section 0F:
+
+```bash
+source /wrk/setup_conda.sh
+conda activate spacehasten-quick
+python -m pip install -e "$REPO[analysis]"
+python $REPO/scripts/analysis/analyze_paper_diversity.py analyze \
+  --manifest "$ANALYSIS/structure_cache/selected_manifest.csv.gz" \
+  --fingerprints "$ANALYSIS/structure_cache/fingerprints.npz" \
+  --output-root "$ANALYSIS/paper_diversity" \
+  --hit-threshold "$CUTOFF" \
+  --cluster-similarity 0.55 \
+  --processes "$(nproc)" \
+  --dpi 600
+```
+
+This command uses ScaffoldGraph 1.1.2 ScaffoldTree Level 1 and clusters only the complete virtual-hit
+cohort by RDKit LeaderPicker sphere exclusion with FPSim2 assignment. Fingerprints are binary Morgan
+radius 2, 1024 bits, and the minimum centroid Tanimoto is 0.55. Hits are sorted by `reghash` and then
+`spacehastenid` before order-dependent leader selection. Report acyclic molecules and valid
+polycyclic molecules whose ScaffoldTree terminates above Level 1 as unassigned; never force them into
+a Level 1 family. This post hoc hit-only clustering is distinct from the seed-first Tanimoto-0.40
+production atlas.
+
+The command writes paper-aligned assignments, cumulative and round-attributed q0/q1/q2 and
+concentration, Level 1 family and Tanimoto-0.55 cluster summaries, figures, and a packed fingerprint
+cache for the new centroids. For the requested supplementary fixed-reference overlay, transform only
+those centroids through the existing model. Do not fit a new UMAP:
+
+```bash
+PAPER_CENTROIDS="$ANALYSIS/paper_diversity/t055_centroid_fingerprints.npz"
+PAPER_UMAP="$ANALYSIS/paper_diversity/centroid_umap"
+PAPER_CENTROID_COUNT=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["sphere_exclusion_clusters"])' \
+  "$ANALYSIS/paper_diversity/_SUCCESS.json")
+mkdir -p "$PAPER_UMAP/chunks"
+
+source /data/programs/oce/actoce
+conda activate fpsim2-0.7.3
+source /data/$USER/venvs/spacehasten-umap/bin/activate
+export PYTHONPATH="$REPO/src:${PYTHONPATH:-}"
+python $REPO/scripts/analysis/transform_landmark_umap_chunk.py \
+  --fingerprints "$PAPER_CENTROIDS" \
+  --model "$UMAP_MODEL" \
+  --chunks-dir "$PAPER_UMAP/chunks" \
+  --task-index 1 \
+  --task-count 1 \
+  --batch-size 500
+python $REPO/scripts/analysis/combine_landmark_umap_chunks.py \
+  --chunks-dir "$PAPER_UMAP/chunks" \
+  --model "$UMAP_MODEL" \
+  --output-dir "$PAPER_UMAP" \
+  --task-count 1 \
+  --expected-count "$PAPER_CENTROID_COUNT" \
+  --skip-landmark-overwrite
+
+source /wrk/setup_conda.sh
+conda activate spacehasten-quick
+python $REPO/scripts/analysis/analyze_paper_diversity.py plot-umap \
+  --output-root "$ANALYSIS/paper_diversity" \
+  --selected-coordinates "$ANALYSIS/selected_umap/landmark_umap_coordinates.npz" \
+  --seed-coordinates "$SEED_COORDINATES" \
+  --centroid-coordinates "$PAPER_UMAP/landmark_umap_coordinates.npz" \
+  --dpi 600
+```
+
+The existing UMAP bundle may contain Python/Numba serialized state tied to its validated overlay.
+Use that overlay for model loading even when the bounded diversity and clustering calculation runs
+locally in `spacehasten-quick`. UMAP remains descriptive and does not define or validate the
+Tanimoto-0.55 clusters.
+
 ## 0G. Count-Matched Resampling — Implemented
 
 Prepare a NumPy-only worker cache. The optional seed inputs shown here enable both per-round
@@ -343,7 +478,7 @@ selected-to-hit count matching and starting-seed-to-final-hit matching:
 
 ```bash
 python $REPO/scripts/analysis/selected_resampling.py prepare \
-  --manifest "$ANALYSIS/structure_cache/selected_manifest.csv.gz" \
+  --manifest "$SELECTED_MANIFEST" \
   --structure-cache "$ANALYSIS/structure_cache/structure_cache.csv.gz" \
   --fingerprints "$ANALYSIS/structure_cache/fingerprints.npz" \
   --seed-reference-cache "$SEED_REFERENCE" \
@@ -361,11 +496,14 @@ After every task succeeds:
 ```bash
 python $REPO/scripts/analysis/selected_resampling.py combine \
   --output-root "$ANALYSIS/resampling" \
+  --natural-metrics "$ANALYSIS/selected_analysis/diversity_metrics.csv" \
   --dpi 600
 ```
 
 The combined tables keep empirical between-replicate intervals separate from each replicate's
-pair-sampling Monte Carlo error. Do not run the old hard-coded worked-run resampling workers.
+pair-sampling Monte Carlo error. The figure overlays the complete observed hit cohort on the
+conditional count-matched selected intervals. Do not run the old hard-coded worked-run resampling
+workers.
 
 ## 0H. Fixed-Reference Selected UMAP — Implemented
 
@@ -468,6 +606,26 @@ Write the run-specific scientific narrative at `$ANALYSIS/FULL_RUN_ANALYSIS.md` 
 canonical tables and figures above. Narrative synthesis is intentionally run-specific; metric
 formulas, chemistry workers, and validation are not. Export it unchanged:
 
+Do not use a separate glossary as the primary explanation of metrics. Define a specialized term in
+the prose when it first appears, and repeat the minimum necessary definition in every table note or
+figure caption that uses it. Every table and figure must remain understandable when viewed outside
+the surrounding report:
+
+- Give every table and figure a numbered scientific title.
+- State the cohort, sample size or denominator, hit cutoff, units, and whether rows are round-specific
+  or cumulative.
+- Define non-obvious metrics and directionality, including q0/q1/q2, HHI, U20/O20, internal
+  diversity, Tanimoto, calibration-in-the-large, Brier score, ECE, and utility components.
+- Explain every color, marker area, line style, panel, reference line, and uncertainty interval.
+- Distinguish Monte Carlo standard error, conditional subsampling intervals, compound-level
+  intervals, and across-campaign uncertainty; never label them generically as confidence.
+- Label raw Gaussian probabilities and persisted production-calibrated `p_hit` as different sources.
+- State that fixed UMAP axes are dimensionless visualization coordinates and not chemical distance.
+- Use reader-facing column names in the report while preserving canonical field names in CSV files.
+- State observational and single-trajectory limits wherever a display could invite a causal claim.
+- Include a numbered end-of-report terms table as a quick reference. It supplements rather than
+  replaces first-use definitions and display-specific notes.
+
 ```bash
 REPORT_MD="$ANALYSIS/FULL_RUN_ANALYSIS.md"
 REPORT_HTML="$ANALYSIS/FULL_RUN_ANALYSIS.html"
@@ -490,6 +648,7 @@ python $REPO/scripts/analysis/validate_run_analysis.py \
   --resampling-root "$ANALYSIS/resampling" \
   --portfolio-history-root "$ANALYSIS/portfolio_history" \
   --portfolio-enrichment-root "$ANALYSIS/portfolio_enrichment" \
+  --paper-diversity-root "$ANALYSIS/paper_diversity" \
   --nearest-seed "$ANALYSIS/nearest_seed/nearest_seed_similarity.npz" \
   --umap "$ANALYSIS/selected_umap/landmark_umap_coordinates.npz" \
   --figures-root "$ANALYSIS" \
@@ -497,9 +656,12 @@ python $REPO/scripts/analysis/validate_run_analysis.py \
   --html "$REPORT_HTML"
 ```
 
-For a non-portfolio legacy run, omit the two portfolio-root arguments and use the compatible
-all-docked chemical-space command in legacy Section 6 instead of Section 0J. Do not omit any stage
-that was executed. The final outputs are `artifact_manifest.json` and `FINAL_VALIDATION.json`.
+For a non-portfolio run with a compatible seed atlas, omit the two portfolio-root arguments and use
+the analysis-owned selected-atlas outputs from Section 0E-A for regional metrics and figures. Use the
+legacy all-docked path only when no compatible seed atlas exists and the user explicitly approves
+creating a new shared reference. Omit `--paper-diversity-root` only when original-paper alignment was
+not requested. Do not omit any stage that was executed. The final outputs are
+`artifact_manifest.json` and `FINAL_VALIDATION.json`.
 
 ## Legacy And Reference Appendix
 
@@ -535,7 +697,9 @@ analysis/fingerprints/
 
 ## 2. Seed-First Sphere-Exclusion Clustering — Conditional
 
-Reuse the all-docked FPSim2 index without modifying the production clustering module:
+This legacy LeaderPicker path is not part of a modern individual-run analysis when a compatible seed
+atlas exists. Use Section 0E-A instead. Run this only when establishing a separately approved shared
+reference for a legacy run that has no compatible atlas:
 
 ```bash
 PYTHONPATH=$REPO/src \
@@ -546,7 +710,9 @@ python $REPO/scripts/analysis/run_clustering_with_index.py \
   --processes "$(nproc)"
 ```
 
-The input must remain seed-first. Seeds establish baseline centroids; virtual compounds outside seed-centroid coverage become virtual-derived centroids.
+The input must remain seed-first. Seeds establish baseline centroids; virtual compounds outside
+seed-centroid coverage become virtual-derived centroids. Do not confuse this legacy all-docked
+clustering with the hit-only Tanimoto-0.55 paper endpoint in Section 0F-P.
 
 ## 3. Landmark Jaccard UMAP — Reference Creation Only
 
@@ -661,12 +827,18 @@ Outputs:
 
 ## 7. Diversity Metrics
 
-For large databases, stage the database inside the selected SLURM job because `/wrk` and `/fastwrk` are node-local. Keep the canonical database on shared `/data` immutable:
+This legacy hit-only interface reports full Murcko families, sampled internal diversity, and a
+user-selected sphere-exclusion threshold. Its historical example uses 0.40 and is not the original
+paper's ScaffoldTree Level 1 plus Tanimoto-0.55 endpoint. For modern selected-cache runs or any
+publication-aligned report, use Sections 0F and 0F-P instead.
+
+On a personal login host, run this bounded database-consuming step directly against the validated
+local `DB`. If an approved shared snapshot exists and SLURM is justified, point the job directly at
+that immutable NFS database in read-only/query-only mode:
 
 ```bash
 WORK_DIR=/fastwrk/$USER/SpaceHASTEN/<run_name>_${SLURM_JOB_ID}
 mkdir -p "$WORK_DIR"
-cp "$DB" "$WORK_DIR/run.dbsh"
 ```
 
 Validate the staged copy with `PRAGMA quick_check` and expected hit count, then run:
@@ -674,7 +846,7 @@ Validate the staged copy with `PRAGMA quick_check` and expected hit count, then 
 ```bash
 PYTHONPATH=$REPO/src \
 python $REPO/scripts/analysis/calculate_hit_diversity_metrics.py \
-  --database "$WORK_DIR/run.dbsh" \
+  --database "$DB" \
   --source-label "$DB" \
   --output-dir "$WORK_DIR/results" \
   --cutoff "$CUTOFF" \
@@ -685,7 +857,9 @@ python $REPO/scripts/analysis/calculate_hit_diversity_metrics.py \
   --processes "$SLURM_CPUS_PER_TASK"
 ```
 
-Copy validated result files back to `$ANALYSIS/metrics/` and remove the node-local run directory before the job exits.
+Copy validated result files back to `$ANALYSIS/metrics/` and remove the node-local result directory
+before the job exits. Do not copy the database unless a measured bottleneck and explicit approval
+justify staging it.
 
 The metrics include:
 
@@ -759,13 +933,12 @@ python $REPO/scripts/analysis/plot_random_seed_comparison.py \
 
 ## Comparison Across Acquisition Functions
 
-Cross-run comparison is a separate stage after each individual report validates. Require identical
-starting-seed `reghash` values and scores, the same docking cutoff, the same fingerprint definition,
-and a common fixed atlas and UMAP reference. Keep all source databases immutable and validate staged
-copies before use.
+Cross-run comparison is a separate stage after each individual report validates. Follow
+`overnight_experiments/COMPARISON_ANALYSIS_WORKFLOW.md` for the definitive compatibility, semantic
+hashing, common selected-union, fixed-reference UMAP, outcome-blind common atlas, natural,
+count-matched, original-paper-aligned, reporting, restart, and validation contracts.
 
-Report full natural hit sets, count-matched cohorts, and potency-matched cohorts as separate
-estimands. Raw richness is sample-size confounded; use deterministic without-replacement resampling
-for count matching and keep pair-sampling Monte Carlo error separate from between-subsample
-variation. Treat fixed-grid UMAP density and Jensen-Shannon distance as visualization descriptors,
-not chemical distances or causal evidence.
+At minimum, require identical starting-seed `reghash` values and scores, compatible docking and
+fingerprint definitions, common hit cutoffs, current individual receipts, and cross-run compound
+identity by `reghash`. Compare complete adaptive systems observationally unless a valid
+counterfactual design supports a narrower causal claim.

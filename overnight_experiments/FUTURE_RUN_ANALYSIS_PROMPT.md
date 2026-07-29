@@ -41,13 +41,18 @@ UMAP transform, diversity formula, coverage formula, or generic validator. Those
 | Translate seed references across ID namespaces | `scripts/analysis/translate_seed_reference.py` |
 | Standard read-only analysis | `scripts/analysis/analyze_run.py` |
 | Training metadata, leakage, prediction drift, timing | `scripts/analysis/analyze_run_metadata.py` |
-| Normalize selected attempts | `scripts/analysis/export_selected_manifest.py` |
+| Normalize selected attempts with history/CSV/docking-input fallback | `scripts/analysis/export_selected_manifest.py` |
 | Prepare/build/combine selected structure cache | `scripts/analysis/selected_structure_cache.py` |
 | Portfolio support/reward/crowding/coverage analysis | `scripts/analysis/analyze_portfolio_history.py` |
 | Exact portfolio candidate/region enrichment | `scripts/analysis/analyze_portfolio_enrichment.py` |
 | Selected diversity/descriptors/seed coverage | `scripts/analysis/analyze_selected_cache.py` |
+| Original-paper-aligned Level 1 and Tanimoto-0.55 hit diversity | `scripts/analysis/analyze_paper_diversity.py` |
+| Prepare common-ID manifests for paper-aligned comparison | `scripts/analysis/prepare_paper_comparison.py` |
+| Exact natural and count-matched paper comparison | `scripts/analysis/compare_paper_diversity.py` |
 | Selected and seed count-matched resampling | `scripts/analysis/selected_resampling.py` |
 | Prepare selected exact nearest-seed jobs | `scripts/analysis/prepare_selected_nearest_seed.py` |
+| Assign/repair selected compounds against a reusable seed atlas | `scripts/analysis/assign_selected_atlas.py` |
+| Build reusable seed scaffold/framework/atlas reference cache | `scripts/analysis/build_seed_reference_cache.py` |
 | Exact nearest-seed worker/combine | `nearest_seed_similarity_chunk.py`, `combine_nearest_seed_chunks.py` |
 | Prepare selected or centroid cached UMAP jobs | `scripts/analysis/prepare_cached_umap.py` |
 | Fixed UMAP transform/combine | `transform_landmark_umap_chunk.py`, `combine_landmark_umap_chunks.py` |
@@ -76,22 +81,31 @@ configuration file should be added only when multiple stable central commands re
    database. Never silently drop failed docking attempts.
 8. Open canonical databases read-only. For an active writer or final archival analysis, create a
    SQLite online-backup snapshot first.
-9. Put reusable logic in `src/spacehasten/analysis/` and generic thin CLIs/workers in
+9. Before copying a database to `/data`, NFS, or any shared filesystem, report its size,
+   destination, purpose, and expected reuse, then ask the user for explicit approval. A local-only
+   analysis on the user's personal host may keep a validated local snapshot and share only derived
+   inputs and final artifacts.
+   When an approved shared snapshot exists, compute jobs should open it directly in read-only mode.
+   Never copy the full database once per array task; prepare compact shared chunks instead. Consider
+   node-local staging only after measured NFS performance and separate approval.
+10. Put reusable logic in `src/spacehasten/analysis/` and generic thin CLIs/workers in
    `scripts/analysis/` only when truly reusable across runs.
-10. Put target-, run-, policy-, or study-specific orchestration under
-    `<RUN>/analysis/scripts/`.
-11. Use SLURM arrays for independent molecule chunks, nearest-neighbor searches, UMAP transforms,
-    resampling replicates, docking census tasks, and other embarrassingly parallel work.
-12. While SLURM jobs run, continue independent local analysis and report integration. Do not wait
+11. Put target-, run-, policy-, or study-specific orchestration under
+     `<RUN>/analysis/scripts/`.
+12. Use local `spacehasten-quick` compute for bounded cache-backed work that fits comfortably in
+    local memory and runtime. Use SLURM arrays for campaign-scale molecule chunks, large exact
+    nearest-neighbor searches, large UMAP transforms, resampling replicates, docking census tasks,
+    and other workloads that materially benefit from distributed execution.
+13. While SLURM jobs run, continue independent local analysis and report integration. Do not wait
     idle.
-13. Validate every expensive stage before downstream use and write a completion receipt.
-14. Do not make cross-run or causal claims in a single-run report.
-15. Do not copy a worked run's worker or combiner into a new run. Use the central command or improve
+14. Validate every expensive stage before downstream use and write a completion receipt.
+15. Do not make cross-run or causal claims in a single-run report.
+16. Do not copy a worked run's worker or combiner into a new run. Use the central command or improve
     it centrally with tests.
-16. Do not build report or validation scripts before their canonical input tables and receipts
+17. Do not build report or validation scripts before their canonical input tables and receipts
     exist.
-17. Prefer modern acquisition-history tables over final-row reconstruction when available.
-18. Treat a generated `_SUCCESS.json` as reusable only after validating its input/config hashes.
+18. Prefer modern acquisition-history tables over final-row reconstruction when available.
+19. Treat a generated `_SUCCESS.json` as reusable only after validating its input/config hashes.
 
 ## Agent Delegation Rule
 
@@ -119,20 +133,33 @@ Set these conceptual variables for the new run:
 REPO=<repository root>
 RUN=<completed overnight experiment directory>
 DB_SOURCE=<canonical or active run .dbsh database>
-SNAPSHOT_ROOT=/data/$USER/SPACEHASTEN/<run_name>_analysis
-DB=<SNAPSHOT_ROOT>/final.dbsh
+DB_ROOT=<local immutable database root, normally /fastwrk/$USER/...>
+DB=<DB_ROOT>/final.dbsh
 SHARED=<RUN>/run_shared
-ANALYSIS=<SNAPSHOT_ROOT>/analysis
+ANALYSIS_ROOT=<shared derived/final artifact root>
+ANALYSIS=<ANALYSIS_ROOT>/analysis
 HIT_CUTOFF=<target-specific docking cutoff>
+STRICT_HIT_CUTOFF=<target-specific stricter docking cutoff>
+CUTOFF_RANGE_MIN=<target-specific sensitivity lower bound>
+CUTOFF_RANGE_MAX=<target-specific sensitivity upper bound>
+CUTOFF_RANGE_STEP=<target-specific sensitivity increment>
 SEED=42
 ```
+
+Because docking scores are lower-is-better, `STRICT_HIT_CUTOFF` must be numerically lower than
+`HIT_CUTOFF`. The sensitivity range must contain both thresholds; do not reuse another target's
+example range without checking the observed score distribution.
+
+`DB_ROOT` and `ANALYSIS_ROOT` are independent by design. Local orchestration reads the immutable
+database and writes compact deterministic inputs beneath shared `ANALYSIS`; generated SLURM arrays
+consume those inputs rather than the database.
 
 Required evidence:
 
 | Input | Purpose |
 |---|---|
 | Database | Authoritative structures, scores, iterations, predictions, atlas assignments |
-| `run_shared/docking/iter*/acquisition.csv` | Selected attempts, rank, model, uncertainty, alpha/lambda/cap |
+| acquisition history, `acquisition.csv`, or docking input chunks | Selected attempts and the strongest available rank/provenance evidence |
 | `run_shared/models/v*/training_metadata.json` | Training behavior and model provenance |
 | Run log and `logs/spacehasten.log` | Stage boundaries and scheduler job IDs |
 | Docking templates/grid | Required only for a new validation census |
@@ -151,6 +178,9 @@ model_calibrations
 
 Prefer these tables for selected attempts, unresolved outcomes, acquisition diagnostics, and prior
 support. Use acquisition CSVs as portable mirrors and as the fallback for older runs.
+When the tables exist but contain no batches and acquisition CSVs are absent, use the central
+docking-input fallback. It recovers attempted IDs from `docking/iter*/inputs/chunk_*.smi`, retains
+unresolved outcomes, and labels greedy ranks reconstructed from version-matched predictions.
 
 ## Authoritative Run-Time Data Model
 
@@ -200,7 +230,8 @@ database with `PRAGMA table_info`; older runs may lack extension tables.
 
 | Path | Stored evidence | Use |
 |---|---|---|
-| `run_shared/docking/iter*/acquisition.csv` | Portable selected-attempt mirror, rank, model, prediction/uncertainty, policy and cluster diagnostics available for that strategy | Legacy fallback and independent reconciliation with database history |
+| `run_shared/docking/iter*/acquisition.csv` | Portable selected-attempt mirror, rank, model, prediction/uncertainty, policy and cluster diagnostics available for that strategy | First legacy fallback and independent reconciliation with database history |
+| `run_shared/docking/iter*/inputs/chunk_*.smi` | Exact submitted docking structures and IDs after load-balancing shuffle | Final selected-ID fallback when history rows and acquisition CSVs are absent; not persisted rank evidence |
 | `run_shared/models/v*/training_metadata.json` | Train/validation counts, epochs, best epoch/loss, stopping, target scaling, seed, batch/worker settings and implementation-specific metadata | Training behavior and provenance |
 | `run_shared/models/v*/train.csv`, `val.csv` | Exact model split rows when retained | Leakage, split identity and distribution checks |
 | `run_shared/models/v*/` model/calibration artifacts | Serialized fitted model and calibration outputs with hashes when recorded | Reproduction and calibration verification, not ad hoc refitting during analysis |
@@ -225,8 +256,8 @@ produce and the grain at which a future hypothesis can consume each artifact.
 | `standard/score_distribution.csv` | Round and score ECDF point | Full observed score-distribution source for custom plots |
 | `standard/family_metrics.csv` | One selected cohort per round | Internal diversity, Murcko family concentration and persistent-atlas concentration when available |
 | `standard/acquisition_metrics.csv` | One row per round | Portable acquisition CSV invariants such as candidate count, model, penalty/cap/frontier settings when present |
-| `standard/calibration_metrics.csv` | One row per round/model | Prediction coverage, bias, MAE/RMSE, Pearson/Spearman, hit probability, Brier/log loss/ECE, uncertainty-error correlation and interval coverage |
-| `standard/calibration_curve.csv` | Round/model/probability bin | Mean predicted hit probability and observed hit fraction |
+| `standard/calibration_metrics.csv` | One row per round/model | Prediction coverage, bias, MAE/RMSE, Pearson/Spearman, and raw Gaussian hit-probability diagnostics reconstructed from `pred_score` and total uncertainty |
+| `standard/calibration_curve.csv` | Round/model/raw-probability bin | Mean raw Gaussian hit probability and observed hit fraction; not persisted production `p_hit` |
 | `standard/coverage.csv` | One row per round | Explicit selected, scored and missing-outcome audit/status |
 | `run_metadata/training_metadata.csv` | One row per model | Flattened retained training metadata |
 | `run_metadata/training_leakage_validation.csv` | One row per used model | Selected count, overlapping training SMILES, pass/unavailable/fail status |
@@ -236,6 +267,7 @@ produce and the grain at which a future hypothesis can consume each artifact.
 | `structure_cache/selected_manifest.csv.gz` | One row per selected attempt | Identity/outcome plus complete modern batch, policy, model, atlas, utility, support, crowding, cap and calibration diagnostics; legacy fields are namespaced `acquisition_*` |
 | `structure_cache/structure_cache.csv.gz` | One row per unique selected compound | `spacehastenid`, `reghash`, typed Murcko scaffold, generic framework, MW, cLogP, TPSA, HBD/HBA, rotatable bonds, rings and Fsp3 |
 | `structure_cache/fingerprints.npz` | One row per unique selected compound | `spacehastenid`, packed Morgan radius-2/1024 `words` (`N x 16 uint64`) and `popcounts` |
+| `portfolio_history/p_hit_calibration_metrics.csv`, `p_hit_calibration_curve.csv` | Round or round/probability bin | Reliability of persisted production-calibrated selection-time `p_hit`, kept separate from raw Gaussian diagnostics |
 | `portfolio_history/*.csv` | Selection, region, round or threshold depending on table | Utility contributions, support-stratified outcomes/calibration, expected-versus-observed regions, cap binding, productive coverage, depth, transitions and first crossings |
 | `portfolio_enrichment/cluster_round_enrichment.csv` | Round and persistent region | Candidate/selected/scored/hit counts and shares, selection/hit enrichment, share growth, expected mass, centroid ID/version/source and observed hit rate |
 | `portfolio_enrichment/within_cluster_selection_order.csv` | One selected attempt | Selection order, cluster order, utility diagnostics and outcome flags |
@@ -248,6 +280,9 @@ produce and the grain at which a future hypothesis can consume each artifact.
 | `selected_analysis/seed_coverage_metrics.csv` | Round and selected/hit cohort | Nearest-seed summaries/threshold fractions, seed-novel scaffold/framework fractions and seed-centred atlas fraction |
 | `resampling/resampling_replicates.csv` | Design, replicate and round | Count-matched internal/family/atlas diversity and pair-sampling MC error |
 | `resampling/resampling_intervals.csv` | Design, round and metric | Empirical mean/median/95% interval across replicates, separate from MC error |
+| `paper_diversity/paper_aligned_metrics.csv` | Round/cumulative scope by representation | ScaffoldTree Level 1 and hit-only Morgan2/Tanimoto-0.55 q0/q1/q2, concentration, assigned and unassigned hit counts |
+| `paper_diversity/paper_aligned_assignments.csv.gz` | One row per virtual hit | Level 1 assignment/status, deterministic Tanimoto-0.55 centroid assignment and centroid similarity |
+| `paper_diversity/t055_centroid_fingerprints.npz`, `centroid_umap/*` | One row per hit-only cluster centroid | Packed centroid fingerprints and optional transformation through the existing fixed UMAP model without refitting |
 | `selected_umap/landmark_umap_coordinates.npz` | One row per unique selected compound | Fixed-reference `spacehastenid` and finite 2D coordinates; visualization only |
 | `centroid_umap/landmark_umap_coordinates.npz` | One row per occupied unique centroid | Coordinates needed for persistent-region maps when seed/selected coordinates do not already cover a centroid |
 | `chemical_space/cluster_statistics.csv` | One row per occupied persistent region | Selected/scored/hit counts, centroid coordinates/source, posterior local hit rate and difference from global |
@@ -340,12 +375,13 @@ prediction, docking, nearest-neighbor search, or UMAP.
 | Hypothesis or visualization | Primary data | Required controls/limits |
 |---|---|---|
 | Yield or potency changed by round | `round_metrics`, `score_distribution`, `cutoff_curve`, attempt outcomes | Show selected and scored denominators separately; round differences are descriptive within one adaptive trajectory |
-| Model ranking or calibration improved | `calibration_metrics`, `calibration_curve`, versioned `predictions`, `model_calibrations` | Join each attempt to its acquisition model; report coverage and unavailable rows |
+| Model ranking or calibration improved | Raw `standard/calibration_*`, production `portfolio_history/p_hit_calibration_*`, versioned `predictions`, `model_calibrations` | Join each attempt to its acquisition model; never merge or ambiguously label raw Gaussian and production `p_hit` reliability |
 | Uncertainty selected useful compounds | Selected manifest raw/calibrated std, `p_hit`, EI and observed outcomes | Distinguish association from a counterfactual acquisition effect; stratify by round/support |
 | Portfolio reward or crowding changed selection | Selection quality/support/reward/crowding/final utility and `portfolio_history` tables | Use diagnostics recorded at selection time; do not reconstruct them from final `data` state |
 | Candidate supply explains regional selection | `cluster_round_enrichment` candidate and selected shares/growth | Require exact candidate count and digest; compare within matching atlas/version |
 | Productive regions deepened or broadened | `production_atlas_metrics`, coverage depth, transitions and threshold crossings | State hit cutoff and atlas; report q0/q1/q2 together with U20/O20 and depth |
 | Chemical diversity narrowed or expanded | `diversity_metrics`, productive-family growth, resampling intervals | Separate natural cohort size from count-matched estimands; MC error is not campaign uncertainty |
+| Diversity is comparable to the original SpaceHASTEN paper | `paper_diversity/paper_aligned_*` | Use ScaffoldTree Level 1 and hit-only Morgan2/Tanimoto-0.55 sphere exclusion; report unassigned Level 1 hits and deterministic input order; keep the production atlas separate |
 | Discoveries moved away from starting seeds | `selected_nearest_seed`, `seed_coverage_metrics`, seed-novel scaffolds/frameworks | Tanimoto is quantitative; UMAP is descriptive only |
 | Physicochemical profile drifted | Descriptor values/summary joined to round, hit, rank, uncertainty or region | Use complete descriptor distributions, not only means; do not add drug-likeness claims without a defined rule |
 | Particular regions are locally enriched | `cluster_statistics`, enrichment tables and centroid coordinates | Use scored count as hit-rate denominator, beta-binomial shrinkage, and centroid source outlines |
@@ -430,6 +466,11 @@ the canonical workspace database.
 
 ### How
 
+Before running the command, report the database size, destination filesystem, transfer reason, and
+expected reuse. Ask for explicit approval if the destination is `/data`, NFS, or any shared
+filesystem. If the user chooses local analysis, create and validate the snapshot locally and publish
+only derived task inputs and final artifacts; ask again before any later full-database transfer.
+
 ```bash
 source /wrk/setup_conda.sh
 conda activate spacehasten-quick
@@ -466,7 +507,7 @@ python scripts/analysis/analyze_run.py "$RUN" \
   --database "$DB" \
   --analysis-root "$ANALYSIS/standard" \
   --hit-threshold "$HIT_CUTOFF" \
-  --cutoff-range -12 -8 0.25 \
+  --cutoff-range "$CUTOFF_RANGE_MIN" "$CUTOFF_RANGE_MAX" "$CUTOFF_RANGE_STEP" \
   --pair-samples 1000000 \
   --random-seed 42 \
   --dpi 600
@@ -491,8 +532,11 @@ Do not duplicate these calculations in a run-local script.
 ## Phase 3: Model Behavior And Timing
 
 Do not copy a prior run's model-analysis or timing script. Use
-`standard/calibration_metrics.csv` and `standard/calibration_curve.csv` for prospective prediction
-quality, then execute `scripts/analysis/analyze_run_metadata.py` exactly as shown in Section 0B of
+`standard/calibration_metrics.csv` and `standard/calibration_curve.csv` for raw prospective score and
+Gaussian-probability diagnostics. For portfolio runs, use
+`portfolio_history/p_hit_calibration_metrics.csv` and `p_hit_calibration_curve.csv` for persisted
+production-calibrated selection-time probabilities. Then execute
+`scripts/analysis/analyze_run_metadata.py` exactly as shown in Section 0B of
 `ANALYSIS_WORKFLOW.md` for training metadata, leakage, prediction drift, log timing, and `sacct`.
 
 ### Why
@@ -556,6 +600,7 @@ python scripts/analysis/selected_structure_cache.py prepare "$RUN" \
   --database "$DB" \
   --output-root "$ANALYSIS/structure_cache" \
   --hit-threshold "$HIT_CUTOFF" \
+  --strict-threshold "$STRICT_HIT_CUTOFF" \
   --task-count 80
 ```
 
@@ -581,9 +626,24 @@ Do not proceed to diversity analysis without it.
 
 ## Phase 6: Diversity And Resampling
 
+Before diversity/resampling, require an atlas label for every selected compound. Use production
+assignments when they exist. Otherwise run the central selected-atlas prepare/worker/combine workflow
+against a compatible completed seed atlas and consume its derived manifest. Never substitute the
+legacy all-docked LeaderPicker path when a seed atlas is available.
+
 Selected-cache diversity and resampling are fully implemented centrally. Execute Sections 0F and
 0G of `ANALYSIS_WORKFLOW.md` exactly with `analyze_selected_cache.py` and
 `selected_resampling.py`. Do not copy or adapt the worked-run cache, rarefaction, or combine scripts.
+
+When comparison with the original SpaceHASTEN publication is required, also execute Section 0F-P
+with `analyze_paper_diversity.py`. Keep its ScaffoldTree Level 1 and hit-only
+Morgan2/Tanimoto-0.55 endpoints separate from full Murcko families and the campaign's seed-first
+production atlas. The bounded hit-only calculation normally runs locally from the validated
+manifest and packed fingerprint cache; distribute it only if measured local resource use warrants
+that change.
+
+LeaderPicker is used only for this bounded hit-only paper endpoint. It must not be run over the full
+seed-plus-selected or all-docked population when a compatible seed atlas exists.
 
 ### Why
 
@@ -606,6 +666,7 @@ These scripts consume cached labels and packed fingerprints. They do not repeat 
 - New productive families by round.
 - Richness per 10,000 compounds.
 - Deterministic rarefaction intervals.
+- Original-paper-aligned Level 1 and hit-only Tanimoto-0.55 q0/q1/q2 and concentration when requested.
 
 Use SLURM arrays for resampling. Workers should consume NumPy-only caches when the compute-node
 environment lacks pandas.
@@ -661,12 +722,18 @@ generic `transform_landmark_umap_chunk.py --fingerprints` mode. Combine with
 of `ANALYSIS_WORKFLOW.md`. Do not copy old run-local transform workers and never refit the primary
 UMAP for an individual run.
 
+For a non-portfolio run without production atlas assignments, use the analysis-owned selected atlas
+from the central assignment/repair stage. Fit no all-docked LeaderPicker reference merely to obtain
+regional labels.
+
 ### Required Figures
 
 1. Seed and virtual-hit density.
 2. Acquisition shift by round.
 3. Local virtual-hit enrichment.
 4. Exact nearest-seed ECDF.
+5. Paper-aligned Tanimoto-0.55 centroid overlay through the existing fixed model when Section 0F-P
+   was requested; do not refit UMAP.
 
 ### Canonical Figure 3 Definition
 
@@ -707,6 +774,32 @@ thin: no chemistry workers, metric formulas, transforms, or generic artifact val
 `scripts/analysis/validate_run_analysis.py` with every executed stage as shown in Section 0K of
 `ANALYSIS_WORKFLOW.md`. Do not build a parallel report or validator framework inside one run.
 
+### Standalone Scientific Display Standard
+
+Do not create a separate glossary as the primary explanation. Define each specialized term in the
+text when it first appears, then repeat the minimum needed definition in every table note or figure
+caption where the term is used. Every display must remain understandable when extracted from the
+report:
+
+- Give each table and figure a numbered scientific title.
+- State cohort, sample size or denominator, hit cutoff, units, and round-specific versus cumulative
+  scope.
+- Replace implementation-facing headings with reader-facing labels in the report while retaining
+  canonical names in source CSV files.
+- Define metric formulas or semantics and directionality, including q0/q1/q2, HHI, U20/O20,
+  internal diversity, Tanimoto, Brier score, ECE, calibration-in-the-large, and utility components.
+- Explain panels, axes, colors, line styles, marker areas, outlines, reference lines, and every
+  uncertainty interval.
+- Distinguish pair-sampling Monte Carlo SE, conditional subsampling intervals, compound-level
+  intervals, and across-campaign uncertainty.
+- Label raw Gaussian probabilities and persisted production-calibrated `p_hit` as separate sources.
+- State that fixed UMAP coordinates are dimensionless visual descriptors and not quantitative
+  chemical distances.
+- State observational, adaptive-pool, and single-trajectory limits where relevant; avoid causal
+  acquisition-policy claims without a valid counterfactual design.
+- End with a numbered terms-and-definitions table for quick lookup. Keep all first-use and
+  display-specific explanations; the glossary is supplementary.
+
 ### Required Report Sections
 
 1. Integrity and provenance.
@@ -731,6 +824,8 @@ Validate:
 - Structure, nearest-seed, and UMAP row counts.
 - Finite coordinates and metrics.
 - Expected diversity and cap cell counts.
+- Paper-aligned virtual-hit count, Level 1 assignment-status counts, Tanimoto threshold 0.55, and
+  complete centroid assignment when that stage was executed.
 - Expected resampling replicate counts.
 - Nonempty PNG and PDF figures.
 - All Markdown image links resolve.
@@ -749,6 +844,7 @@ Validate:
 ├── structure_cache/
 ├── nearest_seed/
 ├── selected_analysis/
+├── paper_diversity/                # when original-paper alignment is requested
 ├── resampling/
 ├── selected_umap/
 ├── centroid_cache/
@@ -770,6 +866,7 @@ Copy this checklist into the working task list:
 [ ] Read ANALYSIS_WORKFLOW.md and its current implementation-status table.
 [ ] Inventory the new run and existing compatible assets.
 [ ] Validate run completion and modern acquisition history or acquisition CSV fallback.
+[ ] Report database size/destination/purpose and obtain approval before any shared/NFS copy.
 [ ] Create an immutable SQLite analysis snapshot.
 [ ] Translate reusable seed references by reghash when source and target ID namespaces differ.
 [ ] Run analyze_run.py with the run path plus immutable --database override.
@@ -787,6 +884,30 @@ Copy this checklist into the working task list:
 [ ] Run validate_run_analysis.py and inspect FINAL_VALIDATION.json.
 [ ] Write a run-specific ANALYSIS_REPRODUCIBILITY.md.
 [ ] Stop before cross-run comparisons unless separately requested.
+```
+
+## Startup Checklist For A Comparison
+
+When a cross-run comparison is separately requested, read
+`COMPARISON_ANALYSIS_WORKFLOW.md` and copy this checklist into the task list:
+
+```text
+[ ] Require current status-ok individual validations for both workflows.
+[ ] Validate seed identity/score maps, docking protocol, cutoffs, filters, and fingerprints.
+[ ] Normalize selected attempts with explicit rank-source and adaptive-boundary fields.
+[ ] Write byte hashes and canonical semantic digests for both event tables.
+[ ] Build or validate one reghash-sorted common selected-union fingerprint cache.
+[ ] Reuse common fixed-model coordinates only after union/model/hash validation; never refit UMAP.
+[ ] Build or validate one outcome-blind seed-first common atlas with zero uncovered structures.
+[ ] Compute natural yield, quality, molecular, regional, seed-distance, overlap, and score results.
+[ ] Count-match the larger hit cohort while keeping the smaller complete hit cohort fixed.
+[ ] Compute ScaffoldTree Level 1 and exact hit-only Tanimoto-0.55 metrics for both workflows.
+[ ] Independently recluster every paper-aligned count-matched sample.
+[ ] Generate normalized common-reference and standalone paper-aligned figures.
+[ ] Define metrics near first use; give every table a note and every figure a standalone caption.
+[ ] Export standalone HTML after final figures.
+[ ] Run comparison validation and inspect status, source hashes, manifest, and figure counts.
+[ ] Stop for scientific review before adding another workflow or target.
 ```
 
 ## What Not To Claim

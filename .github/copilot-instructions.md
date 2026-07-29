@@ -88,11 +88,29 @@ Available environments on compute nodes:
 
 ## Large Database Analysis
 
-For I/O-intensive analysis of large SQLite databases, keep the canonical database under `/data/$USER` but stage a read-only working copy under `/fastwrk/$USER/<project>/<run>` on the compute node selected for the job. `/wrk` and `/fastwrk` paths exist on every node but are node-local; copies created on the login host or another compute node are not shared. Stage from shared `/data` inside the job, run scans and temporary analysis on that node's `/fastwrk`, then copy only validated final results back to `/data/$USER`.
+Before copying a database to `/data`, NFS, or any other shared filesystem, report the source size,
+destination, reason for the transfer, and expected reuse, then ask the user for explicit approval.
+Do not treat a shared database snapshot as an automatic prerequisite when analysis can remain on the
+user's personal login host.
 
-- Treat the canonical database on `/data` as immutable during analysis.
+Use separate roots by default: keep the immutable analysis database under the user's local
+`/fastwrk/$USER/<project>/<run>` namespace and write compact derived inputs and final artifacts under
+`/data/$USER`. A shared artifact root does not imply that the database must be shared.
+
+For approved shared-database workflows, keep the immutable snapshot under `/data/$USER` and have
+compute jobs open that shared file directly in read-only/query-only mode. Do not stage a node-local
+database copy by default, and never copy the full database once per array task. Prefer preparing
+compact shared chunks before submission so most array workers never open the database. Consider
+node-local staging only after measured NFS performance demonstrates a material bottleneck and the
+user explicitly approves the additional copy.
+
+For user-approved local-only workflows, validate a local backup and place only derived inputs and
+final artifacts on shared storage; ask again before a later database archive or SLURM stage that
+requires the full database.
+
+- Treat any validated local or approved shared canonical database as immutable during analysis.
 - If the source database may have an active writer, use SQLite's backup mechanism rather than copying the file directly.
-- Verify the staged copy before analysis, for example with `PRAGMA quick_check` and expected row counts.
+- Verify the immutable snapshot once before analysis, for example with `PRAGMA quick_check` and expected row counts.
 - Do not copy a modified analysis database back over the canonical database unless the user explicitly requests it.
 - Use a run-specific directory, preferably including `$SLURM_JOB_ID`, to prevent concurrent jobs from sharing or overwriting temporary files.
 
