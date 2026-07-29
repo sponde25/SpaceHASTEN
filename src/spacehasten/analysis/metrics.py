@@ -143,6 +143,8 @@ def normalize_acquisitions(
             model_version,
             model_version_status,
             model_version_reason,
+            "acquisition_csv",
+            "acquisition_csv",
         )
         selections[round_id] = selection
         record: dict[str, Any] = {
@@ -273,7 +275,9 @@ def round_metrics(
         coverage.append(
             {
                 **common,
-                "source": "acquisition_csv" if round_id in selections else "database",
+                "source": (
+                    selections[round_id].selection_source if round_id in selections else "database"
+                ),
                 "status": "complete" if len(scored) == len(selected) else "partial",
                 "reason": None
                 if len(scored) == len(selected)
@@ -291,7 +295,7 @@ def cutoff_metrics(
 ) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     for cutoff in sorted(set(cutoffs)):
-        selected = scored = 0
+        selected = scored = hits = 0
         for round_id in round_ids:
             attempted = attempts(round_id, rows, selections)
             scored_ids = [
@@ -301,7 +305,9 @@ def cutoff_metrics(
             ]
             selected += len(attempted)
             scored += len(scored_ids)
-            hits = sum(float(rows[identifier]["dock_score"]) <= cutoff for identifier in scored_ids)
+            hits += sum(
+                float(rows[identifier]["dock_score"]) <= cutoff for identifier in scored_ids
+            )
             result.append(
                 {
                     "round": round_id,

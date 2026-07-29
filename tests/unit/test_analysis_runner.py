@@ -9,6 +9,7 @@ from rdkit import Chem
 
 from spacehasten.analysis import AnalysisConfig, analyze_run, discover_run
 from spacehasten.analysis.chemistry import ACYCLIC, diversity, family_labels
+from spacehasten.core.db import Database
 
 
 def _database(path: Path, *, atlas_ids: tuple[str, ...] = ("atlas-a",)) -> Path:
@@ -165,6 +166,13 @@ def test_real_layout_outer_run_local_and_docking_acquisitions(tmp_path: Path) ->
     assert acquisition[0]["cluster_penalty_nonzero_fraction"] == str(2 / 3)
     assert acquisition[0]["cluster_count_before_max"] == "2.0"
     assert _read_csv(root / "budget_curve.csv")[-1]["selected_budget"] == "5"
+    cutoff = _read_csv(root / "cutoff_curve.csv")
+    final_cutoffs = {float(row["cutoff"]): row for row in cutoff if row["round"] == "2"}
+    assert final_cutoffs[-8.0]["hits"] == "0"
+    assert final_cutoffs[-8.0]["scored"] == "2"
+    assert final_cutoffs[-8.0]["hit_rate_scored"] == "0.0"
+    assert final_cutoffs[-7.0]["hits"] == "1"
+    assert final_cutoffs[-7.0]["hit_rate_scored"] == "0.5"
     assert len(_read_csv(root / "score_distribution.csv")) == 202
     assert (root / "cumulative_hits.png").stat().st_size > 0
     assert (root / "score_ecdf.png").stat().st_size > 0
@@ -212,6 +220,49 @@ def test_database_override_must_exist_and_contain_data(tmp_path: Path) -> None:
     sqlite3.connect(invalid).close()
     with pytest.raises(ValueError, match="does not contain a data table"):
         discover_run(run, database_path=invalid)
+
+
+def test_analysis_recovers_attempt_denominators_from_docking_inputs(tmp_path: Path) -> None:
+    run = tmp_path / "recovered"
+    run.mkdir()
+    database_path = run / "run.dbsh"
+    with Database(database_path) as database:
+        database.create_schema()
+        database.connection.executemany(
+            "INSERT INTO data(spacehastenid,reghash,smiles,dock_score,pred_score,"
+            "dock_iteration,pred_version) VALUES (?,?,?,?,?,?,?)",
+            [
+                (1, "seed", "C", -5.0, None, 0, None),
+                (2, "h2", "CC", -9.0, -8.0, 1, None),
+                (3, "h3", "CCC", None, -9.0, None, None),
+                (4, "h4", "CCCC", -10.0, -7.0, 2, 1),
+            ],
+        )
+        database.connection.executemany(
+            "INSERT INTO predictions(spacehastenid,model_version,pred_score,epistemic_std) "
+            "VALUES (?,?,?,?)",
+            [(2, 0, -8.0, 0.2), (4, 1, -7.0, 0.4)],
+        )
+        database.commit()
+    for round_id, rows in ((1, ("CC 2", "CCC 3")), (2, ("CCCC 4",))):
+        path = run / f"run_shared/docking/iter{round_id}/inputs/chunk_1.smi"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+    root = _run(run, tmp_path / "recovered-analysis")
+    metrics = _read_csv(root / "round_metrics.csv")
+    coverage = _read_csv(root / "coverage.csv")
+    acquisition = _read_csv(root / "acquisition_metrics.csv")
+
+    assert metrics[0]["selected"] == "2"
+    assert metrics[0]["scored"] == "1"
+    assert metrics[0]["missing"] == "1"
+    assert metrics[1]["selected"] == "1"
+    assert metrics[1]["scored"] == "1"
+    assert coverage[0]["status"] == "partial"
+    assert coverage[0]["source"] == "docking_input_chunks"
+    assert acquisition[0]["selection_source"] == "docking_input_chunks"
+    assert acquisition[0]["rank_source"] == "data_prediction_score_then_id"
 
 
 def test_seed_exclusion_threshold_equality_and_legacy_layout(tmp_path: Path) -> None:
@@ -263,6 +314,8 @@ def test_calibration_uses_exact_model_version_and_zero_std_is_deterministic(tmp_
     curve = _read_csv(root / "calibration_curve.csv")
     first, second = metrics
     assert first["model_version"] == "v1"
+    assert first["mean_source"] == "predictions.pred_score"
+    assert first["probability_source"] == "raw_gaussian_pred_score_total_std"
     assert first["observed_outcomes"] == "2"
     assert first["matched_predictions"] == "2"
     assert first["coverage"] == str(2 / 3)
@@ -282,6 +335,7 @@ def test_calibration_uses_exact_model_version_and_zero_std_is_deterministic(tmp_
         ("0.0", "1"),
         ("0.9", "1"),
     ]
+    assert {row["probability_source"] for row in curve} == {"raw_gaussian_pred_score_total_std"}
     assert (root / "calibration_reliability.png").stat().st_size > 0
     assert (root / "calibration_reliability.pdf").stat().st_size > 0
 

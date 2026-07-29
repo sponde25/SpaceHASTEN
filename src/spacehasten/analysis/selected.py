@@ -11,14 +11,8 @@ from pathlib import Path
 from .artifacts import AtomicPath
 from .database import ReadOnlyDatabase, batches
 from .models import Row, RunContext
+from .recovery import has_modern_history, recover_docking_input_acquisitions
 
-MODERN_HISTORY_TABLES = frozenset(
-    {
-        "acquisition_batches",
-        "acquisition_selections",
-        "acquisition_outcomes",
-    }
-)
 ID_COLUMNS = ("spacehastenid", "id", "compound_id")
 
 
@@ -30,10 +24,18 @@ def selected_manifest(
 ) -> list[Row]:
     """Return one normalized row per selected attempt in acquisition order."""
     with ReadOnlyDatabase(context.database_path) as database:
-        if set(context.capabilities.tables) >= MODERN_HISTORY_TABLES:
+        if has_modern_history(database):
             rows = _modern_manifest(database)
-        else:
+        elif context.acquisition_paths:
             rows = _legacy_manifest(database, context.acquisition_paths)
+        elif context.docking_input_paths:
+            _, _, rows = recover_docking_input_acquisitions(
+                database,
+                context.capabilities,
+                context.docking_input_paths,
+            )
+        else:
+            rows = []
     for row in rows:
         score = row["dock_score"]
         row["is_scored"] = score is not None
@@ -156,6 +158,8 @@ def _modern_manifest(database: ReadOnlyDatabase) -> list[Row]:
     for row in rows:
         row["selection_id"] = f"{row['batch_id']}:{row['rank']}"
         row["cap_reached_after"] = bool(row["cap_reached_after"])
+        row["selection_source"] = "database_history"
+        row["rank_source"] = "persisted_selection_rank"
     return rows
 
 
@@ -179,6 +183,8 @@ def _legacy_manifest(
                     "round": round_id,
                     "rank": rank,
                     "spacehastenid": identifier,
+                    "selection_source": "acquisition_csv",
+                    "rank_source": "acquisition_csv",
                 }
                 for name, value in acquisition.items():
                     if name not in ID_COLUMNS and name != "rank":

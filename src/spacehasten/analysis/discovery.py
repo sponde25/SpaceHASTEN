@@ -30,11 +30,19 @@ def discover_run(
         raise FileNotFoundError(database)
     shared_root = _discover_shared_root(input_path)
     acquisition_paths = _discover_acquisitions(shared_root) if shared_root else ()
+    docking_input_paths = _discover_docking_inputs(shared_root) if shared_root else ()
     with ReadOnlyDatabase(database) as source:
         capabilities = source.capabilities()
     if not capabilities.has_data:
         raise ValueError(f"{database} does not contain a data table")
-    return RunContext(input_path, database, shared_root, acquisition_paths, capabilities)
+    return RunContext(
+        input_path=input_path,
+        database_path=database,
+        shared_root=shared_root,
+        acquisition_paths=acquisition_paths,
+        docking_input_paths=docking_input_paths,
+        capabilities=capabilities,
+    )
 
 
 def _candidate_roots(root: Path) -> tuple[Path, ...]:
@@ -110,4 +118,33 @@ def _discover_acquisitions(shared_root: Path) -> tuple[tuple[int, Path], ...]:
             if round_id in found:
                 raise ValueError(f"ambiguous acquisition CSV for round {round_id}")
             found[round_id] = path
+    return tuple(sorted(found.items()))
+
+
+def _discover_docking_inputs(
+    shared_root: Path,
+) -> tuple[tuple[int, tuple[Path, ...]], ...]:
+    found: dict[int, tuple[Path, ...]] = {}
+    for inputs in sorted(shared_root.glob("docking/iter*/inputs")):
+        suffix = inputs.parent.name.removeprefix("iter")
+        if not suffix.isdigit() or int(suffix) <= 0:
+            continue
+        round_id = int(suffix)
+        indexed: dict[int, Path] = {}
+        for path in inputs.glob("chunk_*.smi"):
+            token = path.stem.removeprefix("chunk_")
+            if not token.isdigit() or int(token) <= 0:
+                continue
+            index = int(token)
+            if index in indexed:
+                raise ValueError(f"duplicate docking input chunk {index} for round {round_id}")
+            indexed[index] = path
+        if not indexed:
+            continue
+        expected = list(range(1, max(indexed) + 1))
+        if sorted(indexed) != expected:
+            raise ValueError(f"non-contiguous docking input chunks for round {round_id}")
+        if round_id in found:
+            raise ValueError(f"ambiguous docking input directories for round {round_id}")
+        found[round_id] = tuple(indexed[index] for index in expected)
     return tuple(sorted(found.items()))

@@ -111,6 +111,8 @@ def _base_record(
     return {
         "round": round_id,
         "model_version": selection.model_version,
+        "mean_source": "predictions.pred_score",
+        "probability_source": "raw_gaussian_pred_score_total_std",
         "selected_attempts": len(selection.attempts),
         "selected_unique": selected,
         "observed_outcomes": observed,
@@ -231,6 +233,7 @@ def _curve_rows(
         {
             "round": round_id,
             "model_version": model_version,
+            "probability_source": "raw_gaussian_pred_score_total_std",
             "bin_lower": index / PROBABILITY_BINS,
             "bin_upper": (index + 1) / PROBABILITY_BINS,
             "count": len(values),

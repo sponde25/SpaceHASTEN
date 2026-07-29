@@ -29,6 +29,7 @@ def main() -> None:
         strict_threshold=arguments.strict_threshold,
     )
     write_selected_manifest(arguments.output, rows)
+    sources = sorted({str(row.get("selection_source", "unknown")) for row in rows})
     summary = {
         "output": str(arguments.output.resolve()),
         "selected_attempts": len(rows),
@@ -36,10 +37,13 @@ def main() -> None:
         "scored": sum(bool(row["is_scored"]) for row in rows),
         "hits": sum(bool(row["is_hit"]) for row in rows),
         "strict_hits": sum(bool(row["is_strict_hit"]) for row in rows),
-        "source": "database_history"
-        if {"acquisition_batches", "acquisition_selections", "acquisition_outcomes"}
-        <= set(context.capabilities.tables)
-        else "acquisition_csv",
+        "source": (
+            sources[0]
+            if len(sources) == 1
+            else "none"
+            if not sources
+            else "mixed:" + ",".join(sources)
+        ),
     }
     print(json.dumps(summary, sort_keys=True))
 

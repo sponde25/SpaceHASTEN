@@ -147,3 +147,51 @@ def test_legacy_selected_manifest_uses_round_specific_outcomes(tmp_path: Path) -
     assert [row["dock_score"] for row in rows] == [-8.0, -9.0]
     assert all(row["is_hit"] for row in rows)
     assert rows[0]["acquisition_method"] == "ei"
+
+
+def test_empty_modern_history_recovers_greedy_docking_inputs(tmp_path: Path) -> None:
+    run = tmp_path / "run"
+    run.mkdir()
+    database_path = run / "run.dbsh"
+    with Database(database_path) as database:
+        database.create_schema()
+        database.connection.executemany(
+            "INSERT INTO data(spacehastenid,reghash,smiles,dock_score,pred_score,"
+            "dock_iteration,pred_version) VALUES (?,?,?,?,?,?,?)",
+            [
+                (1, "seed", "C", -5.0, None, 0, None),
+                (2, "h2", "CC", -9.0, -8.0, 1, None),
+                (3, "h3", "CCC", None, -9.0, None, None),
+                (4, "h4", "CCCC", -10.0, -7.0, 2, 1),
+            ],
+        )
+        database.connection.executemany(
+            "INSERT INTO predictions(spacehastenid,model_version,pred_score,epistemic_std) "
+            "VALUES (?,?,?,?)",
+            [(2, 0, -8.0, 0.2), (4, 1, -7.0, 0.4)],
+        )
+        database.commit()
+
+    first = run / "run_shared/docking/iter1/inputs/chunk_1.smi"
+    second = run / "run_shared/docking/iter1/inputs/chunk_2.smi"
+    round_two = run / "run_shared/docking/iter2/inputs/chunk_1.smi"
+    for path, text in (
+        (first, "CC 2\n"),
+        (second, "CCC 3\n"),
+        (round_two, "CCCC 4\n"),
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+    context = discover_run(run)
+    assert context.acquisition_paths == ()
+    assert [round_id for round_id, _ in context.docking_input_paths] == [1, 2]
+    rows = selected_manifest(context, hit_threshold=-8.0, strict_threshold=-9.5)
+
+    assert [row["spacehastenid"] for row in rows] == [3, 2, 4]
+    assert rows[0]["outcome_status"] == "unresolved"
+    assert rows[0]["rank_source"] == "data_prediction_score_then_id"
+    assert rows[0]["model_version"] == "0"
+    assert rows[1]["is_hit"] is True
+    assert rows[2]["is_strict_hit"] is True
+    assert {row["selection_source"] for row in rows} == {"docking_input_chunks"}

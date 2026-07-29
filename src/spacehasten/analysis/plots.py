@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 
-def render_plots(root: Path, dpi: int) -> list[str]:
+def render_plots(root: Path, dpi: int, hit_threshold: float) -> list[str]:
     import matplotlib.pyplot as plt
 
     plt.style.use("tableau-colorblind10")
@@ -59,8 +59,19 @@ def render_plots(root: Path, dpi: int) -> list[str]:
             marker="o",
             label=f"round {round_id}",
         )
+    axis.axvline(
+        hit_threshold,
+        color="0.25",
+        linestyle="--",
+        linewidth=1,
+        label=f"Primary cutoff ({hit_threshold:g})",
+    )
     axis.legend()
-    axis.set(xlabel="Docking cutoff", ylabel="Cumulative hit rate (scored)")
+    axis.set(
+        xlabel="Docking-score cutoff (hit if score <= cutoff)",
+        ylabel="Cumulative hit rate among scored selections",
+        title="Cumulative yield sensitivity to the hit definition",
+    )
     save("cutoff_sensitivity", figure)
     figure, axis = plt.subplots()
     for round_id in sorted({int(row["round"]) for row in score_rows}):
@@ -119,18 +130,35 @@ def render_plots(root: Path, dpi: int) -> list[str]:
         axis.plot([0, 1], [0, 1], color="0.4", linestyle="--", label="perfect calibration")
         for round_id in sorted({int(row["round"]) for row in calibration_rows}):
             subset = [row for row in calibration_rows if int(row["round"]) == round_id]
-            axis.plot(
+            line = axis.plot(
                 [float(row["mean_predicted_probability"]) for row in subset],
                 [float(row["observed_hit_fraction"]) for row in subset],
-                marker="o",
                 label=f"round {round_id}",
+            )[0]
+            counts = [int(row["count"]) for row in subset]
+            maximum = max(counts)
+            axis.scatter(
+                [float(row["mean_predicted_probability"]) for row in subset],
+                [float(row["observed_hit_fraction"]) for row in subset],
+                s=[20 + 80 * count / maximum for count in counts],
+                color=line.get_color(),
             )
         axis.legend()
         axis.set(
             xlim=(0, 1),
             ylim=(0, 1),
-            xlabel="Mean predicted hit probability",
+            xlabel="Mean raw Gaussian hit probability",
             ylabel="Observed hit fraction",
+            title="Raw Gaussian probability reliability",
+        )
+        axis.text(
+            0.02,
+            0.98,
+            "Marker area proportional to bin count",
+            transform=axis.transAxes,
+            ha="left",
+            va="top",
+            fontsize="small",
         )
         save("calibration_reliability", figure)
     return plots

@@ -27,6 +27,7 @@ class RunContext:
     database_path: Path
     shared_root: Path | None
     acquisition_paths: tuple[tuple[int, Path], ...]
+    docking_input_paths: tuple[tuple[int, tuple[Path, ...]], ...]
     capabilities: Capabilities
 
 
@@ -49,6 +50,8 @@ class SelectionRound:
     model_version: str | None
     model_version_status: str
     model_version_reason: str | None
+    selection_source: str = "acquisition_csv"
+    rank_source: str = "acquisition_csv"
 
 
 @dataclass(frozen=True, slots=True)

@@ -56,6 +56,13 @@ def context_json(context: RunContext) -> dict[str, Any]:
         "acquisition_paths": [
             {"round": round_id, "path": str(path)} for round_id, path in context.acquisition_paths
         ],
+        "docking_input_paths": [
+            {
+                "round": round_id,
+                "paths": [str(path) for path in paths],
+            }
+            for round_id, paths in context.docking_input_paths
+        ],
         "capabilities": asdict(context.capabilities),
     }
 
