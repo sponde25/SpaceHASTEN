@@ -131,9 +131,7 @@ def load_seed_cache(reference_path: Path, index_path: Path) -> dict[str, np.ndar
         raise ValueError("seed index does not use Morgan-2 1024-bit fingerprints")
     fingerprints = engine.fps
     fingerprint_order = np.argsort(np.asarray(fingerprints[:, 0], dtype=np.int64))
-    if not np.array_equal(
-        np.asarray(fingerprints[fingerprint_order, 0], dtype=np.int64), seed_ids
-    ):
+    if not np.array_equal(np.asarray(fingerprints[fingerprint_order, 0], dtype=np.int64), seed_ids):
         raise ValueError("seed index and seed reference IDs differ")
     return {
         "seed_spacehastenid": seed_ids,
@@ -190,9 +188,7 @@ python3 -u {worker} worker --output-root {root} --task-index "$SLURM_ARRAY_TASK_
         "random_seed": args.random_seed,
         "cache": str(cache_path),
         "cache_sha256": sha256(cache_path),
-        "inputs": [
-            {"path": str(path.resolve()), "sha256": sha256(path)} for path in inputs
-        ],
+        "inputs": [{"path": str(path.resolve()), "sha256": sha256(path)} for path in inputs],
         "submit_script": str(submit),
     }
     write_json(root / "preparation.json", metadata)
@@ -229,10 +225,7 @@ def metric_record(
         ("atlas", atlas[indices]),
     ):
         result.update(
-            {
-                f"{prefix}_{name}": value
-                for name, value in family_distribution(values).items()
-            }
+            {f"{prefix}_{name}": value for name, value in family_distribution(values).items()}
         )
     return result
 
@@ -364,10 +357,9 @@ def combine(args: argparse.Namespace) -> None:
         if not output.is_file() or not receipt_path.is_file():
             raise FileNotFoundError(f"resampling task is incomplete: {token}")
         receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-        if (
-            receipt.get("cache_sha256") != preparation["cache_sha256"]
-            or receipt.get("output_sha256") != sha256(output)
-        ):
+        if receipt.get("cache_sha256") != preparation["cache_sha256"] or receipt.get(
+            "output_sha256"
+        ) != sha256(output):
             raise ValueError(f"resampling task receipt mismatch: {token}")
         frames.append(pd.read_csv(output))
     frame = pd.concat(frames, ignore_index=True)
@@ -385,8 +377,7 @@ def combine(args: argparse.Namespace) -> None:
         raise ValueError("resampling replicate coverage is incomplete")
     for round_id in rounds:
         observed = frame[
-            (frame["design"] == "round_selected_matched_to_hits")
-            & (frame["round"] == round_id)
+            (frame["design"] == "round_selected_matched_to_hits") & (frame["round"] == round_id)
         ]
         if set(observed["replicate"].astype(int)) != expected_replicates:
             raise ValueError(f"round {round_id} replicate coverage is incomplete")
@@ -400,7 +391,22 @@ def combine(args: argparse.Namespace) -> None:
     intervals = summarize_intervals(frame)
     interval_path = root / "resampling_intervals.csv"
     intervals.to_csv(interval_path, index=False)
-    save_resampling_figure(intervals, root / "count_matched_rarefaction", rounds, args.dpi)
+    natural = None
+    if args.natural_metrics:
+        natural = pd.read_csv(args.natural_metrics)
+        required = {"round", "cohort", "internal_diversity", "generic_q0"}
+        if missing := required - set(natural.columns):
+            raise ValueError(f"natural metrics lack columns: {sorted(missing)}")
+        natural = natural[natural["cohort"] == "hit_only"]
+        if set(natural["round"].astype(int)) != set(rounds):
+            raise ValueError("natural hit metrics do not cover every resampled round")
+    save_resampling_figure(
+        intervals,
+        root / "count_matched_rarefaction",
+        rounds,
+        args.dpi,
+        natural,
+    )
     outputs = [replicate_path, interval_path]
     outputs.extend(sorted(root.glob("count_matched_rarefaction.*")))
     receipt = {
@@ -412,6 +418,8 @@ def combine(args: argparse.Namespace) -> None:
         "pair_samples_per_replicate": int(preparation["pair_samples"]),
         "replicate_rows": len(frame),
         "cache_sha256": preparation["cache_sha256"],
+        "natural_metrics": str(args.natural_metrics.resolve()) if args.natural_metrics else None,
+        "natural_metrics_sha256": sha256(args.natural_metrics) if args.natural_metrics else None,
         "outputs": [
             {
                 "path": str(path.relative_to(root)),
@@ -455,7 +463,13 @@ def summarize_intervals(frame: Any) -> Any:
     return pd.DataFrame(rows)
 
 
-def save_resampling_figure(intervals: Any, stem: Path, rounds: list[int], dpi: int) -> None:
+def save_resampling_figure(
+    intervals: Any,
+    stem: Path,
+    rounds: list[int],
+    dpi: int,
+    natural: Any | None = None,
+) -> None:
     import matplotlib.pyplot as plt
 
     figure, axes = plt.subplots(1, 2, figsize=(9, 3.8))
@@ -473,9 +487,22 @@ def save_resampling_figure(intervals: Any, stem: Path, rounds: list[int], dpi: i
                 subset["ci95_high"] - subset["median"],
             ],
             marker="o",
+            label="Count-matched selected median and 95% interval",
         )
+        if natural is not None:
+            observed = natural.sort_values("round")
+            axis.scatter(
+                observed["round"],
+                observed[metric],
+                marker="D",
+                color="black",
+                s=32,
+                label="Observed hit cohort",
+                zorder=3,
+            )
         axis.set(xlabel="Round", ylabel=label, xticks=rounds)
         axis.spines[["top", "right"]].set_visible(False)
+        axis.legend(frameon=False, fontsize="small")
     figure.tight_layout()
     figure.savefig(stem.with_suffix(".png"), dpi=dpi, bbox_inches="tight")
     figure.savefig(stem.with_suffix(".pdf"), bbox_inches="tight")
@@ -502,6 +529,7 @@ def build_parser() -> argparse.ArgumentParser:
     worker_parser.add_argument("--task-index", type=int, required=True)
     combine_parser = commands.add_parser("combine")
     combine_parser.add_argument("--output-root", type=Path, required=True)
+    combine_parser.add_argument("--natural-metrics", type=Path)
     combine_parser.add_argument("--dpi", type=int, default=600)
     combine_parser.add_argument("--overwrite", action="store_true")
     return parser
@@ -524,6 +552,8 @@ def main() -> None:
     else:
         if args.dpi < 1:
             parser.error("dpi must be positive")
+        if args.natural_metrics and not args.natural_metrics.is_file():
+            parser.error(f"natural metrics do not exist: {args.natural_metrics}")
         combine(args)
 
 

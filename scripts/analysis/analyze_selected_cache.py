@@ -21,6 +21,16 @@ from spacehasten.analysis.artifacts import write_json
 from spacehasten.analysis.cached import family_distribution, sampled_diversity
 
 DESCRIPTORS = ("MW", "cLogP", "TPSA", "HBD", "HBA", "rotatable", "rings", "Fsp3")
+DESCRIPTOR_LABELS = {
+    "MW": "Molecular weight (g/mol)",
+    "cLogP": "cLogP (dimensionless)",
+    "TPSA": "TPSA (A^2)",
+    "HBD": "H-bond donors (count)",
+    "HBA": "H-bond acceptors (count)",
+    "rotatable": "Rotatable bonds (count)",
+    "rings": "Rings (count)",
+    "Fsp3": "Fraction sp3 carbons",
+}
 FAMILY_COLUMNS = (("typed", "typed_scaffold"), ("generic", "generic_framework"))
 
 
@@ -328,7 +338,12 @@ def save_figures(
                 (descriptors["descriptor"] == descriptor) & (descriptors["cohort"] == cohort)
             ]
             axis.plot(subset["round"], subset["median"], marker=marker, label=cohort)
-        axis.set(title=descriptor, xlabel="Round", xticks=rounds)
+        axis.set(
+            title=DESCRIPTOR_LABELS[descriptor],
+            xlabel="Round",
+            ylabel="Median",
+            xticks=rounds,
+        )
         axis.spines[["top", "right"]].set_visible(False)
     axes[0, 0].legend(frameon=False)
     figure.tight_layout()

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import gzip
+import hashlib
 import json
 import logging
 import math
@@ -36,6 +37,14 @@ METRIC_DIRECTIONS = {
     "atlas_cluster_entropy": "higher",
     "atlas_normalized_cluster_entropy": "higher",
 }
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def load_seed_scaffolds(
@@ -291,6 +300,7 @@ def calculate(args: argparse.Namespace) -> None:
         output_dir / "random_seed_comparison_table.csv",
         output_dir / "seed_reference_cache.npz",
         output_dir / "seed_scaffold_categories.csv.gz",
+        output_dir / "_SUCCESS.json",
     ]
     if any(path.exists() for path in outputs) and not args.force:
         raise FileExistsError("comparison outputs already exist; use --force to replace")
@@ -473,6 +483,29 @@ def calculate(args: argparse.Namespace) -> None:
         "elapsed_seconds": time.monotonic() - started,
     }
     result_path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    artifacts = [path for path in outputs if path.name != "_SUCCESS.json"]
+    (output_dir / "_SUCCESS.json").write_text(
+        json.dumps(
+            {
+                "status": "complete",
+                "seed_count": int(seed_count),
+                "observed_virtual_hits": int(len(observed_hit_ids)),
+                "replicates": args.replicates,
+                "pair_samples_per_replicate": args.pair_samples,
+                "outputs": [
+                    {
+                        "path": path.name,
+                        "bytes": path.stat().st_size,
+                        "sha256": sha256(path),
+                    }
+                    for path in artifacts
+                ],
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     LOGGER.info(
         "Matched random-seed comparison complete in %.1f minutes",
         result["elapsed_seconds"] / 60.0,

@@ -65,7 +65,7 @@ def state(values: pd.Series) -> pd.Series:
     )
 
 
-def calibration(values: pd.DataFrame) -> dict[str, float | int]:
+def calibration(values: pd.DataFrame) -> dict[str, float | int | str]:
     probability = values["p_hit"].to_numpy(float)
     observed = values["hit"].to_numpy(float)
     clipped = np.clip(probability, 1e-12, 1 - 1e-12)
@@ -76,6 +76,7 @@ def calibration(values: pd.DataFrame) -> dict[str, float | int]:
         if mask.any():
             ece += float(mask.mean() * abs(probability[mask].mean() - observed[mask].mean()))
     return {
+        "probability_source": "selection_time_calibrated_p_hit",
         "selected": len(values),
         "hits": int(observed.sum()),
         "predicted_p_hit": float(probability.mean()),
@@ -89,12 +90,37 @@ def calibration(values: pd.DataFrame) -> dict[str, float | int]:
     }
 
 
+def calibration_curve(values: pd.DataFrame, round_id: int) -> list[dict[str, float | int | str]]:
+    probability = values["p_hit"].to_numpy(float)
+    observed = values["hit"].to_numpy(float)
+    assignments = np.minimum((probability * 10).astype(int), 9)
+    rows: list[dict[str, float | int | str]] = []
+    for index in range(10):
+        mask = assignments == index
+        if not mask.any():
+            continue
+        rows.append(
+            {
+                "round": round_id,
+                "probability_source": "selection_time_calibrated_p_hit",
+                "bin_lower": index / 10,
+                "bin_upper": (index + 1) / 10,
+                "count": int(mask.sum()),
+                "mean_predicted_probability": float(probability[mask].mean()),
+                "observed_hit_fraction": float(observed[mask].mean()),
+            }
+        )
+    return rows
+
+
 def summary_tables(
     frame: pd.DataFrame, hit_threshold: float, strict_threshold: float
 ) -> dict[str, list[dict[str, Any]]]:
     frame = frame.copy()
     frame["hit"] = frame["dock_score"].notna() & (frame["dock_score"] <= hit_threshold)
     frame["strict_hit"] = frame["dock_score"].notna() & (frame["dock_score"] <= strict_threshold)
+    if not np.isfinite(frame["p_hit"]).all() or not frame["p_hit"].between(0, 1).all():
+        raise ValueError("selection-time p_hit values must be finite probabilities")
     frame["support_stratum"] = pd.cut(
         frame["support_before"], SUPPORT_BINS, labels=SUPPORT_LABELS, right=False
     )
@@ -121,6 +147,7 @@ def summary_tables(
     ):
         if current.empty:
             row = {
+                "probability_source": "selection_time_calibrated_p_hit",
                 "selected": 0,
                 "hits": 0,
                 "predicted_p_hit": math.nan,
@@ -133,6 +160,12 @@ def summary_tables(
         else:
             row = calibration(current)
         support_rows.append({"round": int(round_id), "support_stratum": str(label), **row})
+
+    p_hit_metrics = []
+    p_hit_curve = []
+    for round_id, current in frame.groupby("round", sort=True):
+        p_hit_metrics.append({"round": int(round_id), **calibration(current)})
+        p_hit_curve.extend(calibration_curve(current, int(round_id)))
 
     expected_observed = []
     cluster_rows = frame.groupby(["round", "clusterid"], sort=True).agg(
@@ -235,6 +268,8 @@ def summary_tables(
     return {
         "contribution_summary": contributions,
         "support_outcomes": support_rows,
+        "p_hit_calibration_metrics": p_hit_metrics,
+        "p_hit_calibration_curve": p_hit_curve,
         "expected_observed_regions": expected_observed,
         "cap_binding_summary": cap_rows,
         "production_atlas_metrics": atlas_rows,
@@ -282,7 +317,12 @@ def save_figures(root: Path, tables: dict[str, list[dict[str, Any]]], dpi: int) 
     axis.plot(x, final_round["hit_rate"], marker="s", label="Observed hit rate")
     axis.set(
         xticks=x,
-        xticklabels=final_round["support_stratum"],
+        xticklabels=[
+            f"{label}\nn={int(count):,}"
+            for label, count in zip(
+                final_round["support_stratum"], final_round["selected"], strict=True
+            )
+        ],
         xlabel="Support before selection",
         ylabel="Rate",
     )
@@ -290,6 +330,36 @@ def save_figures(root: Path, tables: dict[str, list[dict[str, Any]]], dpi: int) 
     axis.spines[["top", "right"]].set_visible(False)
     figure.tight_layout()
     _save(figure, root / "support_calibration", dpi)
+
+    reliability = pd.DataFrame(tables["p_hit_calibration_curve"])
+    figure, axis = plt.subplots(figsize=(6.2, 5.2))
+    axis.plot([0, 1], [0, 1], color="0.4", linestyle="--", label="Perfect calibration")
+    for round_id, current in reliability.groupby("round", sort=True):
+        sizes = 20 + 100 * current["count"] / current["count"].max()
+        line = axis.plot(
+            current["mean_predicted_probability"],
+            current["observed_hit_fraction"],
+            linewidth=1.2,
+            label=f"Round {round_id}",
+        )[0]
+        axis.scatter(
+            current["mean_predicted_probability"],
+            current["observed_hit_fraction"],
+            s=sizes,
+            color=line.get_color(),
+        )
+    axis.set(
+        xlim=(0, 1),
+        ylim=(0, 1),
+        xlabel="Mean production-calibrated p(hit)",
+        ylabel="Observed hit fraction",
+        title="Selection-time probability reliability",
+    )
+    axis.legend(frameon=False)
+    axis.spines[["top", "right"]].set_visible(False)
+    axis.grid(color="#E6E6E6", linewidth=0.6)
+    figure.tight_layout()
+    _save(figure, root / "p_hit_reliability", dpi)
 
     coverage = pd.DataFrame(tables["coverage_depth"])
     figure, axis = plt.subplots(figsize=(7.2, 4.2))
@@ -303,20 +373,42 @@ def save_figures(root: Path, tables: dict[str, list[dict[str, Any]]], dpi: int) 
     _save(figure, root / "coverage_depth", dpi)
 
     transition = pd.DataFrame(tables["region_transitions"])
-    matrix = transition.groupby(["from_state", "to_state"])["regions"].sum().unstack(fill_value=0)
-    matrix = matrix.reindex(index=STATE_LABELS, columns=STATE_LABELS, fill_value=0)
-    figure, axis = plt.subplots(figsize=(6.0, 5.0))
-    image = axis.imshow(matrix.to_numpy(), cmap="viridis", aspect="auto")
-    axis.set(
-        xticks=np.arange(6),
-        xticklabels=STATE_LABELS,
-        yticks=np.arange(6),
-        yticklabels=STATE_LABELS,
-        xlabel="End state",
-        ylabel="Start state",
+    rounds = sorted(transition["round"].unique())
+    matrices = []
+    for round_id in rounds:
+        current = transition[transition["round"] == round_id]
+        matrix = current.groupby(["from_state", "to_state"])["regions"].sum().unstack(fill_value=0)
+        matrices.append(matrix.reindex(index=STATE_LABELS, columns=STATE_LABELS, fill_value=0))
+    maximum = max(float(matrix.to_numpy().max()) for matrix in matrices)
+    columns = min(2, len(rounds))
+    row_count = math.ceil(len(rounds) / columns)
+    figure, axes = plt.subplots(
+        row_count,
+        columns,
+        figsize=(4.5 * columns, 3.75 * row_count),
+        sharex=True,
+        sharey=True,
+        squeeze=False,
+        constrained_layout=True,
     )
-    figure.colorbar(image, ax=axis, label="Region transitions")
-    figure.tight_layout()
+    image = None
+    used_axes = []
+    for axis, round_id, matrix in zip(axes.flat, rounds, matrices, strict=False):
+        used_axes.append(axis)
+        image = axis.imshow(matrix.to_numpy(), cmap="viridis", aspect="auto", vmin=0, vmax=maximum)
+        axis.set(
+            xticks=np.arange(6),
+            xticklabels=STATE_LABELS,
+            yticks=np.arange(6),
+            yticklabels=STATE_LABELS,
+            title=f"Round {round_id}",
+            xlabel="State after round",
+            ylabel="State before round",
+        )
+    for axis in axes.flat[len(rounds) :]:
+        axis.set_visible(False)
+    assert image is not None
+    figure.colorbar(image, ax=used_axes, label="Production-atlas regions", shrink=0.9)
     _save(figure, root / "region_transitions", dpi)
 
 

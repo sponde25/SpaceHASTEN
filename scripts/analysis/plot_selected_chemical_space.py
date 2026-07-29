@@ -13,14 +13,14 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np
+import numpy.typing as npt
 import pandas as pd
-from matplotlib.colors import LinearSegmentedColormap, TwoSlopeNorm
+from matplotlib.colors import LinearSegmentedColormap, LogNorm, TwoSlopeNorm
+from matplotlib.figure import Figure
 
 BLUE = "#0072B2"
 ORANGE = "#D55E00"
-DIVERGING = LinearSegmentedColormap.from_list(
-    "spacehasten_blue_orange", [BLUE, "#F7F7F7", ORANGE]
-)
+DIVERGING = LinearSegmentedColormap.from_list("spacehasten_blue_orange", [BLUE, "#F7F7F7", ORANGE])
 
 
 def coordinates(path: Path) -> pd.DataFrame:
@@ -46,15 +46,15 @@ def seed_coordinates(coordinate_path: Path, reference_path: Path) -> pd.DataFram
     return selected
 
 
-def save(figure: plt.Figure, root: Path, name: str, dpi: int) -> None:
+def save(figure: Figure, root: Path, name: str, dpi: int) -> None:
     figure.savefig(root / f"{name}.png", dpi=dpi, bbox_inches="tight")
     figure.savefig(root / f"{name}.pdf", bbox_inches="tight")
     plt.close(figure)
 
 
-def marker_sizes(counts: np.ndarray, maximum: float = 80.0) -> np.ndarray:
+def marker_sizes(counts: npt.ArrayLike, maximum: float = 80.0) -> npt.NDArray[np.float64]:
     transformed = np.sqrt(np.asarray(counts, dtype=float))
-    return 4.0 + maximum * transformed / transformed.max()
+    return np.asarray(4.0 + maximum * transformed / transformed.max(), dtype=np.float64)
 
 
 def plot_density_and_shift(
@@ -69,65 +69,94 @@ def plot_density_and_shift(
         min(float(seeds["umap_y"].min()), float(frame["umap_y"].min())),
         max(float(seeds["umap_y"].max()), float(frame["umap_y"].max())),
     )
-    figure, axes = plt.subplots(1, 2, figsize=(9, 4))
-    axes[0].hexbin(
-        seeds["umap_x"],
-        seeds["umap_y"],
-        gridsize=160,
-        bins="log",
-        extent=extent,
-        mincnt=1,
-        cmap="Greys",
-    )
+    figure, axes = plt.subplots(1, 2, figsize=(9, 4), constrained_layout=True)
     hits = frame[frame["is_hit"]]
-    axes[1].hexbin(
-        hits["umap_x"],
-        hits["umap_y"],
-        gridsize=160,
-        bins="log",
-        extent=extent,
-        mincnt=1,
-        cmap="viridis",
+    density_collections = []
+    for axis, cohort in zip(axes, (seeds, hits), strict=True):
+        density_collections.append(
+            axis.hexbin(
+                cohort["umap_x"],
+                cohort["umap_y"],
+                C=np.full(len(cohort), 1 / len(cohort)),
+                reduce_C_function=np.sum,
+                gridsize=160,
+                extent=extent,
+                mincnt=1,
+                cmap="viridis",
+            )
+        )
+    positive = np.concatenate(
+        [collection.get_array()[collection.get_array() > 0] for collection in density_collections]
     )
+    density_norm = LogNorm(vmin=float(positive.min()), vmax=float(positive.max()))
+    for collection in density_collections:
+        collection.set_norm(density_norm)
     axes[0].set_title("Starting seeds")
     axes[1].set_title("Selected virtual hits")
     for axis in axes:
         axis.set(xlabel="Fixed-reference UMAP 1", ylabel="Fixed-reference UMAP 2")
-    figure.tight_layout()
+    figure.colorbar(
+        density_collections[-1],
+        ax=axes.ravel().tolist(),
+        label="Fraction of cohort per occupied hexagon",
+        shrink=0.9,
+    )
     save(figure, root, "01_seed_virtual_hit_density", dpi)
 
     rounds = sorted(frame["round"].unique().astype(int).tolist())
-    columns = min(3, len(rounds))
+    columns = 2 if len(rounds) == 4 else min(3, len(rounds))
     rows = (len(rounds) + columns - 1) // columns
-    figure, axes = plt.subplots(rows, columns, figsize=(4 * columns, 3.5 * rows), squeeze=False)
+    figure, axes = plt.subplots(
+        rows,
+        columns,
+        figsize=(4 * columns, 3.5 * rows),
+        squeeze=False,
+        constrained_layout=True,
+    )
+    round_collections = []
     for axis, round_id in zip(axes.flat, rounds, strict=False):
         current = frame[frame["round"] == round_id]
-        axis.hexbin(
-            current["umap_x"],
-            current["umap_y"],
-            gridsize=120,
-            bins="log",
-            extent=extent,
-            mincnt=1,
-            cmap="cividis",
+        round_collections.append(
+            axis.hexbin(
+                current["umap_x"],
+                current["umap_y"],
+                gridsize=120,
+                extent=extent,
+                mincnt=1,
+                cmap="cividis",
+            )
         )
-        axis.set(title=f"Round {round_id}", xlabel="UMAP 1", ylabel="UMAP 2")
+        axis.set(
+            title=f"Round {round_id}",
+            xlabel="Fixed-reference UMAP 1",
+            ylabel="Fixed-reference UMAP 2",
+        )
+    round_positive = np.concatenate(
+        [collection.get_array()[collection.get_array() > 0] for collection in round_collections]
+    )
+    round_norm = LogNorm(vmin=float(round_positive.min()), vmax=float(round_positive.max()))
+    for collection in round_collections:
+        collection.set_norm(round_norm)
     for axis in axes.flat[len(rounds) :]:
         axis.set_visible(False)
-    figure.tight_layout()
+    figure.colorbar(
+        round_collections[-1],
+        ax=[axis for axis in axes.flat[: len(rounds)]],
+        label="Selections per occupied hexagon",
+        shrink=0.9,
+    )
     save(figure, root, "02_acquisition_shift", dpi)
     return extent
 
 
 def plot_cluster_enrichment(
-    enrichment_path: Path,
+    enrichment: pd.DataFrame,
     coordinate_frames: list[pd.DataFrame],
     root: Path,
     label: str,
     prior_strength: float,
     dpi: int,
 ) -> dict[str, object]:
-    enrichment = pd.read_csv(enrichment_path)
     required = {
         "clusterid",
         "selected_count",
@@ -137,7 +166,7 @@ def plot_cluster_enrichment(
         "centroid_source",
     }
     if missing := required - set(enrichment.columns):
-        raise ValueError(f"portfolio enrichment lacks columns: {sorted(missing)}")
+        raise ValueError(f"cluster enrichment lacks columns: {sorted(missing)}")
     grouped = (
         enrichment.groupby("clusterid", sort=True)
         .agg(
@@ -167,12 +196,10 @@ def plot_cluster_enrichment(
     if total_scored == 0:
         raise ValueError("cluster enrichment has no scored selections")
     global_rate = total_hits / total_scored
-    grouped["posterior_hit_rate"] = (
-        grouped["hit_count"] + prior_strength * global_rate
-    ) / (grouped["scored_count"] + prior_strength)
-    grouped["posterior_difference_pp"] = 100 * (
-        grouped["posterior_hit_rate"] - global_rate
+    grouped["posterior_hit_rate"] = (grouped["hit_count"] + prior_strength * global_rate) / (
+        grouped["scored_count"] + prior_strength
     )
+    grouped["posterior_difference_pp"] = 100 * (grouped["posterior_hit_rate"] - global_rate)
     grouped.to_csv(root / "cluster_statistics.csv", index=False)
     difference = grouped["posterior_difference_pp"].to_numpy(float)
     limit = max(float(np.quantile(np.abs(difference), 0.98)), 1.0)
@@ -189,7 +216,7 @@ def plot_cluster_enrichment(
         alpha=0.85,
         rasterized=True,
     )
-    virtual = grouped["centroid_source"] == "virtual"
+    virtual = grouped["centroid_source"].isin({"virtual", "selected_repair"})
     axis.scatter(
         grouped.loc[virtual, "umap_x"],
         grouped.loc[virtual, "umap_y"],
@@ -232,6 +259,38 @@ def plot_nearest(path: Path, root: Path, dpi: int) -> None:
     save(figure, root, "04_nearest_seed_similarity_ecdf", dpi)
 
 
+def manifest_cluster_enrichment(manifest: pd.DataFrame) -> pd.DataFrame:
+    required = {
+        "atlas_cluster",
+        "atlas_centroid_source",
+        "spacehastenid",
+        "is_scored",
+        "is_hit",
+    }
+    if missing := required - set(manifest.columns):
+        raise ValueError(f"analysis-atlas manifest lacks columns: {sorted(missing)}")
+    frame = manifest.copy()
+    for column in ("is_scored", "is_hit"):
+        if frame[column].dtype != bool:
+            normalized = frame[column].astype(str).str.lower()
+            if not normalized.isin({"true", "false", "1", "0"}).all():
+                raise ValueError(f"manifest {column} contains invalid booleans")
+            frame[column] = normalized.isin({"true", "1"})
+    grouped = (
+        frame.groupby("atlas_cluster", sort=True)
+        .agg(
+            selected_count=("spacehastenid", "size"),
+            scored_count=("is_scored", "sum"),
+            hit_count=("is_hit", "sum"),
+            centroid_source=("atlas_centroid_source", "first"),
+        )
+        .reset_index()
+        .rename(columns={"atlas_cluster": "clusterid"})
+    )
+    grouped["centroid_spacehastenid"] = grouped["clusterid"].astype(np.int64)
+    return grouped
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, required=True)
@@ -239,7 +298,7 @@ def main() -> None:
     parser.add_argument("--seed-coordinates", type=Path, required=True)
     parser.add_argument("--seed-reference-cache", type=Path, required=True)
     parser.add_argument("--centroid-coordinates", type=Path, action="append", default=[])
-    parser.add_argument("--portfolio-enrichment", type=Path, required=True)
+    parser.add_argument("--portfolio-enrichment", type=Path)
     parser.add_argument("--selected-nearest", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--label", required=True)
@@ -254,10 +313,11 @@ def main() -> None:
         args.selected_coordinates,
         args.seed_coordinates,
         args.seed_reference_cache,
-        args.portfolio_enrichment,
         args.selected_nearest,
         *args.centroid_coordinates,
     ]
+    if args.portfolio_enrichment:
+        inputs.append(args.portfolio_enrichment)
     for path in inputs:
         if not path.is_file():
             parser.error(f"input does not exist: {path}")
@@ -280,8 +340,13 @@ def main() -> None:
     extent = plot_density_and_shift(selected, seeds, root, args.dpi)
     coordinate_frames = [seeds, selected_coordinates]
     coordinate_frames.extend(coordinates(path) for path in args.centroid_coordinates)
+    enrichment = (
+        pd.read_csv(args.portfolio_enrichment)
+        if args.portfolio_enrichment
+        else manifest_cluster_enrichment(manifest)
+    )
     cluster_metadata = plot_cluster_enrichment(
-        args.portfolio_enrichment,
+        enrichment,
         coordinate_frames,
         root,
         args.label,
@@ -297,6 +362,9 @@ def main() -> None:
         "seeds": len(seeds),
         "extent": extent,
         "cluster_hit_enrichment": cluster_metadata,
+        "cluster_source": (
+            "portfolio_enrichment" if args.portfolio_enrichment else "analysis_selected_atlas"
+        ),
         "interpretation": (
             "Fixed-reference visualization only; UMAP distance is not chemical distance."
         ),

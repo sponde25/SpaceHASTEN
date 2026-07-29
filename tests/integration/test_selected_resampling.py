@@ -67,12 +67,30 @@ def test_selected_resampling_end_to_end(tmp_path: Path) -> None:
     )
     run("worker", "--output-root", str(output), "--task-index", "1")
     run("worker", "--output-root", str(output), "--task-index", "2")
-    run("combine", "--output-root", str(output), "--dpi", "50")
+    natural = tmp_path / "natural.csv"
+    pd.DataFrame(
+        {
+            "round": [1, 2, 3],
+            "cohort": ["hit_only"] * 3,
+            "internal_diversity": [0.1, 0.2, np.nan],
+            "generic_q0": [1, 1, 0],
+        }
+    ).to_csv(natural, index=False)
+    run(
+        "combine",
+        "--output-root",
+        str(output),
+        "--natural-metrics",
+        str(natural),
+        "--dpi",
+        "50",
+    )
 
     assert "export PYTHONPATH=" in (output / "submit.sh").read_text()
     receipt = json.loads((output / "_SUCCESS.json").read_text())
     assert receipt["replicates"] == 4
     assert receipt["replicate_rows"] == 12
+    assert receipt["natural_metrics_sha256"]
     replicates = pd.read_csv(output / "resampling_replicates.csv")
     assert set(replicates["replicate"]) == {0, 1, 2, 3}
     assert set(replicates["round"]) == {1, 2, 3}

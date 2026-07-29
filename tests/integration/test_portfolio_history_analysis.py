@@ -141,5 +141,16 @@ def test_portfolio_history_analysis_outputs_productive_coverage(tmp_path: Path) 
     with (output / "production_atlas_metrics.csv").open(newline="") as handle:
         rows = list(csv.DictReader(handle))
     assert rows[-1]["broad_q2"] == "1.6"
+    with (output / "p_hit_calibration_metrics.csv").open(newline="") as handle:
+        calibration = list(csv.DictReader(handle))
+    assert calibration[0]["probability_source"] == "selection_time_calibrated_p_hit"
+    assert calibration[0]["predicted_p_hit"] == "0.8"
+    assert calibration[0]["hit_rate"] == "1.0"
+    assert calibration[0]["calibration_in_the_large"] == str(0.8 - 1.0)
+    with (output / "p_hit_calibration_curve.csv").open(newline="") as handle:
+        curve = list(csv.DictReader(handle))
+    assert curve[0]["bin_lower"] == "0.8"
+    assert curve[0]["count"] == "2"
     assert (output / "figures" / "coverage_depth.png").stat().st_size > 0
     assert (output / "figures" / "portfolio_contributions.png").stat().st_size > 0
+    assert (output / "figures" / "p_hit_reliability.png").stat().st_size > 0

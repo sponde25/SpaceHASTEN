@@ -26,8 +26,9 @@ def test_run_analysis_validation_end_to_end(tmp_path: Path) -> None:
     standard = root / "standard"
     structure = root / "structure_cache"
     selected = root / "selected"
+    paper = root / "paper_diversity"
     figures = root / "figures"
-    for path in (standard, structure, selected, figures):
+    for path in (standard, structure, selected, paper, figures):
         path.mkdir(parents=True)
     database = tmp_path / "snapshot.dbsh"
     with sqlite3.connect(database) as connection:
@@ -96,6 +97,23 @@ def test_run_analysis_validation_end_to_end(tmp_path: Path) -> None:
             ],
         },
     )
+    paper_table = paper / "paper_aligned_metrics.csv"
+    paper_table.write_text("scope,round\ncumulative,2\n", encoding="utf-8")
+    write_json(
+        paper / "_SUCCESS.json",
+        {
+            "status": "complete",
+            "virtual_hits": 1,
+            "cluster_similarity": 0.55,
+            "outputs": [
+                {
+                    "path": paper_table.name,
+                    "bytes": paper_table.stat().st_size,
+                    "sha256": digest(paper_table),
+                }
+            ],
+        },
+    )
     nearest = root / "nearest.npz"
     np.savez_compressed(
         nearest,
@@ -132,6 +150,8 @@ def test_run_analysis_validation_end_to_end(tmp_path: Path) -> None:
             str(structure),
             "--selected-root",
             str(selected),
+            "--paper-diversity-root",
+            str(paper),
             "--nearest-seed",
             str(nearest),
             "--umap",
@@ -148,6 +168,7 @@ def test_run_analysis_validation_end_to_end(tmp_path: Path) -> None:
     result = json.loads((root / "FINAL_VALIDATION.json").read_text())
     assert result["status"] == "ok"
     assert result["checks"]["nearest_seed"]["rows"] == 2
+    assert result["checks"]["paper_aligned_diversity"]["cluster_similarity"] == 0.55
     manifest_result = json.loads((root / "artifact_manifest.json").read_text())
     assert manifest_result["status"] == "complete"
     assert manifest_result["artifacts"]

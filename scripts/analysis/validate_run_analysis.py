@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 
 from spacehasten.analysis.artifacts import write_json
 
@@ -35,7 +36,7 @@ def read_json(path: Path) -> dict[str, Any]:
     return value
 
 
-def read_ids(path: Path) -> np.ndarray:
+def read_ids(path: Path) -> npt.NDArray[np.int64]:
     opener = gzip.open if path.suffix == ".gz" else open
     with opener(path, "rt", encoding="utf-8", newline="") as handle:
         rows = csv.DictReader(handle)
@@ -54,7 +55,7 @@ def validate_receipt(root: Path, name: str) -> dict[str, Any]:
     receipt = read_json(path)
     if receipt.get("status") not in {"complete", "ok"}:
         raise ValueError(f"stage receipt is not complete: {path}")
-    for output in receipt.get("outputs", []):
+    for output in receipt.get("outputs", receipt.get("artifacts", [])):
         artifact = root / str(output["path"])
         if not artifact.is_file() or artifact.stat().st_size != int(output["bytes"]):
             raise ValueError(f"receipt output is missing or has changed size: {artifact}")
@@ -65,7 +66,7 @@ def validate_receipt(root: Path, name: str) -> dict[str, Any]:
 
 def validate_npz_ids(
     path: Path,
-    expected_ids: np.ndarray,
+    expected_ids: npt.NDArray[np.int64],
     *,
     coordinate_field: str | None = None,
     similarity_field: str | None = None,
@@ -161,7 +162,7 @@ def artifact_manifest(root: Path, excluded: set[Path]) -> list[dict[str, Any]]:
     return artifacts
 
 
-def validate_structure(root: Path) -> tuple[np.ndarray, dict[str, Any]]:
+def validate_structure(root: Path) -> tuple[npt.NDArray[np.int64], dict[str, Any]]:
     receipt = read_json(root / "_SUCCESS.json")
     if receipt.get("status") != "complete":
         raise ValueError("selected structure cache is not complete")
@@ -238,8 +239,8 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
     }
     if args.reference_root:
         receipt = validate_receipt(args.reference_root, "_SUCCESS.json")
-        snapshot_seed_count = checks["snapshot"].get("counts", {}).get("dock_iterations", {}).get(
-            "0"
+        snapshot_seed_count = (
+            checks["snapshot"].get("counts", {}).get("dock_iterations", {}).get("0")
         )
         if snapshot_seed_count is not None and int(receipt.get("seed_count", -1)) != int(
             snapshot_seed_count
@@ -271,22 +272,65 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
         checks["run_metadata"] = validate_receipt(args.run_metadata_root, "_SUCCESS.json")
     if args.resampling_root:
         checks["resampling"] = validate_receipt(args.resampling_root, "_SUCCESS.json")
-    if args.portfolio_history_root:
-        receipt = validate_receipt(
-            args.portfolio_history_root, "_SUCCESS.json"
+    if args.selected_atlas_root:
+        receipt = validate_receipt(args.selected_atlas_root, "_SUCCESS.json")
+        if int(receipt.get("selected_compounds", -1)) != len(selected_ids):
+            raise ValueError("selected-atlas count differs from selected manifest")
+        if float(receipt.get("minimum_similarity", -1)) < float(
+            receipt.get("similarity_threshold", 0)
+        ):
+            raise ValueError("selected-atlas assignments violate the similarity threshold")
+        checks["selected_atlas"] = receipt
+    if args.random_seed_root:
+        receipt = validate_receipt(args.random_seed_root, "_SUCCESS.json")
+        if int(receipt.get("observed_virtual_hits", -1)) != int(
+            checks["standard"].get("cumulative_hits", -2)
+        ):
+            raise ValueError("matched-random hit count differs from standard analysis")
+        snapshot_seed_count = (
+            checks["snapshot"].get("counts", {}).get("dock_iterations", {}).get("0")
         )
+        if snapshot_seed_count is not None and int(receipt.get("seed_count", -1)) != int(
+            snapshot_seed_count
+        ):
+            raise ValueError("matched-random seed count differs from snapshot")
+        checks["matched_random_seed"] = receipt
+    if args.fixed_reference_root:
+        receipt = validate_receipt(args.fixed_reference_root, "_SUCCESS.json")
+        snapshot_seed_count = (
+            checks["snapshot"].get("counts", {}).get("dock_iterations", {}).get("0")
+        )
+        if snapshot_seed_count is not None and int(receipt.get("seed_count", -1)) != int(
+            snapshot_seed_count
+        ):
+            raise ValueError("fixed-reference seed count differs from snapshot")
+        umap = receipt.get("umap", {})
+        if umap.get("coordinate_shape") != [int(receipt["seed_count"]), 2] or not umap.get(
+            "coordinates_finite"
+        ):
+            raise ValueError("fixed-reference seed coordinates are invalid")
+        checks["fixed_reference"] = receipt
+    if args.portfolio_history_root:
+        receipt = validate_receipt(args.portfolio_history_root, "_SUCCESS.json")
         if int(receipt.get("selected", -1)) != selected_attempts:
             raise ValueError("portfolio-history selected count differs from manifest")
         checks["portfolio_history"] = receipt
     if args.portfolio_enrichment_root:
-        receipt = validate_receipt(
-            args.portfolio_enrichment_root, "_SUCCESS.json"
-        )
+        receipt = validate_receipt(args.portfolio_enrichment_root, "_SUCCESS.json")
         if int(receipt.get("selected", -1)) != selected_attempts:
             raise ValueError("portfolio-enrichment selected count differs from manifest")
         if int(receipt.get("hits", -1)) != int(checks["standard"].get("cumulative_hits", -2)):
             raise ValueError("portfolio-enrichment and standard hit counts differ")
         checks["portfolio_enrichment"] = receipt
+    if args.paper_diversity_root:
+        receipt = validate_receipt(args.paper_diversity_root, "_SUCCESS.json")
+        if int(receipt.get("virtual_hits", -1)) != int(
+            checks["standard"].get("cumulative_hits", -2)
+        ):
+            raise ValueError("paper-aligned diversity and standard hit counts differ")
+        if float(receipt.get("cluster_similarity", -1)) != 0.55:
+            raise ValueError("paper-aligned diversity does not use Tanimoto 0.55")
+        checks["paper_aligned_diversity"] = receipt
     if args.nearest_seed:
         checks["nearest_seed"] = validate_npz_ids(
             args.nearest_seed, selected_ids, similarity_field="tanimoto"
@@ -317,8 +361,12 @@ def main() -> None:
     parser.add_argument("--selected-root", type=Path)
     parser.add_argument("--run-metadata-root", type=Path)
     parser.add_argument("--resampling-root", type=Path)
+    parser.add_argument("--selected-atlas-root", type=Path)
+    parser.add_argument("--random-seed-root", type=Path)
+    parser.add_argument("--fixed-reference-root", type=Path)
     parser.add_argument("--portfolio-history-root", type=Path)
     parser.add_argument("--portfolio-enrichment-root", type=Path)
+    parser.add_argument("--paper-diversity-root", type=Path)
     parser.add_argument("--nearest-seed", type=Path)
     parser.add_argument("--umap", type=Path)
     parser.add_argument("--figures-root", type=Path)
