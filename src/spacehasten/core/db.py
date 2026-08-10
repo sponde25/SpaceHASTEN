@@ -319,6 +319,29 @@ class Database:
         assert c.lastrowid is not None
         return c.lastrowid
 
+    def insert_library_hit(
+        self,
+        reghash: str,
+        smiles: str,
+        smilesid: str,
+        pred_score: float,
+        pred_version: int,
+    ) -> int:
+        """Insert a library-screen survivor (undocked, ``simsearch_cycle`` NULL).
+
+        Distinguishes library-screened compounds from simsearch hits and
+        seeds without any schema change (see plan §D1): ``pred_score`` and
+        ``pred_version`` are set, ``simsearch_cycle``/``dock_score``/
+        ``query``/``dock_iteration`` are left NULL.
+        """
+        c = self._conn.execute(
+            "INSERT INTO data(reghash, smiles, smilesid, pred_score, pred_version) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (reghash, smiles, smilesid, pred_score, pred_version),
+        )
+        assert c.lastrowid is not None
+        return c.lastrowid
+
     # ----- updates -----
 
     def update_dock_score(
@@ -523,6 +546,45 @@ class Database:
             "SELECT MAX(dock_score) FROM data WHERE query = 1"
         ).fetchone()
         return float(row[0]) if row and row[0] is not None else None
+
+    def seed_dock_score_percentile(self, pct: float) -> float | None:
+        """Value ``V`` such that ``pct`` percent of seed dock scores are <= V.
+
+        "Seed" scores are the ``dock_iteration == 0`` batch (see
+        :meth:`select_seed_rows`). Lower ``dock_score`` is better (Glide
+        convention), so this is the cutoff at the top ``pct`` percent of
+        seeds, used by ``library-screen`` (plan §D2) as the default
+        selection threshold. Returns ``None`` when no seed docking exists
+        yet.
+        """
+        scores = self.dock_scores_by_iteration().get(0)
+        if not scores:
+            return None
+        scores = sorted(scores)  # ascending (best first)
+        import math
+
+        k = max(1, math.ceil(len(scores) * pct / 100.0))
+        return float(scores[k - 1])
+
+    def filter_existing_reghashes(self, candidates: Iterable[str]) -> set[str]:
+        """Return the subset of ``candidates`` already present in ``data.reghash``.
+
+        Chunks the ``IN`` query at 500 placeholders per batch to stay under
+        SQLite's default parameter limit (999).
+        """
+        cands = list(candidates)
+        if not cands:
+            return set()
+        found: set[str] = set()
+        chunk = 500
+        for i in range(0, len(cands), chunk):
+            batch = cands[i : i + chunk]
+            placeholders = ",".join("?" * len(batch))
+            sql = f"SELECT reghash FROM data WHERE reghash IN ({placeholders})"
+            for (rh,) in self._conn.execute(sql, batch).fetchall():
+                if rh is not None:
+                    found.add(str(rh))
+        return found
 
     def pred_vs_dock_pairs(self, dock_iteration: int) -> list[tuple[float, float]]:
         """``(pred_score, dock_score)`` pairs for a given ``dock_iteration``.

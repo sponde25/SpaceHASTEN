@@ -78,6 +78,13 @@ class GeneralSettings(_Section):
     field_similarity_ftrees: str = "pharmacophore-similarity"
     seeds_count: int = 1000000
     seeds_cpu: int = 4
+    cpu_count_library: str = "1"
+    library_infer_batch_size: int = 32
+    library_infer_num_workers: int = 0
+    library_infer_accelerator: str = "cpu"
+    library_infer_devices: str = "1"
+    library_default_top_pct: float = 1.0
+    library_build_chunk_size: int = 2_000_000
 
 
 class PathsSettings(_Section):
@@ -101,6 +108,9 @@ class PathsSettings(_Section):
     # on a filesystem visible to compute nodes. Set by ``install_spacehasten``
     # and used by ``Settings.remote_script_path``.
     spacehasten_src_dir: str | None = None
+    # Default library store directory for `spacehasten library-screen`
+    # (produced by `spacehasten library-build`); overridable with --library.
+    library_store_default: str | None = None
 
 
 class SlurmSettings(_Section):

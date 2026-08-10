@@ -30,6 +30,8 @@ def test_top_level_help_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
         ["search"],
         ["dock"],
         ["cluster"],
+        ["library-build"],
+        ["library-screen"],
         ["screening-cycle"],
         ["export"],
         ["export", "csv"],
@@ -72,6 +74,9 @@ def test_subcommand_help_exits_zero(subcommand: list[str]) -> None:
         # Bad choices.
         ["search", "--source", "bogus", "--top-n", "1"],
         ["dock", "--top-n", "1", "--strategy", "bogus"],
+        ["library-build"],  # missing --source and --output
+        # top-n / score-cutoff are mutually exclusive.
+        ["library-screen", "--top-n", "10", "--score-cutoff", "-8.0"],
     ],
 )
 def test_required_args_validated(argv: list[str]) -> None:
@@ -103,6 +108,8 @@ def test_each_subcommand_parses_minimally(tmp_path) -> None:  # type: ignore[no-
         ["-w", str(ws), "search", "--source", "docked", "--top-n", "10", "--cpus", "4"],
         ["-w", str(ws), "dock", "--top-n", "10", "--cpus", "4"],
         ["-w", str(ws), "cluster"],
+        ["library-build", "--source", str(smi), "--output", str(tmp_path / "libstore")],
+        ["-w", str(ws), "library-screen"],
         ["-w", str(ws), "screening-cycle", "--simsearch-top-n", "100", "--simsearch-jobs", "4", "--dock-top-n", "1000", "--dock-cpus", "4"],
         ["-w", str(ws), "export", "csv", "--cutoff", "-7", "--output", "out.csv"],
         ["-w", str(ws), "export", "poses", "--cutoff", "-7", "--output", "out.mae"],
@@ -197,3 +204,116 @@ def test_screening_cycle_greedy_strategy_never_clusters(tmp_path, monkeypatch) -
     ])
     assert rc == 0
     assert cluster_calls == []
+
+
+def test_library_build_dispatch_passes_args_to_stage(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from spacehasten.stages import library_build as library_build_mod
+
+    ws = _init_workspace(tmp_path)
+    src = tmp_path / "diverse.cxsmiles"
+    src.write_text("smiles\tid\n")
+
+    class _FakeManifest:
+        n_compounds = 5
+        n_chunks = 2
+
+    calls: list[tuple[object, dict]] = []
+
+    def fake_library_build(scheduler, settings, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append((settings, kwargs))
+        return _FakeManifest()
+
+    monkeypatch.setattr(library_build_mod, "library_build", fake_library_build)
+
+    rc = main([
+        "-w", str(ws), "library-build",
+        "--source", str(src), "--output", str(tmp_path / "libstore"),
+        "--chunk-size", "100", "--cores", "3",
+    ])
+    assert rc == 0
+    assert len(calls) == 1
+    settings_used, kwargs_used = calls[0]
+    assert settings_used.general.cpu_count_library == "3"
+    assert kwargs_used["chunk_size"] == 100
+    assert kwargs_used["store_dir"] == tmp_path / "libstore"
+    assert kwargs_used["source_files"] == [src]
+
+
+def test_library_build_runs_without_a_workspace(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """library-build must not require -w / cwd to be a spacehasten workspace.
+
+    It builds a reusable library store independent of any run, so it should
+    work from a bare directory with no manifest.json or .dbsh file.
+    """
+    from spacehasten.stages import library_build as library_build_mod
+
+    bare_dir = tmp_path / "not_a_workspace"
+    bare_dir.mkdir()
+    assert not (bare_dir / "manifest.json").exists()
+    assert not list(bare_dir.glob("*.dbsh"))
+
+    src = tmp_path / "diverse.cxsmiles"
+    src.write_text("smiles\tid\n")
+
+    class _FakeManifest:
+        n_compounds = 5
+        n_chunks = 2
+
+    calls: list[tuple[object, dict]] = []
+
+    def fake_library_build(scheduler, settings, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append((settings, kwargs))
+        return _FakeManifest()
+
+    monkeypatch.setattr(library_build_mod, "library_build", fake_library_build)
+    monkeypatch.chdir(bare_dir)
+
+    rc = main([
+        "library-build",
+        "--source", str(src), "--output", str(bare_dir / "libstore"),
+    ])
+    assert rc == 0
+    assert len(calls) == 1
+    # Logs should land under the output store, not require a workspace.
+    assert (bare_dir / "libstore" / "logs" / "spacehasten.log").exists()
+
+
+def test_library_screen_dispatch_resolves_model_and_forwards_args(
+    tmp_path, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    from spacehasten.core.db import Database
+    from spacehasten.stages import library_screen as library_screen_mod
+
+    ws = _init_workspace(tmp_path)
+    db_path = next(ws.glob("*.dbsh"))
+    db = Database(db_path)
+    db.store_model_blob(1, b"")
+    db.commit()
+    db.close()
+
+    calls: list[dict] = []
+
+    def fake_library_screen(db, workdir, scheduler, settings, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append(kwargs)
+        return 7
+
+    monkeypatch.setattr(library_screen_mod, "library_screen", fake_library_screen)
+
+    rc = main([
+        "-w", str(ws), "library-screen",
+        "--library", str(tmp_path / "libstore"), "--top-n", "50",
+    ])
+    assert rc == 0
+    assert len(calls) == 1
+    assert calls[0]["top_n"] == 50
+    assert calls[0]["model_version"] == 1
+    assert calls[0]["library_dir"] == tmp_path / "libstore"
+
+
+def test_library_screen_dispatch_errors_without_trained_model(
+    tmp_path, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    ws = _init_workspace(tmp_path)
+    with pytest.raises(SystemExit, match="no trained model"):
+        main(["-w", str(ws), "library-screen", "--library", str(tmp_path / "libstore")])
+

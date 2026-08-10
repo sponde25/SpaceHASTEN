@@ -279,6 +279,30 @@ spacehasten pick-seeds \
     [--cores 8]
 ```
 
+#### `spacehasten library-build`
+
+Convert a large Enamine REAL diverse subset (`.cxsmiles`, optionally
+`.bz2`/`.gz`) into a chunked, canonicalized Parquet library store with
+precomputed PC properties + tautomer reghash. Build once; reuse across
+every `library-screen` campaign (no target/model dependency).
+
+```
+spacehasten library-build \
+    --source Enamine_Diverse_REAL_50M.cxsmiles.bz2 \
+    --output /data/$USER/libraries/enamine_diverse_50M \
+    [--chunk-size 2000000] \
+    [--recompute-props] \
+    [--smiles-col NAME_OR_IDX] [--id-col NAME_OR_IDX] \
+    [--cores 8]
+```
+
+`--source` is repeatable for multiple files sharing the same header.
+Descriptors (MW, sLogP, HBA, HBD, RotBonds, TPSA) are read from the
+Enamine source columns by default; pass `--recompute-props` to force
+RDKit computation instead (needed if the source lacks those columns, or
+to guarantee parity with the RDKit-based `import-seeds`/`search`
+property filters).
+
 ### Workflow Commands (Recommended)
 
 #### `spacehasten seed-training`
@@ -338,11 +362,45 @@ These give fine-grained control over individual pipeline stages:
 | `search --source docked\|predicted --top-n N --cpus N [--strategy greedy\|clustering]` | Run one similarity search cycle |
 | `dock --top-n N --cpus N [--strategy greedy\|clustering]` | Dock the next batch of compounds |
 | `cluster` | Run sphere-exclusion clustering |
+| `library-screen [--library DIR] [--top-n N \| --score-cutoff FLOAT] [--dry-run]` | Property-filter + chemprop-score a `library-build` store; insert survivors |
 
 `--strategy clustering` on `search`/`dock` requires cluster assignments to
 already exist — run `cluster` first (these manual stages never cluster
 automatically; that only happens inside `screening-cycle --strategy
 clustering`, which re-clusters before each search/dock step).
+
+#### `spacehasten library-screen`
+
+Screens an existing library store (from `library-build`) against a trained
+chemprop model: every chunk is property-filtered (vectorized, no RDKit)
+then chemprop-scored on a compute node, and the highest-scoring survivors
+are inserted into the database exactly like simsearch/seed rows (no
+schema change — distinguished by `pred_score` set and `simsearch_cycle`
+NULL).
+
+```
+spacehasten library-screen \
+    --library /data/$USER/libraries/enamine_diverse_50M \
+    [--model-version N] \
+    [--top-n N | --score-cutoff -9.5] \
+    [--top-pct 1.0] \
+    [--props-toml custom_props.toml] \
+    [--max-concurrent N] \
+    [--dry-run] [--report report.json]
+```
+
+Selection precedence: `--top-n` > `--score-cutoff` > a default cutoff
+derived from the top `--top-pct` percent of the seed docking-score
+distribution (requires seed docking scores to already exist — run
+`seed-training`/`train` first, or pass `--score-cutoff`/`--top-n`
+explicitly). `--dry-run` computes and reports the selection without
+touching the database, additionally writing the ranked survivor list to
+a CSV next to `--report`.
+
+**Note:** the current property filter only supports the six numeric PC
+ranges (MW, sLogP, HBA, HBD, RotBonds, TPSA); SMARTS include/exclude
+filters (used by `import-seeds`/`search`) are **not** applied during
+`library-screen` (see "Scale & performance" below).
 
 ### Utility Commands
 
@@ -505,6 +563,29 @@ src/spacehasten/
 - **Remote script invocation** — compute nodes run `remote/*.py` scripts
   via absolute path, avoiding import-time dependency on the orchestrator
   package inside the chemprop/FPSim2 conda environments.
+
+### Library screening at scale
+
+`library-build` + `library-screen` are designed to make 50M–1B compound
+libraries tractable:
+
+- **Property-filter-first** — the vectorized filter over precomputed
+  columns is what makes huge libraries practical; the chemprop D-MPNN
+  only ever scores property-passing survivors, never the whole library.
+- **Build once, screen many** — the Parquet store produced by
+  `library-build` is target-agnostic (SMILES + properties only), so it
+  is converted once and reused across every `library-screen` campaign.
+- **CPU cost is the bottleneck at the high end** — CPU D-MPNN inference
+  over 1B compounds is on the order of hundreds of thousands of
+  core-hours. Start with a smaller subset (e.g. 50M) and/or switch to
+  GPU inference (`library_infer_accelerator = gpu` in config) before
+  scaling up.
+- **One array task per chunk** — tune `--max-concurrent` to your
+  cluster size. `library_infer_batch_size` defaults to 1000 (vs 32 for
+  `predict`) since chunks are large and the workload is throughput-bound.
+- **SMARTS filters are not applied** — `library-screen`'s property
+  filter only covers the six numeric PC ranges; SMARTS include/exclude
+  patterns configured for `import-seeds`/`search` are ignored.
 
 ## Migration from Legacy
 

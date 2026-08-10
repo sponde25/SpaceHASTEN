@@ -373,21 +373,12 @@ def _ingest_predictions(
 
 
 def _existing_reghashes(db: Database, candidates: Iterable[str]) -> set[str]:
-    """Return the subset of ``candidates`` already present in ``data.reghash``."""
-    cands = list(candidates)
-    if not cands:
-        return set()
-    found: set[str] = set()
-    # SQLite parameter limit is 999 by default; chunk to be safe.
-    chunk = 500
-    for i in range(0, len(cands), chunk):
-        batch = cands[i : i + chunk]
-        placeholders = ",".join("?" * len(batch))
-        sql = f"SELECT reghash FROM data WHERE reghash IN ({placeholders})"
-        for (rh,) in db.connection.execute(sql, batch).fetchall():
-            if rh is not None:
-                found.add(str(rh))
-    return found
+    """Return the subset of ``candidates`` already present in ``data.reghash``.
+
+    Delegates to :meth:`Database.filter_existing_reghashes` (shared with
+    ``library-screen``); kept as a thin wrapper for call-site compatibility.
+    """
+    return db.filter_existing_reghashes(candidates)
 
 
 # --------------------------------------------------------------------------- #

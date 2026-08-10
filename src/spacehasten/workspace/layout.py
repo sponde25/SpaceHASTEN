@@ -99,6 +99,9 @@ class WorkDir:
         """SLURM stdout/stderr logs, on shared storage."""
         return self.shared_root / "logs" / "slurm" / job_name
 
+    def library_screen_dir(self, run: int) -> Path:
+        return self.shared_root / "library_screen" / f"run{run}"
+
     def export_dir(self) -> Path:
         return self.shared_root / "export"
 

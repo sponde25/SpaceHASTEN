@@ -1,0 +1,211 @@
+"""Unit tests for spacehasten.remote.library_infer.
+
+The vectorized property filter (apply_property_filter) and the parquet
+I/O paths are exercised directly; the chemprop-dependent predict_scores
+is monkeypatched (mirrors the existing convention of not exercising real
+chemprop in unit tests - see test_prop_filter.py / test_prediction_local.py).
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from spacehasten.remote import library_infer
+from spacehasten.remote.library_infer import apply_property_filter, infer_chunk
+from spacehasten.remote.prop_filter import _Bounds
+
+_PERMISSIVE_PARAM_LINES = [
+    "0", "10000",   # mw
+    "-10", "10",    # slogp
+    "0", "20",      # hba
+    "0", "20",      # hbd
+    "0", "30",      # rotbonds
+    "0", "500",     # tpsa
+]
+
+_STRICT_PARAM_LINES = [
+    "0", "60",      # mw: only ethanol-like passes
+    "-10", "10",
+    "0", "20",
+    "0", "20",
+    "0", "30",
+    "0", "500",
+]
+
+
+def _write_bounds(tmp_path: Path, lines: list[str]) -> _Bounds:
+    path = tmp_path / "control.param"
+    path.write_text("\n".join(lines) + "\n")
+    return _Bounds.read(path)
+
+
+def _make_df(rows: list[dict]) -> pd.DataFrame:
+    return pd.DataFrame(rows)
+
+
+def _row(compound_id: str, smiles: str, reghash: str, mw: float) -> dict:
+    return {
+        "compound_id": compound_id,
+        "smiles": smiles,
+        "reghash": reghash,
+        "mw": mw,
+        "slogp": 1.0,
+        "hba": 1,
+        "hbd": 1,
+        "rotbonds": 0,
+        "tpsa": 20.0,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# apply_property_filter                                                       #
+# --------------------------------------------------------------------------- #
+
+
+def test_apply_property_filter_permissive_keeps_all(tmp_path: Path) -> None:
+    bounds = _write_bounds(tmp_path, _PERMISSIVE_PARAM_LINES)
+    df = _make_df([
+        _row("ENA-1", "CCO", "h1", 46.07),
+        _row("ENA-2", "c1ccccc1", "h2", 78.11),
+    ])
+    survivors = apply_property_filter(df, bounds)
+    assert len(survivors) == 2
+
+
+def test_apply_property_filter_strict_drops_heavy(tmp_path: Path) -> None:
+    bounds = _write_bounds(tmp_path, _STRICT_PARAM_LINES)
+    df = _make_df([
+        _row("ENA-1", "CCO", "h1", 46.07),
+        _row("ENA-2", "c1ccccc1", "h2", 78.11),  # too heavy for strict bounds
+    ])
+    survivors = apply_property_filter(df, bounds)
+    assert survivors["compound_id"].tolist() == ["ENA-1"]
+
+
+# --------------------------------------------------------------------------- #
+# infer_chunk (predict_scores monkeypatched)                                  #
+# --------------------------------------------------------------------------- #
+
+
+def test_infer_chunk_writes_filtered_and_predicted_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    df = _make_df([
+        _row("ENA-1", "CCO", "h1", 46.07),
+        _row("ENA-2", "c1ccccc1", "h2", 78.11),
+        _row("ENA-3", "CCN", "h3", 500.0),  # dropped by strict bounds
+    ])
+    chunk_path = tmp_path / "chunk.parquet"
+    df.to_parquet(chunk_path, index=False)
+    bounds = _write_bounds(tmp_path, _STRICT_PARAM_LINES)
+
+    def fake_predict_scores(smiles, model_dir, batch_size, num_workers, accelerator, devices):
+        return np.array([-5.0] * len(smiles))
+
+    monkeypatch.setattr(library_infer, "predict_scores", fake_predict_scores)
+
+    model_dir = tmp_path / "model"
+    (model_dir / "model_0").mkdir(parents=True)
+    (model_dir / "model_0" / "pytorch_model.bin").write_bytes(b"fake")
+
+    out_path = tmp_path / "out.parquet"
+    n = infer_chunk(chunk_path, model_dir, out_path, bounds=bounds)
+    assert n == 1  # only ENA-1 passes strict bounds
+
+    out_df = pd.read_parquet(out_path)
+    assert list(out_df.columns) == ["reghash", "smiles", "compound_id", "pred_score"]
+    assert out_df["compound_id"].tolist() == ["ENA-1"]
+    assert out_df["pred_score"].tolist() == [-5.0]
+
+
+def test_infer_chunk_score_cutoff_selection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    df = _make_df([
+        _row("ENA-1", "CCO", "h1", 46.07),
+        _row("ENA-2", "CCN", "h2", 45.08),
+        _row("ENA-3", "CCC", "h3", 44.1),
+    ])
+    chunk_path = tmp_path / "chunk.parquet"
+    df.to_parquet(chunk_path, index=False)
+    bounds = _write_bounds(tmp_path, _PERMISSIVE_PARAM_LINES)
+
+    def fake_predict_scores(smiles, model_dir, batch_size, num_workers, accelerator, devices):
+        return np.array([-9.0, -3.0, -8.5])
+
+    monkeypatch.setattr(library_infer, "predict_scores", fake_predict_scores)
+
+    model_dir = tmp_path / "model"
+    (model_dir / "model_0").mkdir(parents=True)
+    (model_dir / "model_0" / "pytorch_model.bin").write_bytes(b"fake")
+
+    out_path = tmp_path / "out.parquet"
+    n = infer_chunk(chunk_path, model_dir, out_path, bounds=bounds, score_cutoff=-8.0)
+    assert n == 2  # ENA-1 (-9.0) and ENA-3 (-8.5) pass; ENA-2 (-3.0) doesn't
+
+    out_df = pd.read_parquet(out_path)
+    assert set(out_df["compound_id"]) == {"ENA-1", "ENA-3"}
+
+
+def test_infer_chunk_top_n_per_chunk_selection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    df = _make_df([
+        _row("ENA-1", "CCO", "h1", 46.07),
+        _row("ENA-2", "CCN", "h2", 45.08),
+        _row("ENA-3", "CCC", "h3", 44.1),
+    ])
+    chunk_path = tmp_path / "chunk.parquet"
+    df.to_parquet(chunk_path, index=False)
+    bounds = _write_bounds(tmp_path, _PERMISSIVE_PARAM_LINES)
+
+    def fake_predict_scores(smiles, model_dir, batch_size, num_workers, accelerator, devices):
+        return np.array([-9.0, -3.0, -8.5])
+
+    monkeypatch.setattr(library_infer, "predict_scores", fake_predict_scores)
+
+    model_dir = tmp_path / "model"
+    (model_dir / "model_0").mkdir(parents=True)
+    (model_dir / "model_0" / "pytorch_model.bin").write_bytes(b"fake")
+
+    out_path = tmp_path / "out.parquet"
+    n = infer_chunk(chunk_path, model_dir, out_path, bounds=bounds, top_n_per_chunk=1)
+    assert n == 1
+    out_df = pd.read_parquet(out_path)
+    assert out_df["compound_id"].tolist() == ["ENA-1"]  # best (lowest) score
+
+
+def test_infer_chunk_no_survivors_writes_empty_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    df = _make_df([_row("ENA-1", "CCO", "h1", 500.0)])  # too heavy
+    chunk_path = tmp_path / "chunk.parquet"
+    df.to_parquet(chunk_path, index=False)
+    bounds = _write_bounds(tmp_path, _STRICT_PARAM_LINES)
+
+    def fail_predict(*args, **kwargs):
+        raise AssertionError("predict_scores must not be called with 0 survivors")
+
+    monkeypatch.setattr(library_infer, "predict_scores", fail_predict)
+
+    out_path = tmp_path / "out.parquet"
+    n = infer_chunk(chunk_path, tmp_path / "model", out_path, bounds=bounds)
+    assert n == 0
+
+    out_df = pd.read_parquet(out_path)
+    assert list(out_df.columns) == ["reghash", "smiles", "compound_id", "pred_score"]
+    assert len(out_df) == 0
+
+
+def test_infer_chunk_missing_required_columns_raises(tmp_path: Path) -> None:
+    df = pd.DataFrame({"smiles": ["CCO"], "compound_id": ["ENA-1"]})
+    chunk_path = tmp_path / "chunk.parquet"
+    df.to_parquet(chunk_path, index=False)
+    bounds = _write_bounds(tmp_path, _PERMISSIVE_PARAM_LINES)
+
+    with pytest.raises(ValueError, match="missing required columns"):
+        infer_chunk(chunk_path, tmp_path / "model", tmp_path / "out.parquet", bounds=bounds)

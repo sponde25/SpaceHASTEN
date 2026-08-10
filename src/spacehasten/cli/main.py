@@ -54,6 +54,7 @@ command groups:
   setup
     init                Bootstrap workspace, create DB, store docking settings
     pick-seeds          Sample and canonicalize seeds from a large collection
+    library-build       Convert an Enamine diverse subset into a reusable Parquet library store
 
   workflows (recommended)
     seed-training       Import seeds → dock → train
@@ -68,6 +69,7 @@ command groups:
     search              Run one simsearch cycle
     predict             Predict scores for undocked rows
     cluster             Run sphere-exclusion clustering
+    library-screen      Property-filter + chemprop-score a library store, insert survivors
 
   utilities
     status              Print workspace manifest summary
@@ -91,6 +93,7 @@ command groups:
 
     _add_init(sub)
     _add_pick_seeds(sub)
+    _add_library_build(sub)
     _add_seed_training(sub)
     _add_screening_cycle(sub)
     _add_import_seeds(sub)
@@ -99,6 +102,7 @@ command groups:
     _add_search(sub)
     _add_dock(sub)
     _add_cluster(sub)
+    _add_library_screen(sub)
     _add_export(sub)
     _add_plot(sub)
     _add_archive(sub)
@@ -148,6 +152,45 @@ def _add_pick_seeds(sub: argparse._SubParsersAction[argparse.ArgumentParser]) ->
         help="Optional. Local cores for RDKit canonicalization. Default: all available CPUs.",
     )
     p.set_defaults(func=_cmd_pick_seeds)
+
+
+def _add_library_build(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    p = sub.add_parser(
+        "library-build",
+        help="Convert an Enamine diverse subset into a reusable chunked Parquet"
+             " library store (build once, screen many times).",
+    )
+    p.add_argument(
+        "--source", type=Path, action="append", required=True, metavar="FILE",
+        help="Required. Source .cxsmiles/.smi (optionally .bz2/.gz) file. "
+             "Repeatable for multiple source files sharing the same header.",
+    )
+    p.add_argument(
+        "--output", type=Path, required=True,
+        help="Output store directory (manifest.json + chunk_*.parquet).",
+    )
+    p.add_argument(
+        "--chunk-size", type=int, default=None,
+        help="Optional. Rows per shard/chunk. Default: from config (2,000,000).",
+    )
+    p.add_argument(
+        "--recompute-props", action="store_true",
+        help="Optional. Force RDKit computation of the six PC descriptors "
+             "instead of reusing the Enamine source columns.",
+    )
+    p.add_argument(
+        "--smiles-col", type=str, default=None,
+        help="Optional. Column name or 0-based index override. Default: header 'smiles'.",
+    )
+    p.add_argument(
+        "--id-col", type=str, default=None,
+        help="Optional. Column name or 0-based index override. Default: header 'id'.",
+    )
+    p.add_argument(
+        "--cores", type=int, default=None,
+        help="Optional. CPUs per build task. Default: from config.",
+    )
+    p.set_defaults(func=_cmd_library_build)
 
 
 def _add_import_seeds(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -246,6 +289,59 @@ def _add_cluster(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
                         " dock_score <= CUTOFF (better/smaller score)."
                         " Requires --docked.")
     p.set_defaults(func=_cmd_cluster)
+
+
+def _add_library_screen(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    p = sub.add_parser(
+        "library-screen",
+        help="Property-filter + chemprop-score a library store (from "
+             "`library-build`); insert high-scoring survivors into the DB.",
+    )
+    p.add_argument(
+        "--library", type=Path, default=None,
+        help="Optional. Library store directory (manifest.json + chunks). "
+             "Default: paths.library_store_default.",
+    )
+    p.add_argument(
+        "--model-version", type=int, default=None,
+        help="Optional. Model version to score with. Default: latest.",
+    )
+    grp = p.add_mutually_exclusive_group()
+    grp.add_argument(
+        "--top-n", type=int, default=None,
+        help="Optional. Keep the global top-N survivors by pred_score. "
+             "Mutually exclusive with --score-cutoff.",
+    )
+    grp.add_argument(
+        "--score-cutoff", type=float, default=None,
+        help="Optional. Keep every survivor with pred_score <= CUTOFF. "
+             "Mutually exclusive with --top-n.",
+    )
+    p.add_argument(
+        "--top-pct", type=float, default=None,
+        help="Optional. Used only when neither --top-n nor --score-cutoff is"
+             " given: cutoff = the top TOP-PCT percent of seed dock scores."
+             " Default: from config (1.0).",
+    )
+    p.add_argument(
+        "--props-toml", type=Path, default=None,
+        help="Optional. PropertyRanges TOML override. Default: DB properties"
+             " table, falling back to built-in ranges.",
+    )
+    p.add_argument(
+        "--max-concurrent", type=int, default=None,
+        help="Optional. Max concurrent array tasks. Default: all pending chunks at once.",
+    )
+    p.add_argument(
+        "--dry-run", action="store_true",
+        help="Optional. Compute the selection but do not insert into the DB;"
+             " writes the ranked survivor list to a CSV next to --report.",
+    )
+    p.add_argument(
+        "--report", type=Path, default=None,
+        help="Optional. JSON report output path.",
+    )
+    p.set_defaults(func=_cmd_library_screen)
 
 
 def _add_screening_cycle(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -479,6 +575,50 @@ def _cmd_pick_seeds(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_library_build(args: argparse.Namespace) -> int:
+    from spacehasten.stages.library_build import library_build
+
+    # library-build is independent of any spacehasten workspace: it builds a
+    # reusable library store at --output for use across many future runs, so
+    # it must not require the cwd (or -w) to already be an initialized
+    # workspace. Logs go to <output>/logs instead of a workspace's logs dir.
+    # Resolve --output to an absolute path up front (library_build() also
+    # resolves it, but doing it here too keeps the printed/logged path and
+    # the logs directory consistent with a relative --output argument).
+    output_dir = Path(args.output).resolve()
+    settings = settings_from_args(args)
+    scheduler = scheduler_from_args(args, settings)
+    setup_logging(WorkDir(root=output_dir), args)
+
+    if args.cores is not None:
+        settings.general.cpu_count_library = str(args.cores)
+
+    column_map: dict[str, str] = {}
+    if args.smiles_col is not None:
+        column_map["smiles"] = args.smiles_col
+    if args.id_col is not None:
+        column_map["id"] = args.id_col
+
+    chunk_size = (
+        args.chunk_size if args.chunk_size is not None
+        else settings.general.library_build_chunk_size
+    )
+
+    manifest = library_build(
+        scheduler, settings,
+        source_files=args.source,
+        store_dir=output_dir,
+        chunk_size=chunk_size,
+        recompute_props=args.recompute_props,
+        column_map=column_map or None,
+    )
+    print(
+        f"Built library store at {output_dir}: "
+        f"{manifest.n_compounds} compounds across {manifest.n_chunks} chunks"
+    )
+    return 0
+
+
 def _cmd_import_seeds(args: argparse.Namespace) -> int:
     workdir = workdir_from_args(args)
     workdir.logs_dir().mkdir(parents=True, exist_ok=True)
@@ -620,6 +760,71 @@ def _cmd_cluster(args: argparse.Namespace) -> int:
             docked_only=args.docked, cutoff=args.cutoff,
         )
     print(f"Clustered {n} compounds")
+    return 0
+
+
+def _resolve_library_screen_props(args: argparse.Namespace, db: Database) -> PropertyRanges:
+    """Resolve --props-toml > DB properties table > built-in defaults."""
+    if args.props_toml is not None:
+        return PropertyRanges.from_toml(args.props_toml)
+    db_props = db.load_properties()
+    if db_props is not None:
+        return PropertyRanges.model_validate({
+            "mw": {"min": float(db_props.mw[0]), "max": float(db_props.mw[1])},
+            "slogp": {"min": float(db_props.slogp[0]), "max": float(db_props.slogp[1])},
+            "hba": {"min": int(db_props.hba[0]), "max": int(db_props.hba[1])},
+            "hbd": {"min": int(db_props.hbd[0]), "max": int(db_props.hbd[1])},
+            "rotbonds": {"min": int(db_props.rotbonds[0]), "max": int(db_props.rotbonds[1])},
+            "tpsa": {"min": float(db_props.tpsa[0]), "max": float(db_props.tpsa[1])},
+        })
+    return PropertyRanges()
+
+
+def _cmd_library_screen(args: argparse.Namespace) -> int:
+    from spacehasten.stages.library_screen import library_screen
+
+    workdir = workdir_from_args(args)
+    setup_logging(workdir, args)
+    settings = settings_from_args(args)
+    scheduler = scheduler_from_args(args, settings)
+
+    library_dir = args.library
+    if library_dir is None and settings.paths.library_store_default:
+        library_dir = Path(settings.paths.library_store_default)
+    if library_dir is None:
+        raise SystemExit(
+            "error: no library store given; pass --library or set "
+            "paths.library_store_default in config"
+        )
+
+    top_pct = (
+        args.top_pct if args.top_pct is not None
+        else settings.general.library_default_top_pct
+    )
+
+    with open_db(args) as db:
+        version = args.model_version
+        if version is None:
+            version = db.latest_model_version()
+            if version is None:
+                raise SystemExit("error: no trained model; run `spacehasten train` first")
+
+        props = _resolve_library_screen_props(args, db)
+
+        n = library_screen(
+            db, workdir, scheduler, settings,
+            library_dir=library_dir,
+            model_version=version,
+            props=props,
+            top_n=args.top_n,
+            score_cutoff=args.score_cutoff,
+            top_pct=top_pct,
+            max_concurrent=args.max_concurrent,
+            dry_run=args.dry_run,
+            report_path=args.report,
+        )
+    verb = "Would insert" if args.dry_run else "Inserted"
+    print(f"{verb} {n} compounds from library-screen (model v{version})")
     return 0
 
 
