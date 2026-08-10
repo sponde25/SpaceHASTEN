@@ -489,7 +489,7 @@ spacehasten library-build
     [--recompute-props]                     (force RDKit descriptors; D5)
     [--smiles-col NAME_OR_IDX]              (default: header 'smiles')
     [--id-col NAME_OR_IDX]                  (default: header 'id')
-    [--cores N]
+    [--jobs 250]                            (max array tasks run at once; 1 core each)
 ```
 Header columns are resolved by name by default; the `--*-col` flags are
 overrides for headerless inputs. Descriptors come from the Enamine columns
@@ -502,7 +502,7 @@ spacehasten library-screen
     [--top-n N | --score-cutoff FLOAT]      (mutually exclusive)
     [--top-pct 1.0]                         (used only when neither above given)
     [--props-toml FILE]                     (override DB properties)
-    [--max-concurrent N]
+    [--jobs 250]                            (max screening array tasks run at once)
     [--dry-run]
     [--report FILE]
 ```
@@ -522,7 +522,7 @@ help groups: `library-build` under **Setup**, `library-screen` under
 - CPU D-MPNN inference on 1B compounds is hundreds of thousands of
   core-hours — recommend starting at the 50M subset and/or GPU
   (`library_infer_accelerator = gpu`).
-- One array task per parquet chunk; tune `--max-concurrent` to cluster
+- One array task per parquet chunk; tune `--jobs` to cluster
   size. `library_infer_batch_size` default 1000 (vs predict's 32) because
   chunks are large and throughput-bound.
 

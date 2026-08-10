@@ -344,8 +344,9 @@ def library_build(
         (plan §D5).
     :param column_map: optional overrides ``{canonical_field: name_or_index}``
         for headerless inputs or nonstandard headers.
-    :param max_concurrent: max concurrent array tasks. Default: all shards
-        at once.
+    :param max_concurrent: max number of array tasks allowed to run at once.
+        Because each task uses a single core, this also caps the peak number
+        of CPUs the build consumes. Default: all shards at once.
     :param build_command_prefix: override the command used to launch
         ``remote.library_build`` (used by tests with stub scripts).
     :returns: the written :class:`LibraryManifest`.
@@ -396,13 +397,15 @@ def library_build(
     )
     command = _build_build_command(store_dir, resolved_columns, recompute_props, command_prefix)
 
-    cpus = int(settings.general.cpu_count_library or 1)
+    # Each shard build is a single-core RDKit canonicalization pass, so tasks
+    # always request one CPU; parallelism is controlled purely by how many
+    # array tasks run at once (``max_concurrent``), not by cores per task.
     job = ArrayJob(
         name="library_build",
         workdir=raw_dir,
         array_size=n_shards,
         max_concurrent=max_concurrent if max_concurrent is not None else n_shards,
-        cpus_per_task=max(1, cpus),
+        cpus_per_task=1,
         env_setup=env_setup,
         command_template=command,
     )

@@ -187,8 +187,10 @@ def _add_library_build(sub: argparse._SubParsersAction[argparse.ArgumentParser])
         help="Optional. Column name or 0-based index override. Default: header 'id'.",
     )
     p.add_argument(
-        "--cores", type=int, default=None,
-        help="Optional. CPUs per build task. Default: from config.",
+        "--jobs", type=int, default=250,
+        help="Optional. Max number of build tasks (array jobs) to run "
+             "simultaneously. Each task uses one core, so this caps peak CPU "
+             "usage. The number of tasks is set by --chunk-size. Default: 250.",
     )
     p.set_defaults(func=_cmd_library_build)
 
@@ -199,7 +201,8 @@ def _add_import_seeds(sub: argparse._SubParsersAction[argparse.ArgumentParser]) 
     grp.add_argument("--smi", type=Path, help="SMI file with undocked seed compounds.")
     grp.add_argument("--csv", type=Path, help="CSV file with pre-docked seed compounds.")
     p.add_argument("--props-toml", type=Path, default=None,
-                   help="Optional. PropertyRanges TOML override. Default: built-in ranges.")
+                   help="Optional. PropertyRanges TOML override. Default: the "
+                        "workspace's props.toml (from `init`), else built-in ranges.")
     p.add_argument("--processes", type=int, default=None,
                    help="Optional. Worker pool size for hashing. Default: all available CPUs.")
     p.set_defaults(func=_cmd_import_seeds)
@@ -213,7 +216,8 @@ def _add_seed_training(sub: argparse._SubParsersAction[argparse.ArgumentParser])
     p.add_argument("--smi", type=Path, required=True, help="SMI file with undocked seed compounds.")
     p.add_argument("--dock-cpus", type=int, required=True, help="Number of concurrent docking tasks.")
     p.add_argument("--props-toml", type=Path, default=None,
-                   help="Optional. PropertyRanges TOML override. Default: built-in ranges.")
+                   help="Optional. PropertyRanges TOML override. Default: the "
+                        "workspace's props.toml (from `init`), else built-in ranges.")
     p.add_argument("--processes", type=int, default=None,
                    help="Optional. Worker pool size for hashing. Default: all available CPUs.")
     p.set_defaults(func=_cmd_seed_training)
@@ -325,12 +329,14 @@ def _add_library_screen(sub: argparse._SubParsersAction[argparse.ArgumentParser]
     )
     p.add_argument(
         "--props-toml", type=Path, default=None,
-        help="Optional. PropertyRanges TOML override. Default: DB properties"
-             " table, falling back to built-in ranges.",
+        help="Optional. PropertyRanges TOML override. Default: the workspace's"
+             " props.toml (from `init`), else the DB properties table, falling"
+             " back to built-in ranges.",
     )
     p.add_argument(
-        "--max-concurrent", type=int, default=None,
-        help="Optional. Max concurrent array tasks. Default: all pending chunks at once.",
+        "--jobs", type=int, default=250,
+        help="Optional. Max number of screening tasks (array jobs) to run "
+             "simultaneously. Default: 250.",
     )
     p.add_argument(
         "--dry-run", action="store_true",
@@ -367,7 +373,7 @@ def _add_screening_cycle(sub: argparse._SubParsersAction[argparse.ArgumentParser
     p.add_argument("--nnn", type=int, default=None,
                    help="Optional. Max results per query from chemical space. Default: from config.")
     p.add_argument("--props-toml", type=Path, default=None,
-                   help="Optional. PropertyRanges TOML to update the stored property filter ranges before running. Default: use ranges already in the database.")
+                   help="Optional. PropertyRanges TOML to update the stored property filter ranges before running. Default: the workspace's props.toml (from `init`) if present, else use ranges already in the database.")
     p.set_defaults(func=_cmd_screening_cycle)
 
 
@@ -590,8 +596,8 @@ def _cmd_library_build(args: argparse.Namespace) -> int:
     scheduler = scheduler_from_args(args, settings)
     setup_logging(WorkDir(root=output_dir), args)
 
-    if args.cores is not None:
-        settings.general.cpu_count_library = str(args.cores)
+    if args.jobs is not None and args.jobs < 1:
+        raise SystemExit(f"error: --jobs must be >= 1, got {args.jobs}")
 
     column_map: dict[str, str] = {}
     if args.smiles_col is not None:
@@ -611,6 +617,7 @@ def _cmd_library_build(args: argparse.Namespace) -> int:
         chunk_size=chunk_size,
         recompute_props=args.recompute_props,
         column_map=column_map or None,
+        max_concurrent=args.jobs,
     )
     print(
         f"Built library store at {output_dir}: "
@@ -624,9 +631,10 @@ def _cmd_import_seeds(args: argparse.Namespace) -> int:
     workdir.logs_dir().mkdir(parents=True, exist_ok=True)
     setup_logging(workdir, args)
 
+    props_toml = _effective_props_toml(args, workdir)
     props = (
-        PropertyRanges.from_toml(args.props_toml)
-        if args.props_toml is not None
+        PropertyRanges.from_toml(props_toml)
+        if props_toml is not None
         else PropertyRanges()
     )
 
@@ -649,9 +657,10 @@ def _cmd_seed_training(args: argparse.Namespace) -> int:
     settings = settings_from_args(args)
     scheduler = scheduler_from_args(args, settings)
 
+    props_toml = _effective_props_toml(args, workdir)
     props = (
-        PropertyRanges.from_toml(args.props_toml)
-        if args.props_toml is not None
+        PropertyRanges.from_toml(props_toml)
+        if props_toml is not None
         else PropertyRanges()
     )
 
@@ -763,10 +772,32 @@ def _cmd_cluster(args: argparse.Namespace) -> int:
     return 0
 
 
-def _resolve_library_screen_props(args: argparse.Namespace, db: Database) -> PropertyRanges:
-    """Resolve --props-toml > DB properties table > built-in defaults."""
+def _effective_props_toml(args: argparse.Namespace, workdir: WorkDir) -> Path | None:
+    """Resolve which property-filter TOML a workspace command should use.
+
+    Precedence: an explicit ``--props-toml`` always wins; otherwise fall back
+    to the workspace's own ``props.toml`` (written by ``init`` and meant to be
+    edited) when it exists. ``None`` means "no TOML available" — the caller
+    then uses built-in :class:`PropertyRanges` defaults.
+
+    Defaulting to ``workdir.props_path()`` makes edits to that file take effect
+    without re-passing ``--props-toml`` on every command, and prevents a bare
+    ``import-seeds``/``seed-training`` from silently reverting the stored
+    ranges back to the built-in defaults.
+    """
     if args.props_toml is not None:
-        return PropertyRanges.from_toml(args.props_toml)
+        return Path(args.props_toml)
+    candidate = workdir.props_path()
+    return candidate if candidate.exists() else None
+
+
+def _resolve_library_screen_props(
+    args: argparse.Namespace, workdir: WorkDir, db: Database
+) -> PropertyRanges:
+    """Resolve --props-toml / workspace props.toml > DB properties table > built-in defaults."""
+    props_toml = _effective_props_toml(args, workdir)
+    if props_toml is not None:
+        return PropertyRanges.from_toml(props_toml)
     db_props = db.load_properties()
     if db_props is not None:
         return PropertyRanges.model_validate({
@@ -787,6 +818,9 @@ def _cmd_library_screen(args: argparse.Namespace) -> int:
     setup_logging(workdir, args)
     settings = settings_from_args(args)
     scheduler = scheduler_from_args(args, settings)
+
+    if args.jobs is not None and args.jobs < 1:
+        raise SystemExit(f"error: --jobs must be >= 1, got {args.jobs}")
 
     library_dir = args.library
     if library_dir is None and settings.paths.library_store_default:
@@ -809,7 +843,7 @@ def _cmd_library_screen(args: argparse.Namespace) -> int:
             if version is None:
                 raise SystemExit("error: no trained model; run `spacehasten train` first")
 
-        props = _resolve_library_screen_props(args, db)
+        props = _resolve_library_screen_props(args, workdir, db)
 
         n = library_screen(
             db, workdir, scheduler, settings,
@@ -819,7 +853,7 @@ def _cmd_library_screen(args: argparse.Namespace) -> int:
             top_n=args.top_n,
             score_cutoff=args.score_cutoff,
             top_pct=top_pct,
-            max_concurrent=args.max_concurrent,
+            max_concurrent=args.jobs,
             dry_run=args.dry_run,
             report_path=args.report,
         )
@@ -845,11 +879,12 @@ def _cmd_screening_cycle(args: argparse.Namespace) -> int:
             clustering.cluster(db, workdir, scheduler, settings)
 
     with open_db(args) as db:
-        if args.props_toml is not None:
-            props = PropertyRanges.from_toml(args.props_toml)
+        props_toml = _effective_props_toml(args, workdir)
+        if props_toml is not None:
+            props = PropertyRanges.from_toml(props_toml)
             db.replace_properties(seeds.typed_to_db_props(props))
             db.replace_smarts_filters(seeds.typed_smarts_to_db(props))
-            logger.info("Updated property filter ranges from %s", args.props_toml)
+            logger.info("Updated property filter ranges from %s", props_toml)
         for round_n in range(1, args.rounds + 1):
             logger.info("Screening round %d/%d", round_n, args.rounds)
 

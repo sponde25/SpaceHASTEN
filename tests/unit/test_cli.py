@@ -206,6 +206,36 @@ def test_screening_cycle_greedy_strategy_never_clusters(tmp_path, monkeypatch) -
     assert cluster_calls == []
 
 
+def test_import_seeds_defaults_to_workspace_props_toml(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """A bare ``import-seeds`` (no --props-toml) must use the workspace's
+    edited ``props.toml`` rather than silently reverting to built-in defaults."""
+    from spacehasten.config.properties import FloatRange, PropertyRanges
+    from spacehasten.stages import seeds as seeds_mod
+
+    ws = _init_workspace(tmp_path)
+    smi = tmp_path / "seeds.smi"
+    smi.write_text("CCO seed-1\n")
+
+    # Edit the workspace props.toml to a non-default MW range.
+    from spacehasten.workspace.layout import WorkDir
+
+    custom = PropertyRanges(mw=FloatRange(min=100.0, max=450.0))
+    custom.to_toml(WorkDir(root=ws).props_path())
+
+    captured: list[PropertyRanges] = []
+
+    def fake_import_seeds(db, **kwargs):  # type: ignore[no-untyped-def]
+        captured.append(kwargs["props"])
+        return 1
+
+    monkeypatch.setattr(seeds_mod, "import_seeds", fake_import_seeds)
+
+    rc = main(["-w", str(ws), "import-seeds", "--smi", str(smi)])
+    assert rc == 0
+    assert len(captured) == 1
+    assert captured[0].mw.max == 450.0  # from props.toml, not the 500.0 default
+
+
 def test_library_build_dispatch_passes_args_to_stage(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     from spacehasten.stages import library_build as library_build_mod
 
@@ -228,12 +258,12 @@ def test_library_build_dispatch_passes_args_to_stage(tmp_path, monkeypatch) -> N
     rc = main([
         "-w", str(ws), "library-build",
         "--source", str(src), "--output", str(tmp_path / "libstore"),
-        "--chunk-size", "100", "--cores", "3",
+        "--chunk-size", "100", "--jobs", "3",
     ])
     assert rc == 0
     assert len(calls) == 1
     settings_used, kwargs_used = calls[0]
-    assert settings_used.general.cpu_count_library == "3"
+    assert kwargs_used["max_concurrent"] == 3
     assert kwargs_used["chunk_size"] == 100
     assert kwargs_used["store_dir"] == tmp_path / "libstore"
     assert kwargs_used["source_files"] == [src]
