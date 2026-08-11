@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SpaceHASTEN — Practical Usage Guide</title>
+<style>
+  :root {
+    --fg: #1b1f23; --muted: #57606a; --bg: #ffffff; --code-bg: #f6f8fa;
+    --border: #d0d7de; --accent: #0969da; --note-bg: #ddf4ff; --note-border: #54aeff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    color: var(--fg); background: var(--bg); line-height: 1.55;
+    max-width: 860px; margin: 0 auto; padding: 2rem 1.25rem 5rem;
+  }
+  h1 { font-size: 2rem; border-bottom: 1px solid var(--border); padding-bottom: .3em; }
+  h2 { margin-top: 2.2rem; border-bottom: 1px solid var(--border); padding-bottom: .3em; }
+  h3 { margin-top: 1.6rem; }
+  p, li { color: var(--fg); }
+  code {
+    background: var(--code-bg); border-radius: 6px; padding: .15em .4em;
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 85%;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px;
+    padding: 1rem; overflow-x: auto;
+  }
+  pre code { background: none; padding: 0; font-size: 88%; }
+  hr { border: none; border-top: 1px solid var(--border); margin: 2.5rem 0; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .note {
+    background: var(--note-bg); border-left: 4px solid var(--note-border);
+    border-radius: 6px; padding: .8rem 1rem; margin: 1.2rem 0;
+  }
+  .note strong { color: #0550ae; }
+  .muted { color: var(--muted); }
+  ol li, ul li { margin: .25rem 0; }
+</style>
+</head>
+<body>
+
+<h1>SpaceHASTEN — Practical Usage Guide</h1>
+
+<p>A hands-on walkthrough of a typical screening campaign with the rewritten
+SpaceHASTEN CLI. It is written for people who already know the legacy
+SpaceHASTEN workflow and just want to see how the new commands map to it.</p>
+
+<div class="note">
+<strong>Working directory convention.</strong> Every command needs to know which
+campaign (workspace) it operates on. If you run a command <em>from inside the
+campaign's work directory</em> you don't have to specify anything. If you run it
+from anywhere else, point at the campaign with the global
+<code>-w</code>/<code>--workspace</code> flag, e.g.
+<code>spacehasten status -w /wrk/user/spacehasten/run1</code>. All examples below
+assume you are standing in the work directory, so the workspace argument is
+omitted.
+</div>
+
+<hr>
+
+<h2 id="activate">0. Activate the environment</h2>
+<pre><code>source /data/programs/oce/actoce
+conda activate spacehasten</code></pre>
+
+<h2 id="workspace">1. Create a workspace on fast storage</h2>
+<p>Put the campaign on fast storage (<code>/wrk</code> or <code>/fastwrk</code>) —
+this is where the database, stage scratch, and logs live.</p>
+<pre><code>mkdir -p /wrk/user/spacehasten/run1
+cd /wrk/user/spacehasten/run1</code></pre>
+
+<h2 id="init">2. Initialize the campaign</h2>
+<p>Bootstrap the workspace and register the docking parameters and grid:</p>
+<pre><code>spacehasten init . --dock-params /path/to/glide.in --dock-grid /path/to/grid.zip</code></pre>
+<p><code>init</code> also writes a <strong><code>props.toml</code></strong>
+property-filter template into the work directory. Edit it now if you want custom
+filters — see <a href="#filters">Property &amp; substructure filters</a>.</p>
+
+<h2 id="pick-seeds">3. Pick seed compounds (optional)</h2>
+<p>If you need a fresh set of seed compounds, sample them from the configured
+seed collection:</p>
+<pre><code>spacehasten pick-seeds --n-seeds 1000000 --output seeds_1M.smi</code></pre>
+
+<h2 id="seed-training">4. Import + dock seeds and train the first model</h2>
+<p>This imports the seeds, docks them, and trains the initial ML model in one
+step. <code>--dock-cpus</code> sets how many cores are used concurrently for
+docking:</p>
+<pre><code>spacehasten seed-training --smi seeds_1M.smi --dock-cpus 250</code></pre>
+
+<h2 id="screening-cycle">5. Run screening cycles</h2>
+<p>A screening cycle does similarity search → dock → (re)train, repeated for the
+requested number of rounds. A default 2-round campaign with 1,000 simsearch
+queries and up to 1,000,000 docked compounds per round, using at most 250 cores
+at a time:</p>
+<pre><code>spacehasten screening-cycle \
+    --simsearch-top-n 1000 \
+    --simsearch-jobs 125 \
+    --dock-top-n 1000000 \
+    --dock-cpus 250 \
+    --rounds 2</code></pre>
+
+<h2 id="status">6. Check progress at any time</h2>
+<pre><code>spacehasten status --actives -8.5</code></pre>
+<p>Example output:</p>
+<pre><code>Workspace:                run1
+Similarity search cycles: 6
+Docking iterations:       2
+Model versions:           2
+Total compounds:          12528819
+Docked compounds:         2821361
+Actives (dock_score &lt; -8.5): 1278785</code></pre>
+<p><code>--actives</code> takes the virtual-hit threshold, and the report tells
+you how many compounds fall below it.</p>
+<p>Generate a docking-score distribution plot (written to
+<code>&lt;workspace&gt;/plots/</code>):</p>
+<pre><code>spacehasten plot --kind dock-scores</code></pre>
+
+<h2 id="export">7. Export results</h2>
+<p>Once you are happy with the number of virtual hits, export them. Choose a
+docking-score cutoff and an output file:</p>
+<pre><code># Tabular results
+spacehasten export csv --cutoff -8.5 --output results.csv
+
+# Docking poses
+spacehasten export poses --cutoff -8.5 --output poses.mae</code></pre>
+
+<hr>
+
+<h2 id="library-screen">ML-screening of an enumerated library</h2>
+<p>Once a campaign has at least the initial ML model, you can ML-score a large
+enumerated library and insert the best-predicted compounds into the database for
+docking. Those docked compounds can then seed further similarity searches.</p>
+<p>A <strong>136M diversity subset of Enamine REAL</strong> is currently
+available for enumerated ML-screening.</p>
+<pre><code># 1. Score the library and insert the survivors
+spacehasten library-screen \
+    --library /data/work/Enamine_REAL_2026-01_136M_subset \
+    --jobs 250
+# -> reports e.g. {'n_inserted': 138046}
+
+# 2. Dock the freshly inserted compounds
+spacehasten dock --top-n 138046 --cpus 250</code></pre>
+<p>The inserted compounds are now in the database and can be used both as docked
+data for training and as query seeds for later similarity searches.</p>
+
+<hr>
+
+<h2 id="filters">Property &amp; substructure filters</h2>
+<p><code>spacehasten init</code> writes a <strong><code>props.toml</code></strong>
+into the work directory with the default physicochemical ranges and two (empty)
+SMARTS lists:</p>
+<pre><code>[properties]
+smarts_include = []
+smarts_exclude = []
+
+[properties.mw]
+min = 0.0
+max = 500.0
+
+[properties.slogp]
+min = -10.0
+max = 5.0
+
+[properties.hba]
+min = 0
+max = 10
+
+[properties.hbd]
+min = 0
+max = 5
+
+[properties.rotbonds]
+min = 0
+max = 10
+
+[properties.tpsa]
+min = 0.0
+max = 140.0</code></pre>
+
+<h3>How the filter is picked up</h3>
+<p>You do <strong>not</strong> need to pass a flag on every command. When
+resolving the active filter, SpaceHASTEN uses this precedence:</p>
+<ol>
+  <li>An explicit <code>--props-toml /path/to/file.toml</code> (always wins).</li>
+  <li>The workspace's own <code>props.toml</code> (the one written by
+      <code>init</code>), if present.</li>
+  <li>The property ranges already stored in the database.</li>
+  <li>Built-in defaults.</li>
+</ol>
+<p>Because the workspace <code>props.toml</code> is step 2, <strong>editing that
+file in the work directory is enough</strong> — the next
+<code>seed-training</code>, <code>import-seeds</code>,
+<code>screening-cycle</code>, or <code>library-screen</code> run will use it
+automatically. Running <code>screening-cycle</code> (or
+<code>seed-training</code>) with an effective <code>props.toml</code> also writes
+the ranges into the database, so the stored filter stays in sync.</p>
+<p>To use a filter file kept elsewhere, pass it explicitly:</p>
+<pre><code>spacehasten seed-training --smi seeds_1M.smi --dock-cpus 250 \
+    --props-toml /path/to/custom_props.toml</code></pre>
+
+<h3>Excluding (or requiring) substructures</h3>
+<p>The two SMARTS lists let you filter by substructure:</p>
+<ul>
+  <li><code>smarts_exclude</code> — a molecule is dropped if it matches
+      <strong>any</strong> listed pattern. Use this to remove unwanted
+      chemotypes, e.g. carboxylic acids or PAINS/structural alerts.</li>
+  <li><code>smarts_include</code> — a molecule is kept only if it matches
+      <strong>at least one</strong> listed pattern (a scaffold requirement). An
+      empty list means no include constraint.</li>
+</ul>
+<p>Example — filter out carboxylic acids:</p>
+<pre><code>[properties]
+smarts_include = []
+smarts_exclude = ["C(=O)[OH]"]</code></pre>
+<p>Invalid SMARTS are detected when the filter runs (on the compute node) and
+will abort that filtering task with an error, so validate your patterns.</p>
+
+<h3>Filters during <code>library-screen</code></h3>
+<p><code>library-screen</code> applies <strong>both</strong> filter types, using
+the resolution precedence <code>--props-toml</code> &gt; workspace
+<code>props.toml</code> &gt; DB (<code>properties</code> +
+<code>smarts_filters</code> tables) &gt; built-in defaults:</p>
+<ul>
+  <li><strong>Physicochemical range filters (MW, SLogP, HBA, HBD, rotbonds,
+      TPSA)</strong> are applied first, vectorized over the library's
+      pre-computed descriptor columns (no RDKit) — this is the fast path.</li>
+  <li><strong>SMARTS substructure filters (<code>smarts_include</code> /
+      <code>smarts_exclude</code>)</strong> are then applied to the
+      property-filter survivors. Because the library's pre-computed columns don't
+      encode substructure matches, each surviving compound's SMILES is parsed
+      with RDKit at this point; the cost stays proportional to the (small)
+      surviving fraction and parallelizes across the chunk array-jobs. When no
+      SMARTS patterns are configured this RDKit step is skipped entirely.</li>
+</ul>
+<p>So editing <code>props.toml</code> (or passing <code>--props-toml</code>)
+tightens both the property ranges <em>and</em> the substructure filtering of the
+library screen exactly as it does for seeding:</p>
+<pre><code>spacehasten library-screen \
+    --library /data/work/Enamine_REAL_2026-01_136M_subset \
+    --jobs 250 \
+    --props-toml /path/to/custom_props.toml</code></pre>
+<p>For example, with <code>smarts_exclude = ["C(=O)[OH]"]</code> in
+<code>props.toml</code>, carboxylic acids are removed before the compounds are
+scored and inserted.</p>
+
+<hr>
+
+<h2 id="logs">Logs</h2>
+<p>The master log for a campaign is written to
+<code>&lt;workspace&gt;/logs/</code>.</p>
+
+</body>
+</html>

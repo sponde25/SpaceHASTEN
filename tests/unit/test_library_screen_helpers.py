@@ -14,9 +14,11 @@ import pytest
 
 from spacehasten.config.properties import PropertyRanges
 from spacehasten.stages.library_screen import (
+    _build_infer_command,
     _ingest_predictions,
     _prepare_missing_chunks,
     _write_control_param,
+    _write_smarts_param,
 )
 
 
@@ -40,6 +42,52 @@ def test_write_control_param_canonical_order(tmp_path: Path) -> None:
         "0", "10",         # rotbonds
         "0.0", "140.0",    # tpsa
     ]
+
+
+def test_write_smarts_param_empty_returns_false(tmp_path: Path) -> None:
+    props = PropertyRanges()  # no SMARTS by default
+    out = tmp_path / "inputs" / "smarts.txt"
+    has_smarts = _write_smarts_param(out, props)
+    assert has_smarts is False
+    assert out.read_text() == ""
+
+
+def test_write_smarts_param_writes_mode_prefixed_lines(tmp_path: Path) -> None:
+    props = PropertyRanges.model_validate({
+        "smarts_include": ["c1ccccc1"],
+        "smarts_exclude": ["C(=O)[OH]", "[N+]"],
+    })
+    out = tmp_path / "inputs" / "smarts.txt"
+    has_smarts = _write_smarts_param(out, props)
+    assert has_smarts is True
+    assert out.read_text().splitlines() == [
+        "include:c1ccccc1",
+        "exclude:C(=O)[OH]",
+        "exclude:[N+]",
+    ]
+
+
+def test_build_infer_command_omits_smarts_flag_by_default(tmp_path: Path) -> None:
+    from spacehasten.config.settings import Settings
+
+    cmd = _build_infer_command(
+        tmp_path / "results", tmp_path / "model", tmp_path / "control.param",
+        Settings(), ["python", "-m", "spacehasten.remote.library_infer"],
+        top_n=None, cutoff=-8.0,
+    )
+    assert "--smarts" not in cmd
+
+
+def test_build_infer_command_includes_smarts_flag_when_given(tmp_path: Path) -> None:
+    from spacehasten.config.settings import Settings
+
+    smarts_path = tmp_path / "inputs" / "smarts.txt"
+    cmd = _build_infer_command(
+        tmp_path / "results", tmp_path / "model", tmp_path / "control.param",
+        Settings(), ["python", "-m", "spacehasten.remote.library_infer"],
+        top_n=None, cutoff=-8.0, smarts_path=smarts_path,
+    )
+    assert f"--smarts {smarts_path}" in cmd
 
 
 def test_prepare_missing_chunks_skips_existing_outputs(tmp_path: Path) -> None:

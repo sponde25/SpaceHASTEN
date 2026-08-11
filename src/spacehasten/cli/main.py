@@ -800,6 +800,9 @@ def _resolve_library_screen_props(
         return PropertyRanges.from_toml(props_toml)
     db_props = db.load_properties()
     if db_props is not None:
+        smarts_rows = db.load_smarts_filters()
+        include = [pat for mode, pat in smarts_rows if mode == "include"]
+        exclude = [pat for mode, pat in smarts_rows if mode == "exclude"]
         return PropertyRanges.model_validate({
             "mw": {"min": float(db_props.mw[0]), "max": float(db_props.mw[1])},
             "slogp": {"min": float(db_props.slogp[0]), "max": float(db_props.slogp[1])},
@@ -807,6 +810,8 @@ def _resolve_library_screen_props(
             "hbd": {"min": int(db_props.hbd[0]), "max": int(db_props.hbd[1])},
             "rotbonds": {"min": int(db_props.rotbonds[0]), "max": int(db_props.rotbonds[1])},
             "tpsa": {"min": float(db_props.tpsa[0]), "max": float(db_props.tpsa[1])},
+            "smarts_include": include,
+            "smarts_exclude": exclude,
         })
     return PropertyRanges()
 

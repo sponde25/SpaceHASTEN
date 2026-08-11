@@ -15,7 +15,11 @@ import pandas as pd
 import pytest
 
 from spacehasten.remote import library_infer
-from spacehasten.remote.library_infer import apply_property_filter, infer_chunk
+from spacehasten.remote.library_infer import (
+    apply_property_filter,
+    apply_smarts_filter,
+    infer_chunk,
+)
 from spacehasten.remote.prop_filter import _Bounds
 
 _PERMISSIVE_PARAM_LINES = [
@@ -209,3 +213,126 @@ def test_infer_chunk_missing_required_columns_raises(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="missing required columns"):
         infer_chunk(chunk_path, tmp_path / "model", tmp_path / "out.parquet", bounds=bounds)
+
+
+# --------------------------------------------------------------------------- #
+# SMARTS filtering                                                            #
+# --------------------------------------------------------------------------- #
+
+
+def _write_smarts(tmp_path: Path, lines: list[str]) -> library_infer._SmartsBounds:
+    path = tmp_path / "smarts.txt"
+    path.write_text("\n".join(lines) + "\n")
+    return library_infer._SmartsBounds.read(path)
+
+
+def test_smarts_bounds_inactive_when_empty(tmp_path: Path) -> None:
+    smarts = _write_smarts(tmp_path, ["# just a comment", ""])
+    assert smarts.active is False
+
+
+def test_smarts_bounds_bad_mode_raises(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="unknown mode"):
+        _write_smarts(tmp_path, ["banana:CCO"])
+
+
+def test_smarts_bounds_bad_pattern_raises(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="could not parse SMARTS"):
+        _write_smarts(tmp_path, ["exclude:[[[not-smarts"])
+
+
+def test_apply_smarts_filter_exclude_drops_carboxylic_acid(tmp_path: Path) -> None:
+    # Carboxylic acid SMARTS excludes acetic acid but keeps ethanol/benzene.
+    smarts = _write_smarts(tmp_path, ["exclude:C(=O)[OH]"])
+    df = _make_df([
+        _row("ENA-1", "CCO", "h1", 46.07),       # ethanol -> keep
+        _row("ENA-2", "CC(=O)O", "h2", 60.05),   # acetic acid -> drop
+        _row("ENA-3", "c1ccccc1", "h3", 78.11),  # benzene -> keep
+    ])
+    out = apply_smarts_filter(df, smarts)
+    assert out["compound_id"].tolist() == ["ENA-1", "ENA-3"]
+
+
+def test_apply_smarts_filter_include_requires_match(tmp_path: Path) -> None:
+    # Require an aromatic ring: only benzene survives.
+    smarts = _write_smarts(tmp_path, ["include:c1ccccc1"])
+    df = _make_df([
+        _row("ENA-1", "CCO", "h1", 46.07),        # no ring -> drop
+        _row("ENA-2", "c1ccccc1", "h2", 78.11),   # benzene -> keep
+    ])
+    out = apply_smarts_filter(df, smarts)
+    assert out["compound_id"].tolist() == ["ENA-2"]
+
+
+def test_apply_smarts_filter_drops_unparseable_smiles(tmp_path: Path) -> None:
+    smarts = _write_smarts(tmp_path, ["exclude:C(=O)[OH]"])
+    df = _make_df([
+        _row("ENA-1", "CCO", "h1", 46.07),
+        _row("ENA-2", "NOTASMILES", "h2", 50.0),  # unparseable -> drop
+    ])
+    out = apply_smarts_filter(df, smarts)
+    assert out["compound_id"].tolist() == ["ENA-1"]
+
+
+def test_apply_smarts_filter_inactive_is_noop(tmp_path: Path) -> None:
+    smarts = _write_smarts(tmp_path, ["# nothing"])
+    df = _make_df([_row("ENA-1", "CC(=O)O", "h1", 60.05)])
+    out = apply_smarts_filter(df, smarts)
+    assert out["compound_id"].tolist() == ["ENA-1"]
+
+
+def test_infer_chunk_applies_smarts_after_property_filter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    df = _make_df([
+        _row("ENA-1", "CCO", "h1", 46.07),        # keep
+        _row("ENA-2", "CC(=O)O", "h2", 60.05),    # dropped by SMARTS exclude
+        _row("ENA-3", "c1ccccc1", "h3", 78.11),   # keep
+    ])
+    chunk_path = tmp_path / "chunk.parquet"
+    df.to_parquet(chunk_path, index=False)
+    bounds = _write_bounds(tmp_path, _PERMISSIVE_PARAM_LINES)
+    smarts = _write_smarts(tmp_path, ["exclude:C(=O)[OH]"])
+
+    captured: dict[str, list[str]] = {}
+
+    def fake_predict_scores(smiles, model_dir, batch_size, num_workers, accelerator, devices):
+        captured["smiles"] = list(smiles)
+        return np.array([-5.0] * len(smiles))
+
+    monkeypatch.setattr(library_infer, "predict_scores", fake_predict_scores)
+
+    model_dir = tmp_path / "model"
+    (model_dir / "model_0").mkdir(parents=True)
+    (model_dir / "model_0" / "pytorch_model.bin").write_bytes(b"fake")
+
+    out_path = tmp_path / "out.parquet"
+    n = infer_chunk(chunk_path, model_dir, out_path, bounds=bounds, smarts=smarts)
+    assert n == 2
+    # The acid must be removed *before* prediction (predict only sees survivors).
+    assert captured["smiles"] == ["CCO", "c1ccccc1"]
+
+    out_df = pd.read_parquet(out_path)
+    assert out_df["compound_id"].tolist() == ["ENA-1", "ENA-3"]
+
+
+def test_infer_chunk_all_dropped_by_smarts_writes_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    df = _make_df([_row("ENA-1", "CC(=O)O", "h1", 60.05)])  # acid, excluded
+    chunk_path = tmp_path / "chunk.parquet"
+    df.to_parquet(chunk_path, index=False)
+    bounds = _write_bounds(tmp_path, _PERMISSIVE_PARAM_LINES)
+    smarts = _write_smarts(tmp_path, ["exclude:C(=O)[OH]"])
+
+    def fail_predict(*args, **kwargs):
+        raise AssertionError("predict_scores must not be called with 0 survivors")
+
+    monkeypatch.setattr(library_infer, "predict_scores", fail_predict)
+
+    out_path = tmp_path / "out.parquet"
+    n = infer_chunk(chunk_path, tmp_path / "model", out_path, bounds=bounds, smarts=smarts)
+    assert n == 0
+    out_df = pd.read_parquet(out_path)
+    assert list(out_df.columns) == ["reghash", "smiles", "compound_id", "pred_score"]
+    assert len(out_df) == 0

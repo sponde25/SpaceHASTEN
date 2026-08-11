@@ -23,9 +23,12 @@ reader is duplicated here from :mod:`spacehasten.remote.prop_filter`
 rather than imported, mirroring how :mod:`spacehasten.remote.predict`
 stays self-contained.
 
-SMARTS note: precomputed columns do not encode SMARTS matches. SMARTS
-filtering is NOT applied here (v1 limitation, see
-docs/plan-library-screening.md section 5.3).
+SMARTS note: precomputed columns do not encode SMARTS matches, so SMARTS
+filtering requires parsing each property-filter survivor's SMILES with
+RDKit.  It is applied *after* the vectorized property filter (only to the
+survivors) to keep the RDKit cost proportional to the small surviving
+fraction.  When no SMARTS patterns are configured the RDKit path is
+skipped entirely and the screen stays RDKit-free.
 """
 
 from __future__ import annotations
@@ -33,7 +36,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -98,6 +101,100 @@ class _Bounds:
             tpsa_min=float(lines[10]),
             tpsa_max=float(lines[11]),
         )
+
+
+@dataclass(frozen=True)
+class _SmartsBounds:
+    """Compiled SMARTS patterns for substructure filtering.
+
+    Duplicated (rather than imported) from
+    :class:`spacehasten.remote.prop_filter._SmartsBounds` so this script has
+    no ``spacehasten`` dependency when run standalone on a compute node; see
+    module docstring (mirrors the ``_Bounds`` duplication above).
+
+    ``include``: molecule must match at least one pattern (empty = no constraint).
+    ``exclude``: molecule must not match any pattern (empty = no constraint).
+    """
+
+    include: list[object] = field(default_factory=list)
+    exclude: list[object] = field(default_factory=list)
+
+    @classmethod
+    def read(cls, path: Path) -> _SmartsBounds:
+        """Load and compile SMARTS from *path*.
+
+        File format: one ``<mode>:<smarts>`` per line.  Lines starting with
+        ``#`` or blank lines are ignored.  Raises ``ValueError`` for
+        unrecognised modes or patterns that RDKit cannot parse.
+        """
+        from rdkit import Chem
+
+        include: list[object] = []
+        exclude: list[object] = []
+        with path.open("rt", encoding="utf-8") as fh:
+            for lineno, raw in enumerate(fh, 1):
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if ":" not in line:
+                    raise ValueError(
+                        f"{path}:{lineno}: expected 'include:<smarts>' or "
+                        f"'exclude:<smarts>', got {line!r}"
+                    )
+                mode, _, pattern = line.partition(":")
+                mode = mode.strip().lower()
+                if mode not in ("include", "exclude"):
+                    raise ValueError(
+                        f"{path}:{lineno}: unknown mode {mode!r} "
+                        "(expected 'include' or 'exclude')"
+                    )
+                mol = Chem.MolFromSmarts(pattern)
+                if mol is None:
+                    raise ValueError(
+                        f"{path}:{lineno}: RDKit could not parse SMARTS {pattern!r}"
+                    )
+                if mode == "include":
+                    include.append(mol)
+                else:
+                    exclude.append(mol)
+        return cls(include=include, exclude=exclude)
+
+    @property
+    def active(self) -> bool:
+        return bool(self.include or self.exclude)
+
+
+def apply_smarts_filter(df: pd.DataFrame, smarts: _SmartsBounds) -> pd.DataFrame:
+    """Drop rows whose ``smiles`` fails the SMARTS include/exclude gates.
+
+    Applied only to property-filter survivors, so the per-molecule RDKit
+    parse cost scales with the (small) surviving fraction.  Rows whose
+    SMILES RDKit cannot parse are dropped.  A no-op returning ``df``
+    unchanged when ``smarts`` has no active patterns.
+
+    :returns: the filtered DataFrame (index reset).
+    """
+    if not smarts.active:
+        return df
+    from rdkit import Chem
+
+    keep: list[bool] = []
+    for smi in df["smiles"].astype(str):
+        mol = Chem.MolFromSmiles(smi)
+        if mol is None:
+            keep.append(False)
+            continue
+        if smarts.include and not any(
+            mol.HasSubstructMatch(q) for q in smarts.include
+        ):
+            keep.append(False)
+            continue
+        if any(mol.HasSubstructMatch(q) for q in smarts.exclude):
+            keep.append(False)
+            continue
+        keep.append(True)
+    return df.loc[keep].reset_index(drop=True)
+
 
 OUTPUT_COLUMNS: tuple[str, ...] = ("reghash", "smiles", "compound_id", "pred_score")
 
@@ -195,6 +292,7 @@ def infer_chunk(
     output_path: Path,
     *,
     bounds: _Bounds,
+    smarts: _SmartsBounds | None = None,
     score_cutoff: float | None = None,
     top_n_per_chunk: int | None = None,
     batch_size: int = 32,
@@ -215,6 +313,12 @@ def infer_chunk(
     logger.info(
         "%s: %d/%d rows survived property filter", chunk_path, len(survivors), len(df)
     )
+    if not survivors.empty and smarts is not None and smarts.active:
+        before = len(survivors)
+        survivors = apply_smarts_filter(survivors, smarts)
+        logger.info(
+            "%s: %d/%d rows survived SMARTS filter", chunk_path, len(survivors), before
+        )
     if survivors.empty:
         _write_empty_output(output_path)
         return 0
@@ -258,6 +362,17 @@ def build_parser() -> argparse.ArgumentParser:
         "output", help="Output Parquet path (reghash,smiles,compound_id,pred_score)"
     )
     parser.add_argument("--params", required=True, help="Property bounds file (12 lines)")
+    parser.add_argument(
+        "--smarts",
+        default=None,
+        metavar="FILE",
+        help=(
+            "Optional SMARTS filter file. Each non-blank, non-comment line "
+            "must be 'include:<SMARTS>' or 'exclude:<SMARTS>'. Applied to "
+            "property-filter survivors: molecules must match at least one "
+            "include pattern (if any) and must not match any exclude pattern."
+        ),
+    )
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--score-cutoff", type=float, default=None)
     group.add_argument("--top-n-per-chunk", type=int, default=None)
@@ -280,11 +395,26 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     bounds = _Bounds.read(params_path)
+    smarts: _SmartsBounds | None = None
+    if args.smarts is not None:
+        smarts_path = Path(args.smarts)
+        if smarts_path.exists():
+            smarts = _SmartsBounds.read(smarts_path)
+            if smarts.active:
+                logger.info(
+                    "SMARTS filter: %d include, %d exclude patterns",
+                    len(smarts.include), len(smarts.exclude),
+                )
+        else:
+            logger.debug(
+                "--smarts file not found (%s), skipping SMARTS filter", smarts_path
+            )
     infer_chunk(
         chunk_path,
         Path(args.model_dir),
         Path(args.output),
         bounds=bounds,
+        smarts=smarts,
         score_cutoff=args.score_cutoff,
         top_n_per_chunk=args.top_n_per_chunk,
         batch_size=args.batch_size,
