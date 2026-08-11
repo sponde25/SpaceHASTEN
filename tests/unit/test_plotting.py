@@ -8,6 +8,7 @@ import pytest
 
 from spacehasten.core.db import Database
 from spacehasten.stages.plotting import (
+    _prune_scores,
     plot_dock_score_distribution,
     plot_pred_score_distribution,
     plot_pred_vs_dock_accuracy,
@@ -58,6 +59,22 @@ def _make_db(tmp_path: Path) -> tuple[WorkDir, Database]:
     workdir = WorkDir.bootstrap(tmp_path / "ws", name="plt")
     db = Database(workdir.dbsh())
     return workdir, db
+
+
+def test_prune_scores_default_bounds() -> None:
+    scores = [-2000.0, -16.0, -12.0, -8.0, -0.5, 0.0, 3.0, 500.0]
+    # Default caps: keep -16 <= x <= 0, dropping extreme negatives and the
+    # positive tail before the values ever reach the KDE.
+    assert _prune_scores(scores, -16.0, 0.0) == [-16.0, -12.0, -8.0, -0.5, 0.0]
+
+
+def test_prune_scores_none_bounds_keeps_everything() -> None:
+    scores = [-2000.0, -8.0, 0.0, 500.0]
+    # --show-all-scores passes None/None: no pruning at all.
+    assert _prune_scores(scores, None, None) == scores
+    # A single open bound only prunes the other side.
+    assert _prune_scores(scores, -16.0, None) == [-8.0, 0.0, 500.0]
+    assert _prune_scores(scores, None, 0.0) == [-2000.0, -8.0, 0.0]
 
 
 def test_query_cycle1_score_cutoff(tmp_path: Path) -> None:
@@ -146,6 +163,35 @@ def test_plot_dock_score_distribution_caps_xlim_at_zero_by_default(
     assert xlim_max == 0.0
 
 
+def test_plot_dock_score_distribution_prunes_extreme_min_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import matplotlib.pyplot as plt
+
+    workdir, db = _make_db(tmp_path)
+    db.create_schema()
+    # One extreme negative outlier that would otherwise inflate the KDE
+    # bandwidth and stretch the axis far past any real docking score.
+    db.insert_seed_docked("outlier", "CCO", "out-0", -2000.0)
+    for i in range(10):
+        db.insert_seed_docked(f"h{i}", "CCO", f"h-{i}", -10.0 + i * 0.5)
+    db.commit()
+
+    real_close = plt.close
+    monkeypatch.setattr(plt, "close", lambda *a, **k: None)
+    try:
+        plot_dock_score_distribution(db, workdir)
+        fig = plt.gcf()
+        xlim_min = fig.axes[0].get_xlim()[0]
+    finally:
+        real_close("all")
+        db.close()
+
+    # The -2000 value is pruned, so the axis reflects the kept range
+    # (~[-10, -5.5]) and never approaches the extreme outlier.
+    assert xlim_min >= -16.0
+
+
 def test_plot_dock_score_distribution_show_all_scores(tmp_path: Path) -> None:
     workdir, db = _make_db(tmp_path)
     db.create_schema()
@@ -156,6 +202,31 @@ def test_plot_dock_score_distribution_show_all_scores(tmp_path: Path) -> None:
     db.close()
     assert out.exists()
     assert out.stat().st_size > 0
+
+
+def test_plot_dock_score_distribution_show_all_scores_keeps_extreme_min(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import matplotlib.pyplot as plt
+
+    workdir, db = _make_db(tmp_path)
+    db.create_schema()
+    db.insert_seed_docked("outlier", "CCO", "out-0", -2000.0)
+    for i in range(10):
+        db.insert_seed_docked(f"h{i}", "CCO", f"h-{i}", -10.0 + i * 0.5)
+    db.commit()
+
+    real_close = plt.close
+    monkeypatch.setattr(plt, "close", lambda *a, **k: None)
+    try:
+        plot_dock_score_distribution(db, workdir, min_dock_score=None)
+        fig = plt.gcf()
+        xlim_min = fig.axes[0].get_xlim()[0]
+    finally:
+        real_close("all")
+        db.close()
+
+    assert xlim_min < -16.0
 
 
 def test_plot_dock_score_distribution_requires_seed_data(tmp_path: Path) -> None:
@@ -206,6 +277,36 @@ def test_plot_pred_score_distribution_caps_xlim_at_zero_by_default(
         db.close()
 
     assert xlim_max == 0.0
+
+
+def test_plot_pred_score_distribution_prunes_extreme_min_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import matplotlib.pyplot as plt
+
+    workdir, db = _make_db(tmp_path)
+    db.create_schema()
+    db.insert_seed_docked("seed0", "CCO", "seed-0", -5.0)
+    # A wild out-of-domain predicted score that would otherwise inflate the
+    # KDE bandwidth and blow out the left axis to ~-2000.
+    db.insert_simsearch_hit("wild", "CCN", "c1-wild", None, None, -2000.0, 1)
+    for i in range(10):
+        db.insert_simsearch_hit(
+            f"c1hit{i}", "CCN", f"c1-{i}", None, None, -10.0 + i * 0.5, 1
+        )
+    db.commit()
+
+    real_close = plt.close
+    monkeypatch.setattr(plt, "close", lambda *a, **k: None)
+    try:
+        plot_pred_score_distribution(db, workdir)
+        fig = plt.gcf()
+        xlim_min = fig.axes[0].get_xlim()[0]
+    finally:
+        real_close("all")
+        db.close()
+
+    assert xlim_min >= -16.0
 
 
 def test_plot_pred_score_distribution_show_all_scores(tmp_path: Path) -> None:

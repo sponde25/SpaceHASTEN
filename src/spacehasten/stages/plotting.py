@@ -62,22 +62,47 @@ def _xlim_with_buffer(values: list[float], buffer_frac: float = 0.2) -> tuple[fl
     return lo - span * buffer_frac, hi + span * buffer_frac
 
 
+def _prune_scores(
+    scores: list[float], lo: float | None, hi: float | None
+) -> list[float]:
+    """Drop out-of-range scores *before* density estimation.
+
+    Extreme outliers (e.g. wild out-of-domain ``pred_score`` values that
+    never correspond to a real docking hit) inflate the KDE bandwidth and
+    flatten/distort the whole curve even when the x-axis is later clipped
+    with ``set_xlim``. They therefore have to be excluded from the *input*
+    to ``kdeplot``, not merely hidden from view. ``lo``/``hi`` of ``None``
+    disable that bound (i.e. ``--show-all-scores`` keeps every value).
+    """
+    return [
+        x for x in scores
+        if (lo is None or x >= lo) and (hi is None or x <= hi)
+    ]
+
+
 def plot_dock_score_distribution(
     db: Database,
     workdir: WorkDir,
     *,
     bw_adjust: float = 2.0,
     max_dock_score: float | None = 0.0,
+    min_dock_score: float | None = -16.0,
     output: Path | None = None,
 ) -> Path:
     """Plot seed vs. iteration ``dock_score`` KDEs with the cycle-1 query
     cutoff annotated.
 
-    :param max_dock_score: cap the x-axis maximum at this value (default
-        ``0.0``). A handful of compounds can dock with a positive
+    :param max_dock_score: exclude scores above this value from the KDE
+        (default ``0.0``). A handful of compounds can dock with a positive
         (unfavourable) score; by default that long right-hand tail is
-        clipped from view since it is not of interest. Pass ``None`` to
-        show the full score range instead.
+        dropped, since it is not of interest and inflates the KDE
+        bandwidth. Pass ``None`` to keep the full score range instead.
+    :param min_dock_score: exclude scores below this value from the KDE
+        (default ``-16.0``). Occasional garbage/extreme scores (e.g.
+        out-of-domain chemprop predictions) far past any real docking
+        score would otherwise inflate the KDE bandwidth and flatten the
+        curve even when the x-axis is clipped, so they are pruned from the
+        density estimate itself. Pass ``None`` to keep the full range.
     :raises ValueError: if the seed batch (``dock_iteration == 0``) has
         no docked compounds yet (i.e. ``seed-training`` has not run).
     """
@@ -87,27 +112,35 @@ def plot_dock_score_distribution(
             "no seed docking scores (dock_iteration == 0) found;"
             " run `spacehasten seed-training` first"
         )
-    seed_scores = by_iteration[0]
+    seed_scores = _prune_scores(by_iteration[0], min_dock_score, max_dock_score)
     iterations = sorted(k for k in by_iteration if k > 0)
     cutoff = db.query_cycle1_score_cutoff()
 
     fig, ax = plt.subplots(figsize=(9, 6))
     all_scores = list(seed_scores)
-    sns.kdeplot(seed_scores, color="grey", label="Seed (iteration 0)",
-                linewidth=2, ax=ax, bw_adjust=bw_adjust)
+    if seed_scores:
+        sns.kdeplot(seed_scores, color="grey", label="Seed (iteration 0)",
+                    linewidth=2, ax=ax, bw_adjust=bw_adjust)
 
     palette = _blues_palette(len(iterations))
     for i, iteration in enumerate(iterations):
-        scores = by_iteration[iteration]
+        scores = _prune_scores(by_iteration[iteration], min_dock_score, max_dock_score)
+        if not scores:
+            continue
         all_scores.extend(scores)
         sns.kdeplot(scores, color=palette[i % len(palette)],
                     label=f"Iteration {iteration}", linewidth=2, ax=ax,
                     bw_adjust=bw_adjust)
 
-    xlim_min, xlim_max = _xlim_with_buffer(all_scores)
-    if max_dock_score is not None:
-        xlim_max = min(xlim_max, max_dock_score)
-    ax.set_xlim(xlim_min, xlim_max)
+    if all_scores:
+        xlim_min, xlim_max = _xlim_with_buffer(all_scores)
+        if max_dock_score is not None:
+            xlim_max = min(xlim_max, max_dock_score)
+        if min_dock_score is not None:
+            xlim_min = max(xlim_min, min_dock_score)
+        ax.set_xlim(xlim_min, xlim_max)
+    else:
+        xlim_min, xlim_max = ax.get_xlim()
 
     if cutoff is not None:
         # Lower dock_score is better: shade the acquired ("good") side.
@@ -140,14 +173,21 @@ def plot_pred_score_distribution(
     *,
     bw_adjust: float = 2.0,
     max_dock_score: float | None = 0.0,
+    min_dock_score: float | None = -16.0,
     output: Path | None = None,
 ) -> Path:
     """Plot per-simsearch-cycle ``pred_score`` KDEs against the seed
     batch's actual ``dock_score`` distribution (background reference).
 
-    :param max_dock_score: cap the x-axis maximum at this value (default
-        ``0.0``), hiding the long positive-score tail. Pass ``None`` to
-        show the full score range instead.
+    :param max_dock_score: exclude scores above this value from the KDE
+        (default ``0.0``), dropping the long positive-score tail. Pass
+        ``None`` to keep the full score range instead.
+    :param min_dock_score: exclude scores below this value from the KDE
+        (default ``-16.0``). Extreme out-of-domain ``pred_score`` values
+        that never correspond to a real docking hit would otherwise
+        inflate the KDE bandwidth and flatten the curve even with the
+        x-axis clipped, so they are pruned from the density estimate
+        itself. Pass ``None`` to keep the full range.
     :raises ValueError: if no simsearch cycle has produced ``pred_score``
         values yet (i.e. ``search``/``screening-cycle`` has not run).
     """
@@ -158,7 +198,7 @@ def plot_pred_score_distribution(
             " `spacehasten screening-cycle` first"
         )
     by_iteration = db.dock_scores_by_iteration()
-    seed_scores = by_iteration.get(0, [])
+    seed_scores = _prune_scores(by_iteration.get(0, []), min_dock_score, max_dock_score)
     cutoff = db.query_cycle1_score_cutoff()
 
     fig, ax = plt.subplots(figsize=(9, 6))
@@ -171,7 +211,9 @@ def plot_pred_score_distribution(
     cycles = sorted(by_cycle)
     palette = _blues_palette(len(cycles))
     for i, cycle in enumerate(cycles):
-        scores = by_cycle[cycle]
+        scores = _prune_scores(by_cycle[cycle], min_dock_score, max_dock_score)
+        if not scores:
+            continue
         all_scores.extend(scores)
         sns.kdeplot(scores, color=palette[i % len(palette)],
                     label=f"Cycle {cycle} (pred_score)", linewidth=2,
@@ -181,6 +223,8 @@ def plot_pred_score_distribution(
         xlim_min, xlim_max = _xlim_with_buffer(all_scores)
         if max_dock_score is not None:
             xlim_max = min(xlim_max, max_dock_score)
+        if min_dock_score is not None:
+            xlim_min = max(xlim_min, min_dock_score)
         ax.set_xlim(xlim_min, xlim_max)
 
     if cutoff is not None:

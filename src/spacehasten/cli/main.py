@@ -436,10 +436,18 @@ def _add_plot(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
              " tail. Default: 0.0. Ignored if --show-all-scores is set.",
     )
     p.add_argument(
+        "--min-dock-score", type=float, default=-16.0, metavar="SCORE",
+        help="Optional. Cap the x-axis minimum at this value on the"
+             " dock-scores and pred-scores plots, hiding the long"
+             " negative tail from extreme out-of-domain predicted scores."
+             " Default: -16.0. Ignored if --show-all-scores is set.",
+    )
+    p.add_argument(
         "--show-all-scores", action="store_true",
         help="Optional. Show the full score range on the dock-scores and"
-             " pred-scores plots, including positive (unfavourable)"
-             " scores, instead of capping the x-axis at --max-dock-score.",
+             " pred-scores plots, including positive (unfavourable) and"
+             " extreme negative scores, instead of capping the x-axis at"
+             " --max-dock-score / --min-dock-score.",
     )
     p.add_argument(
         "--output-dir", type=Path, default=None,
@@ -977,18 +985,21 @@ def _cmd_plot(args: argparse.Namespace) -> int:
 
     outputs: list[Path] = []
     max_dock_score = None if args.show_all_scores else args.max_dock_score
+    min_dock_score = None if args.show_all_scores else args.min_dock_score
     with open_db(args) as db:
         if args.kind in ("dock-scores", "all"):
             out = (args.output_dir / "dock_score_distribution.png") if args.output_dir else None
             outputs.append(plotting.plot_dock_score_distribution(
                 db, workdir, bw_adjust=args.bw_adjust, output=out,
                 max_dock_score=max_dock_score,
+                min_dock_score=min_dock_score,
             ))
         if args.kind in ("pred-scores", "all"):
             out = (args.output_dir / "pred_score_distribution.png") if args.output_dir else None
             outputs.append(plotting.plot_pred_score_distribution(
                 db, workdir, bw_adjust=args.bw_adjust, output=out,
                 max_dock_score=max_dock_score,
+                min_dock_score=min_dock_score,
             ))
         if args.kind in ("accuracy", "all"):
             out = (args.output_dir / "pred_vs_dock_accuracy.png") if args.output_dir else None
