@@ -77,6 +77,24 @@ def _write_control_param(path: Path, props: PropertyRanges) -> None:
             w.write(f"{lo}\n{hi}\n")
 
 
+def _write_smarts_param(path: Path, props: PropertyRanges) -> bool:
+    """Write SMARTS include/exclude patterns from a typed ``PropertyRanges``.
+
+    Each line is ``<mode>:<pattern>`` where *mode* is ``include`` or
+    ``exclude`` — the format consumed by ``remote.library_infer._SmartsBounds``
+    (shared with ``stages.simsearch._write_smarts_file``).  The file is always
+    written (empty when there are no patterns); returns ``True`` iff any
+    pattern was written.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wt", encoding="utf-8") as w:
+        for pattern in props.smarts_include:
+            w.write(f"include:{pattern}\n")
+        for pattern in props.smarts_exclude:
+            w.write(f"exclude:{pattern}\n")
+    return bool(props.smarts_include or props.smarts_exclude)
+
+
 def _prepare_missing_chunks(
     chunk_paths: Sequence[Path], inputs_dir: Path, results_dir: Path,
 ) -> list[Path]:
@@ -112,6 +130,7 @@ def _build_infer_command(
     *,
     top_n: int | None,
     cutoff: float | None,
+    smarts_path: Path | None = None,
 ) -> str:
     """Build the per-task bash body: filter + predict one dense chunk.
 
@@ -133,6 +152,8 @@ def _build_infer_command(
         "--accelerator", g.library_infer_accelerator,
         "--devices", g.library_infer_devices,
     ]
+    if smarts_path is not None:
+        parts += ["--smarts", str(smarts_path)]
     cmd = " ".join(parts)
     return (
         f'CHUNK_STEM=$(basename "$(readlink -f "{in_link}")")\n'
@@ -259,6 +280,13 @@ def library_screen(
     results_dir = run_dir / "results"
     params_path = inputs_dir / "control.param"
     _write_control_param(params_path, props)
+    smarts_path = inputs_dir / "smarts.txt"
+    has_smarts = _write_smarts_param(smarts_path, props)
+    if has_smarts:
+        logger.info(
+            "SMARTS filter active — %d include / %d exclude patterns written to %s",
+            len(props.smarts_include), len(props.smarts_exclude), smarts_path,
+        )
 
     links = _prepare_missing_chunks(chunk_paths, inputs_dir, results_dir)
     if links:
@@ -277,6 +305,7 @@ def library_screen(
             if infer_command_prefix is not None
             else _default_infer_command(settings),
             top_n=top_n, cutoff=cutoff,
+            smarts_path=smarts_path if has_smarts else None,
         )
         job = ArrayJob(
             name=f"library_screen_run{run}",
