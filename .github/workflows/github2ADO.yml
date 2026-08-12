@@ -1,0 +1,26 @@
+name: Sync github directory to azure devops repository
+
+on:
+  push:
+    branches:
+      - "**"   # applies to all branches
+  workflow_dispatch:
+
+jobs:
+  sync-job:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Run sync script
+        env:
+          AZUREPAT: ${{ secrets.AZUREPAT }}
+          AZUSERNAME: ${{ secrets.AZUSERNAME }}
+          AZUSER_EMAIL: ${{ secrets.AZUSER_EMAIL }}
+          AZORG: ${{ secrets.AZORG }}
+        run: |
+          chmod +x ./script/commit.sh
+          ./script/commit.sh
+        shell: bash
