@@ -116,11 +116,11 @@ def test_infer_chunk_writes_filtered_and_predicted_rows(
     (model_dir / "model_0").mkdir(parents=True)
     (model_dir / "model_0" / "pytorch_model.bin").write_bytes(b"fake")
 
-    out_path = tmp_path / "out.parquet"
+    out_path = tmp_path / "out.csv"
     n = infer_chunk(chunk_path, model_dir, out_path, bounds=bounds)
     assert n == 1  # only ENA-1 passes strict bounds
 
-    out_df = pd.read_parquet(out_path)
+    out_df = pd.read_csv(out_path)
     assert list(out_df.columns) == ["reghash", "smiles", "compound_id", "pred_score"]
     assert out_df["compound_id"].tolist() == ["ENA-1"]
     assert out_df["pred_score"].tolist() == [-5.0]
@@ -147,11 +147,11 @@ def test_infer_chunk_score_cutoff_selection(
     (model_dir / "model_0").mkdir(parents=True)
     (model_dir / "model_0" / "pytorch_model.bin").write_bytes(b"fake")
 
-    out_path = tmp_path / "out.parquet"
+    out_path = tmp_path / "out.csv"
     n = infer_chunk(chunk_path, model_dir, out_path, bounds=bounds, score_cutoff=-8.0)
     assert n == 2  # ENA-1 (-9.0) and ENA-3 (-8.5) pass; ENA-2 (-3.0) doesn't
 
-    out_df = pd.read_parquet(out_path)
+    out_df = pd.read_csv(out_path)
     assert set(out_df["compound_id"]) == {"ENA-1", "ENA-3"}
 
 
@@ -176,11 +176,60 @@ def test_infer_chunk_top_n_per_chunk_selection(
     (model_dir / "model_0").mkdir(parents=True)
     (model_dir / "model_0" / "pytorch_model.bin").write_bytes(b"fake")
 
-    out_path = tmp_path / "out.parquet"
+    out_path = tmp_path / "out.csv"
     n = infer_chunk(chunk_path, model_dir, out_path, bounds=bounds, top_n_per_chunk=1)
     assert n == 1
-    out_df = pd.read_parquet(out_path)
+    out_df = pd.read_csv(out_path)
     assert out_df["compound_id"].tolist() == ["ENA-1"]  # best (lowest) score
+
+
+def test_infer_chunk_top_n_per_chunk_spans_blocks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # block_size=3 -> two blocks of [s1,s2,s3] and [s4,s5,s6]. The per-block
+    # trim (nsmallest(top_n) within each block) plus the final trim must still
+    # yield the exact global top-N, including winners that live in different
+    # blocks (s2 in block 1, s4 in block 2).
+    score_by_smiles = {
+        "s1": -1.0, "s2": -9.0, "s3": -2.0,   # block 1 -> keep s2(-9), s3(-2)
+        "s4": -8.0, "s5": -3.0, "s6": -7.0,   # block 2 -> keep s4(-8), s6(-7)
+    }
+    df = _make_df([
+        _row("ENA-1", "s1", "h1", 46.0),
+        _row("ENA-2", "s2", "h2", 46.0),
+        _row("ENA-3", "s3", "h3", 46.0),
+        _row("ENA-4", "s4", "h4", 46.0),
+        _row("ENA-5", "s5", "h5", 46.0),
+        _row("ENA-6", "s6", "h6", 46.0),
+    ])
+    chunk_path = tmp_path / "chunk.parquet"
+    df.to_parquet(chunk_path, index=False)
+    bounds = _write_bounds(tmp_path, _PERMISSIVE_PARAM_LINES)
+
+    calls: list[int] = []
+
+    def fake_predict_scores(smiles, model_dir, batch_size, num_workers, accelerator, devices):
+        calls.append(len(smiles))
+        return np.array([score_by_smiles[s] for s in smiles])
+
+    monkeypatch.setattr(library_infer, "predict_scores", fake_predict_scores)
+
+    model_dir = tmp_path / "model"
+    (model_dir / "model_0").mkdir(parents=True)
+    (model_dir / "model_0" / "pytorch_model.bin").write_bytes(b"fake")
+
+    out_path = tmp_path / "out.csv"
+    n = infer_chunk(
+        chunk_path, model_dir, out_path,
+        bounds=bounds, top_n_per_chunk=2, block_size=3,
+    )
+    # Streamed in two blocks of 3 (proves per-block trimming is exercised).
+    assert calls == [3, 3]
+    assert n == 2
+    out_df = pd.read_csv(out_path).sort_values("pred_score").reset_index(drop=True)
+    # Global top-2 by score: s2(-9.0) then s4(-8.0).
+    assert out_df["compound_id"].tolist() == ["ENA-2", "ENA-4"]
+    assert out_df["pred_score"].tolist() == [-9.0, -8.0]
 
 
 def test_infer_chunk_no_survivors_writes_empty_output(
@@ -196,11 +245,11 @@ def test_infer_chunk_no_survivors_writes_empty_output(
 
     monkeypatch.setattr(library_infer, "predict_scores", fail_predict)
 
-    out_path = tmp_path / "out.parquet"
+    out_path = tmp_path / "out.csv"
     n = infer_chunk(chunk_path, tmp_path / "model", out_path, bounds=bounds)
     assert n == 0
 
-    out_df = pd.read_parquet(out_path)
+    out_df = pd.read_csv(out_path)
     assert list(out_df.columns) == ["reghash", "smiles", "compound_id", "pred_score"]
     assert len(out_df) == 0
 
@@ -212,7 +261,7 @@ def test_infer_chunk_missing_required_columns_raises(tmp_path: Path) -> None:
     bounds = _write_bounds(tmp_path, _PERMISSIVE_PARAM_LINES)
 
     with pytest.raises(ValueError, match="missing required columns"):
-        infer_chunk(chunk_path, tmp_path / "model", tmp_path / "out.parquet", bounds=bounds)
+        infer_chunk(chunk_path, tmp_path / "model", tmp_path / "out.csv", bounds=bounds)
 
 
 # --------------------------------------------------------------------------- #
@@ -306,13 +355,13 @@ def test_infer_chunk_applies_smarts_after_property_filter(
     (model_dir / "model_0").mkdir(parents=True)
     (model_dir / "model_0" / "pytorch_model.bin").write_bytes(b"fake")
 
-    out_path = tmp_path / "out.parquet"
+    out_path = tmp_path / "out.csv"
     n = infer_chunk(chunk_path, model_dir, out_path, bounds=bounds, smarts=smarts)
     assert n == 2
     # The acid must be removed *before* prediction (predict only sees survivors).
     assert captured["smiles"] == ["CCO", "c1ccccc1"]
 
-    out_df = pd.read_parquet(out_path)
+    out_df = pd.read_csv(out_path)
     assert out_df["compound_id"].tolist() == ["ENA-1", "ENA-3"]
 
 
@@ -330,9 +379,9 @@ def test_infer_chunk_all_dropped_by_smarts_writes_empty(
 
     monkeypatch.setattr(library_infer, "predict_scores", fail_predict)
 
-    out_path = tmp_path / "out.parquet"
+    out_path = tmp_path / "out.csv"
     n = infer_chunk(chunk_path, tmp_path / "model", out_path, bounds=bounds, smarts=smarts)
     assert n == 0
-    out_df = pd.read_parquet(out_path)
+    out_df = pd.read_csv(out_path)
     assert list(out_df.columns) == ["reghash", "smiles", "compound_id", "pred_score"]
     assert len(out_df) == 0

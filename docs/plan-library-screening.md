@@ -365,36 +365,45 @@ Orchestration:
    Precedence for `props`: `--props-toml` > DB `properties` table >
    `PropertyRanges()` defaults.
 5. **Enumerate chunks** from `manifest.chunk_glob`, sorted. Output dir:
-   `<scratch>/results/predicted_<chunk_stem>.parquet`.
-6. **Resumable submission**: build the list of chunks whose output parquet
+   `<scratch>/results/predicted_<chunk_stem>.csv` (survivors are written as
+   CSV, not Parquet, so they are easy to inspect; the library store itself
+   stays Parquet).
+6. **Resumable submission**: build the list of chunks whose output CSV
    does *not* yet exist. If all exist, skip to ingest. Submit an
-   `ArrayJob` sized to the missing chunks. Because array `${TASK_ID}` is a
-   dense 1..N index, map task index → chunk path via a generated
-   `chunk_index.tsv` (task_id → input path, output path) that the command
-   body reads with `sed -n "${TASK_ID}p"`, **or** (simpler and matching the
-   repo's style) copy/symlink missing chunks into a densely-numbered
-   `inputs/infer_<TASK_ID>.parquet` and submit `array_size = n_missing`.
-   Prefer the dense-symlink approach for consistency with `simsearch`
-   (`predict_<i>.csv`) and `prediction` stages.
+   `ArrayJob` sized to the missing chunks. The library chunks are **read
+   directly from wherever the store lives** — their absolute paths are
+   written (one per line) to `inputs/chunks.txt`, and the command body
+   selects its chunk via `sed -n "${TASK_ID}p" inputs/chunks.txt`. No
+   library data is copied or symlinked into the run directory (this avoids
+   creating a persistent duplicate of the library on every screen).
 7. Command body (per task), built like `prediction._build_predict_command`:
    ```
-   export OMP_NUM_THREADS=1
+   CHUNK_PATH=$(sed -n "${TASK_ID}p" inputs/chunks.txt)
+   CHUNK_STEM=$(basename "$CHUNK_PATH"); CHUNK_STEM="${CHUNK_STEM%.parquet}"
+   OUT_PATH="results/predicted_${CHUNK_STEM}.csv"
    python3 <remote/library_infer.py> \
-       <inputs/infer_${TASK_ID}.parquet> <model_dir> \
-       <results/predicted_infer_${TASK_ID}.parquet> \
+       "$CHUNK_PATH" <model_dir> "$OUT_PATH" \
        --params <inputs/control.param> \
        [--score-cutoff X | --top-n-per-chunk K] \
        --batch-size <library_infer_batch_size> \
        --num-workers <library_infer_num_workers> \
        --accelerator <library_infer_accelerator> \
-       --devices <library_infer_devices>
+       --devices <library_infer_devices> \
+       --block-size <library_infer_block_size>
    ```
    `env_setup = [prepare_anaconda, activate_chemprop]`. `cpus_per_task =
    int(settings.general.cpu_count_library or 1)`. `gpus` per accelerator
-   setting.
+   setting. The worker streams each chunk in `--block-size` row slices
+   (via pyarrow `iter_batches`) so peak memory is bounded by the slice, not
+   the whole chunk — large (1-2M row) chunks can be screened, and many
+   tasks run in parallel per node, without OOM. In the `top_n` path the
+   worker trims each block to its own best `top_n` rows before accumulating
+   (exact: a chunk-wide top-N row has at most N-1 better rows in the whole
+   chunk, so it is always within its block's top-N), capping accumulation at
+   `n_blocks * top_n` rather than every predicted survivor.
 8. `scheduler.wait(...)`; on failure raise `RuntimeError` with
    `diagnostics.tail_logs(handle)` (same pattern as other stages).
-9. **Ingest**: read every `results/predicted_infer_*.parquet`; concatenate
+9. **Ingest**: read every `results/predicted_*.csv`; concatenate
    `(reghash, smiles, compound_id, pred_score)`. Dedup by `reghash`
    keeping **min** `pred_score` (best), first-seen smiles/id.
 10. **Global selection**:
@@ -416,8 +425,8 @@ Orchestration:
 **Scratch layout** (add to `WorkDir`, §5.5):
 ```
 <shared_root>/library_screen/run<K>/
-    inputs/  control.param  infer_<t>.parquet (symlinks)
-    results/ predicted_infer_<t>.parquet
+    inputs/  control.param  smarts.txt  chunks.txt (abs paths of pending chunks)
+    results/ predicted_<chunk_stem>.csv (survivors only)
     report.json
 ```
 `run<K>` = incrementing integer (mkdir the first free `runN`).

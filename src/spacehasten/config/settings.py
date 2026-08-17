@@ -83,6 +83,7 @@ class GeneralSettings(_Section):
     library_infer_num_workers: int = 0
     library_infer_accelerator: str = "cpu"
     library_infer_devices: str = "1"
+    library_infer_block_size: int = 100_000
     library_default_top_pct: float = 1.0
     library_build_chunk_size: int = 2_000_000
 
