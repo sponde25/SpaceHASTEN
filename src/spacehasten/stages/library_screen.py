@@ -12,9 +12,14 @@ existing ``.dbsh`` database with no schema change (see
 Layout (shared/NFS storage, one directory per invocation)::
 
     <shared_root>/library_screen/run<K>/
-        inputs/  control.param  infer_<i>.parquet (dense symlinks)
-        results/ predicted_<chunk_stem>.parquet
+        inputs/  control.param  smarts.txt  chunks.txt (abs paths of pending chunks)
+        results/ predicted_<chunk_stem>.csv  (survivors only, CSV)
         report.json  [report.survivors.csv if --dry-run]
+
+Library chunks are read directly from wherever the store lives (their
+absolute paths are listed in ``chunks.txt`` and selected per array task by
+``${TASK_ID}``); no library data is copied or symlinked into the run dir.
+Only the small per-chunk CSV survivor files are written here.
 """
 
 from __future__ import annotations
@@ -95,34 +100,36 @@ def _write_smarts_param(path: Path, props: PropertyRanges) -> bool:
     return bool(props.smarts_include or props.smarts_exclude)
 
 
-def _prepare_missing_chunks(
+def _prepare_chunk_list(
     chunk_paths: Sequence[Path], inputs_dir: Path, results_dir: Path,
 ) -> list[Path]:
-    """Symlink chunks lacking a predicted output as dense ``infer_<i>.parquet``.
+    """Write ``inputs/chunks.txt`` with the absolute paths of pending chunks.
 
-    A chunk is considered done when ``results/predicted_<chunk_stem>.parquet``
-    already exists (resumable — see plan §5.4 step 6). Returns the dense,
-    1-based symlink paths (``array_size = len(result)``).
+    A chunk is considered done when ``results/predicted_<chunk_stem>.csv``
+    already exists (resumable — see plan §5.4 step 6). The library chunks
+    are referenced by absolute path and read in place on the compute node;
+    nothing is copied or symlinked into the run directory. Each array task
+    ``${TASK_ID}`` (1-based) picks line ``TASK_ID`` of ``chunks.txt``.
+
+    :returns: the pending chunk paths, in the same order as ``chunks.txt``
+        (``array_size = len(result)``).
     """
     inputs_dir.mkdir(parents=True, exist_ok=True)
     results_dir.mkdir(parents=True, exist_ok=True)
-    for stale in inputs_dir.glob("infer_*.parquet"):
-        stale.unlink()
 
     missing = [
-        p for p in chunk_paths
-        if not (results_dir / f"predicted_{p.stem}.parquet").exists()
+        Path(p).resolve()
+        for p in chunk_paths
+        if not (results_dir / f"predicted_{Path(p).stem}.csv").exists()
     ]
-    links: list[Path] = []
-    for i, src in enumerate(missing, start=1):
-        link = inputs_dir / f"infer_{i}.parquet"
-        link.symlink_to(Path(src).resolve())
-        links.append(link)
-    return links
+    chunk_list = inputs_dir / "chunks.txt"
+    chunk_list.write_text(
+        "".join(f"{p}\n" for p in missing), encoding="utf-8"
+    )
+    return missing
 
 
 def _build_infer_command(
-    results_dir: Path,
     model_dir: Path,
     params_path: Path,
     settings: Settings,
@@ -132,33 +139,39 @@ def _build_infer_command(
     cutoff: float | None,
     smarts_path: Path | None = None,
 ) -> str:
-    """Build the per-task bash body: filter + predict one dense chunk.
+    """Build the per-task bash body: filter + predict one pending chunk.
 
-    The output filename is derived from the *resolved* symlink target's
-    stem (not the dense task index) so a re-run of the same directory
-    remains resumable even if the missing-chunk set (and therefore the
-    dense numbering) changes between invocations.
+    The chunk path is read directly from line ``${TASK_ID}`` of
+    ``inputs/chunks.txt`` (its absolute path in the library store — no copy
+    or symlink). The output CSV filename is derived from the chunk's stem so
+    a re-run of the same directory remains resumable even if the pending-chunk
+    set (and therefore the task numbering) changes between invocations.
     """
     g = settings.general
-    in_link = Path("inputs") / "infer_${TASK_ID}.parquet"
     selection = (
         f"--top-n-per-chunk {top_n}" if top_n is not None else f"--score-cutoff {cutoff}"
     )
     parts: list[str] = [
-        *command_prefix, str(in_link), str(model_dir), "$OUT_PATH",
+        *command_prefix, '"$CHUNK_PATH"', str(model_dir), '"$OUT_PATH"',
         "--params", str(params_path), selection,
         "--batch-size", str(g.library_infer_batch_size),
         "--num-workers", str(g.library_infer_num_workers),
         "--accelerator", g.library_infer_accelerator,
         "--devices", g.library_infer_devices,
+        "--block-size", str(g.library_infer_block_size),
     ]
     if smarts_path is not None:
         parts += ["--smarts", str(smarts_path)]
     cmd = " ".join(parts)
     return (
-        f'CHUNK_STEM=$(basename "$(readlink -f "{in_link}")")\n'
+        'CHUNK_PATH=$(sed -n "${TASK_ID}p" inputs/chunks.txt)\n'
+        'if [ -z "$CHUNK_PATH" ]; then\n'
+        '  echo "[task ${TASK_ID}] no chunk on line ${TASK_ID} of inputs/chunks.txt" >&2\n'
+        '  exit 1\n'
+        'fi\n'
+        'CHUNK_STEM=$(basename "$CHUNK_PATH")\n'
         'CHUNK_STEM="${CHUNK_STEM%.parquet}"\n'
-        f'OUT_PATH="{results_dir}/predicted_${{CHUNK_STEM}}.parquet"\n'
+        'OUT_PATH="results/predicted_${CHUNK_STEM}.csv"\n'
         'if [ -f "$OUT_PATH" ]; then\n'
         '  echo "[task ${TASK_ID}] $OUT_PATH already exists, skipping"\n'
         '  exit 0\n'
@@ -171,18 +184,18 @@ def _build_infer_command(
 def _ingest_predictions(
     chunk_paths: Sequence[Path], results_dir: Path,
 ) -> tuple[pd.DataFrame, int]:
-    """Concatenate every ``predicted_<chunk_stem>.parquet`` and dedup by reghash.
+    """Concatenate every ``predicted_<chunk_stem>.csv`` and dedup by reghash.
 
     :returns: ``(deduped_df, n_predicted)`` where ``n_predicted`` is the
         total row count across all chunk outputs before dedup (i.e. the
-        property-filter survivor count, summed).
+        per-chunk survivor count, summed).
     """
     frames: list[pd.DataFrame] = []
     for p in chunk_paths:
-        out_path = results_dir / f"predicted_{p.stem}.parquet"
+        out_path = results_dir / f"predicted_{p.stem}.csv"
         if not out_path.exists():
             raise FileNotFoundError(f"missing predicted output for chunk {p}: {out_path}")
-        frames.append(pd.read_parquet(out_path))
+        frames.append(pd.read_csv(out_path))
     n_predicted = sum(len(f) for f in frames)
     if not frames:
         return pd.DataFrame(columns=["reghash", "smiles", "compound_id", "pred_score"]), 0
@@ -288,10 +301,10 @@ def library_screen(
             len(props.smarts_include), len(props.smarts_exclude), smarts_path,
         )
 
-    links = _prepare_missing_chunks(chunk_paths, inputs_dir, results_dir)
-    if links:
+    pending = _prepare_chunk_list(chunk_paths, inputs_dir, results_dir)
+    if pending:
         logger.info(
-            "library-screen run%d: %d/%d chunks pending", run, len(links), len(chunk_paths),
+            "library-screen run%d: %d/%d chunks pending", run, len(pending), len(chunk_paths),
         )
         env_setup = [
             line for line in (
@@ -300,7 +313,7 @@ def library_screen(
             ) if line
         ]
         command = _build_infer_command(
-            results_dir, model_dir, params_path, settings,
+            model_dir, params_path, settings,
             infer_command_prefix
             if infer_command_prefix is not None
             else _default_infer_command(settings),
@@ -310,8 +323,8 @@ def library_screen(
         job = ArrayJob(
             name=f"library_screen_run{run}",
             workdir=run_dir,
-            array_size=len(links),
-            max_concurrent=max_concurrent if max_concurrent is not None else len(links),
+            array_size=len(pending),
+            max_concurrent=max_concurrent if max_concurrent is not None else len(pending),
             cpus_per_task=max(1, int(settings.general.cpu_count_library or 1)),
             env_setup=env_setup,
             command_template=command,
@@ -319,7 +332,7 @@ def library_screen(
         handle = scheduler.submit_array(job)
         logger.info(
             "Submitted library-screen job %s (%d tasks, model v%d)",
-            handle.job_id, len(links), model_version,
+            handle.job_id, len(pending), model_version,
         )
         result = scheduler.wait(handle)
         if not result.success:

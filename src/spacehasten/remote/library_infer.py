@@ -3,11 +3,19 @@
 
 Invoked once per library Parquet chunk (produced by
 spacehasten.stages.library_build.library_build) on a compute node with the
-chemprop conda env. Applies a vectorized property filter over the
-precomputed PC-property columns (no RDKit call - this is the columnar
-speed win over 50M-1B compounds), then runs chemprop D-MPNN inference on
-the property-passing survivors, and writes a small output Parquet with
-just the winning (reghash, smiles, compound_id, pred_score) rows.
+chemprop conda env. The chunk is streamed in sub-blocks (via pyarrow
+``iter_batches``) so peak memory is bounded by ``--block-size`` rows rather
+than the full chunk — this lets large (1-2M row) chunks be screened, and
+many tasks run in parallel per node, without OOM. Each block is
+property-filtered over the precomputed PC-property columns (no RDKit call -
+this is the columnar speed win over 50M-1B compounds), then chemprop
+D-MPNN inference runs on the property-passing survivors, and a small CSV of
+just the winning (reghash, smiles, compound_id, pred_score) rows is written.
+
+Output is CSV (not Parquet) so survivor files are easy to inspect (head/
+less/grep) in the shared work directory; the library store itself stays
+Parquet. The chunk is read directly from wherever the library lives — no
+copy or symlink of library data is made into the work directory.
 
 The chemprop inference calls (featurizer, MoleculeDatapoint.from_smi,
 MPNN.load_from_checkpoint, pl.Trainer(...).predict, unscale-transform
@@ -205,7 +213,7 @@ _REQUIRED_INPUT_COLUMNS = (
 
 def _write_empty_output(output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(columns=list(OUTPUT_COLUMNS)).to_parquet(output_path, index=False)
+    pd.DataFrame(columns=list(OUTPUT_COLUMNS)).to_csv(output_path, index=False)
 
 
 def apply_property_filter(df: pd.DataFrame, bounds: _Bounds) -> pd.DataFrame:
@@ -299,52 +307,87 @@ def infer_chunk(
     num_workers: int = 0,
     accelerator: str = "cpu",
     devices: str = "1",
+    block_size: int = 100_000,
 ) -> int:
-    """Filter + predict one library chunk; write the surviving rows.
+    """Filter + predict one library chunk in sub-blocks; write surviving rows as CSV.
+
+    The chunk is streamed via :func:`pyarrow.parquet.ParquetFile.iter_batches`
+    in slices of ``block_size`` rows so peak memory (the DataFrame plus the
+    chemprop featurized graphs) is bounded by the slice, independent of the
+    chunk's total size.  Only the small post-selection survivor set is held
+    across blocks and written to ``output_path`` as CSV.
 
     :returns: number of rows written to ``output_path``.
     """
-    df = pd.read_parquet(chunk_path)
-    missing = [c for c in _REQUIRED_INPUT_COLUMNS if c not in df.columns]
+    import pyarrow.parquet as pq
+
+    pqf = pq.ParquetFile(chunk_path)
+    schema_names = set(pqf.schema_arrow.names)
+    missing = [c for c in _REQUIRED_INPUT_COLUMNS if c not in schema_names]
     if missing:
         raise ValueError(f"{chunk_path}: missing required columns {missing}")
 
-    survivors = apply_property_filter(df, bounds)
-    logger.info(
-        "%s: %d/%d rows survived property filter", chunk_path, len(survivors), len(df)
-    )
-    if not survivors.empty and smarts is not None and smarts.active:
-        before = len(survivors)
-        survivors = apply_smarts_filter(survivors, smarts)
-        logger.info(
-            "%s: %d/%d rows survived SMARTS filter", chunk_path, len(survivors), before
+    collected: list[pd.DataFrame] = []
+    total_in = 0
+    total_prop_survivors = 0
+    for batch in pqf.iter_batches(
+        batch_size=max(1, block_size), columns=list(_REQUIRED_INPUT_COLUMNS)
+    ):
+        block = batch.to_pandas()
+        total_in += len(block)
+
+        survivors = apply_property_filter(block, bounds)
+        del block
+        if not survivors.empty and smarts is not None and smarts.active:
+            survivors = apply_smarts_filter(survivors, smarts)
+        if survivors.empty:
+            continue
+        total_prop_survivors += len(survivors)
+
+        pred_scores = predict_scores(
+            survivors["smiles"].astype(str).tolist(),
+            str(model_dir),
+            batch_size,
+            num_workers,
+            accelerator,
+            devices,
         )
-    if survivors.empty:
+        n = min(len(pred_scores), len(survivors))
+        survivors = survivors.iloc[:n].copy()
+        survivors["pred_score"] = pred_scores[:n]
+
+        # score_cutoff is a per-row predicate, so applying it per block keeps
+        # the accumulated survivor set small. top_n_per_chunk is bounded the
+        # same way: trimming each block to its own best top_n rows can never
+        # drop a true global winner (a chunk-wide top-N row has at most N-1
+        # better-scoring rows in the whole chunk, so it is always within its
+        # block's top-N), while capping accumulation at n_blocks * top_n
+        # instead of "every predicted survivor" (see plan §5.4).
+        if score_cutoff is not None:
+            survivors = survivors.loc[survivors["pred_score"] <= score_cutoff]
+        elif top_n_per_chunk is not None:
+            survivors = survivors.nsmallest(top_n_per_chunk, "pred_score")
+
+        out_block = survivors[["reghash", "smiles", "compound_id", "pred_score"]]
+        if not out_block.empty:
+            collected.append(out_block.reset_index(drop=True))
+        del survivors
+
+    logger.info(
+        "%s: %d rows read, %d property/SMARTS survivors predicted",
+        chunk_path, total_in, total_prop_survivors,
+    )
+    if not collected:
         _write_empty_output(output_path)
         return 0
 
-    pred_scores = predict_scores(
-        survivors["smiles"].astype(str).tolist(),
-        str(model_dir),
-        batch_size,
-        num_workers,
-        accelerator,
-        devices,
-    )
-    n = min(len(pred_scores), len(survivors))
-    survivors = survivors.iloc[:n].copy()
-    survivors["pred_score"] = pred_scores[:n]
+    out_df = pd.concat(collected, ignore_index=True)
+    if score_cutoff is None and top_n_per_chunk is not None:
+        out_df = out_df.nsmallest(top_n_per_chunk, "pred_score")
+    out_df = out_df.reset_index(drop=True)
 
-    if score_cutoff is not None:
-        survivors = survivors.loc[survivors["pred_score"] <= score_cutoff]
-    elif top_n_per_chunk is not None:
-        survivors = survivors.nsmallest(top_n_per_chunk, "pred_score")
-
-    out_df = survivors[["reghash", "smiles", "compound_id", "pred_score"]].reset_index(
-        drop=True
-    )
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    out_df.to_parquet(output_path, index=False)
+    out_df.to_csv(output_path, index=False)
     logger.info("wrote %d rows -> %s", len(out_df), output_path)
     return len(out_df)
 
@@ -359,7 +402,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("chunk", help="Input library Parquet chunk")
     parser.add_argument("model_dir", help="Trained chemprop model directory")
     parser.add_argument(
-        "output", help="Output Parquet path (reghash,smiles,compound_id,pred_score)"
+        "output", help="Output CSV path (reghash,smiles,compound_id,pred_score)"
     )
     parser.add_argument("--params", required=True, help="Property bounds file (12 lines)")
     parser.add_argument(
@@ -380,6 +423,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--accelerator", type=str, default="cpu")
     parser.add_argument("--devices", type=str, default="1")
+    parser.add_argument(
+        "--block-size",
+        type=int,
+        default=100_000,
+        help=(
+            "Number of rows read/predicted per streamed sub-block. Bounds peak "
+            "memory independent of the chunk's total row count."
+        ),
+    )
     return parser
 
 
@@ -421,6 +473,7 @@ def main(argv: list[str] | None = None) -> int:
         num_workers=args.num_workers,
         accelerator=args.accelerator,
         devices=args.devices,
+        block_size=args.block_size,
     )
     return 0
 

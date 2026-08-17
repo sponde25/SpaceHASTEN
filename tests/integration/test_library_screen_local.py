@@ -60,7 +60,7 @@ elif top_n_per_chunk is not None:
     df = df.nsmallest(int(top_n_per_chunk), "pred_score")
 
 pathlib.Path(out_path).parent.mkdir(parents=True, exist_ok=True)
-df[["reghash", "smiles", "compound_id", "pred_score"]].to_parquet(out_path, index=False)
+df[["reghash", "smiles", "compound_id", "pred_score"]].to_csv(out_path, index=False)
 '''
 
 _PERMISSIVE_PROPS = PropertyRanges.model_validate({

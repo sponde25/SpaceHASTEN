@@ -16,7 +16,7 @@ from spacehasten.config.properties import PropertyRanges
 from spacehasten.stages.library_screen import (
     _build_infer_command,
     _ingest_predictions,
-    _prepare_missing_chunks,
+    _prepare_chunk_list,
     _write_control_param,
     _write_smarts_param,
 )
@@ -71,11 +71,15 @@ def test_build_infer_command_omits_smarts_flag_by_default(tmp_path: Path) -> Non
     from spacehasten.config.settings import Settings
 
     cmd = _build_infer_command(
-        tmp_path / "results", tmp_path / "model", tmp_path / "control.param",
+        tmp_path / "model", tmp_path / "control.param",
         Settings(), ["python", "-m", "spacehasten.remote.library_infer"],
         top_n=None, cutoff=-8.0,
     )
     assert "--smarts" not in cmd
+    # Chunk is read from chunks.txt by task id; output is CSV.
+    assert 'sed -n "${TASK_ID}p" inputs/chunks.txt' in cmd
+    assert 'results/predicted_${CHUNK_STEM}.csv' in cmd
+    assert "--block-size" in cmd
 
 
 def test_build_infer_command_includes_smarts_flag_when_given(tmp_path: Path) -> None:
@@ -83,14 +87,14 @@ def test_build_infer_command_includes_smarts_flag_when_given(tmp_path: Path) -> 
 
     smarts_path = tmp_path / "inputs" / "smarts.txt"
     cmd = _build_infer_command(
-        tmp_path / "results", tmp_path / "model", tmp_path / "control.param",
+        tmp_path / "model", tmp_path / "control.param",
         Settings(), ["python", "-m", "spacehasten.remote.library_infer"],
         top_n=None, cutoff=-8.0, smarts_path=smarts_path,
     )
     assert f"--smarts {smarts_path}" in cmd
 
 
-def test_prepare_missing_chunks_skips_existing_outputs(tmp_path: Path) -> None:
+def test_prepare_chunk_list_skips_existing_outputs(tmp_path: Path) -> None:
     chunk_a = tmp_path / "chunk_00000.parquet"
     chunk_b = tmp_path / "chunk_00001.parquet"
     chunk_a.write_bytes(b"a")
@@ -99,17 +103,18 @@ def test_prepare_missing_chunks_skips_existing_outputs(tmp_path: Path) -> None:
     inputs_dir = tmp_path / "inputs"
     results_dir = tmp_path / "results"
     results_dir.mkdir()
-    # chunk_00000 already has a predicted output -> should be skipped.
-    (results_dir / "predicted_chunk_00000.parquet").write_bytes(b"done")
+    # chunk_00000 already has a predicted CSV output -> should be skipped.
+    (results_dir / "predicted_chunk_00000.csv").write_text("reghash\n")
 
-    links = _prepare_missing_chunks([chunk_a, chunk_b], inputs_dir, results_dir)
+    pending = _prepare_chunk_list([chunk_a, chunk_b], inputs_dir, results_dir)
 
-    assert len(links) == 1
-    assert links[0].name == "infer_1.parquet"
-    assert links[0].resolve() == chunk_b.resolve()
+    assert len(pending) == 1
+    assert pending[0] == chunk_b.resolve()
+    listed = (inputs_dir / "chunks.txt").read_text().splitlines()
+    assert listed == [str(chunk_b.resolve())]
 
 
-def test_prepare_missing_chunks_all_pending(tmp_path: Path) -> None:
+def test_prepare_chunk_list_all_pending(tmp_path: Path) -> None:
     chunk_a = tmp_path / "chunk_00000.parquet"
     chunk_b = tmp_path / "chunk_00001.parquet"
     chunk_a.write_bytes(b"a")
@@ -118,28 +123,28 @@ def test_prepare_missing_chunks_all_pending(tmp_path: Path) -> None:
     inputs_dir = tmp_path / "inputs"
     results_dir = tmp_path / "results"
 
-    links = _prepare_missing_chunks([chunk_a, chunk_b], inputs_dir, results_dir)
-    assert [link.name for link in links] == ["infer_1.parquet", "infer_2.parquet"]
-    assert links[0].resolve() == chunk_a.resolve()
-    assert links[1].resolve() == chunk_b.resolve()
+    pending = _prepare_chunk_list([chunk_a, chunk_b], inputs_dir, results_dir)
+    assert pending == [chunk_a.resolve(), chunk_b.resolve()]
+    listed = (inputs_dir / "chunks.txt").read_text().splitlines()
+    assert listed == [str(chunk_a.resolve()), str(chunk_b.resolve())]
 
 
-def test_prepare_missing_chunks_clears_stale_symlinks(tmp_path: Path) -> None:
+def test_prepare_chunk_list_overwrites_stale_list(tmp_path: Path) -> None:
     chunk_a = tmp_path / "chunk_00000.parquet"
     chunk_a.write_bytes(b"a")
     inputs_dir = tmp_path / "inputs"
     results_dir = tmp_path / "results"
     inputs_dir.mkdir()
-    stale = inputs_dir / "infer_1.parquet"
-    stale.symlink_to(tmp_path / "does-not-exist.parquet")
+    (inputs_dir / "chunks.txt").write_text("/old/stale/path.parquet\n")
 
-    links = _prepare_missing_chunks([chunk_a], inputs_dir, results_dir)
-    assert len(links) == 1
-    assert links[0].resolve() == chunk_a.resolve()
+    pending = _prepare_chunk_list([chunk_a], inputs_dir, results_dir)
+    assert pending == [chunk_a.resolve()]
+    listed = (inputs_dir / "chunks.txt").read_text().splitlines()
+    assert listed == [str(chunk_a.resolve())]
 
 
 def _write_pred_chunk(path: Path, rows: list[dict]) -> None:
-    pd.DataFrame(rows).to_parquet(path, index=False)
+    pd.DataFrame(rows).to_csv(path, index=False)
 
 
 def test_ingest_predictions_dedups_keeping_min_score(tmp_path: Path) -> None:
@@ -148,12 +153,12 @@ def test_ingest_predictions_dedups_keeping_min_score(tmp_path: Path) -> None:
     results_dir = tmp_path / "results"
     results_dir.mkdir()
 
-    _write_pred_chunk(results_dir / "predicted_chunk_00000.parquet", [
+    _write_pred_chunk(results_dir / "predicted_chunk_00000.csv", [
         {"reghash": "h1", "smiles": "CCO", "compound_id": "ENA-1", "pred_score": -5.0},
         {"reghash": "h2", "smiles": "CCN", "compound_id": "ENA-2", "pred_score": -3.0},
     ])
     # h1 reappears with a better (more negative) score in the second chunk.
-    _write_pred_chunk(results_dir / "predicted_chunk_00001.parquet", [
+    _write_pred_chunk(results_dir / "predicted_chunk_00001.csv", [
         {"reghash": "h1", "smiles": "CCO", "compound_id": "ENA-1-dup", "pred_score": -9.0},
         {"reghash": "h3", "smiles": "CCC", "compound_id": "ENA-3", "pred_score": -1.0},
     ])
